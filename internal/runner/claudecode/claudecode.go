@@ -120,8 +120,7 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 			return runner.Result{}, err
 		}
 	}
-	argv := append([]string(nil), r.cfg.Command...)
-	argv = append(argv, argsForProfile(profile)...)
+	argv := r.argv(req, profile)
 	if req.Metadata.ResumeSessionID != "" {
 		argv = append(argv, "--resume", req.Metadata.ResumeSessionID)
 	}
@@ -156,6 +155,15 @@ func (r *Runner) profile(name string) (ProfileConfig, error) {
 		return ProfileConfig{}, runner.E(runner.ErrProfileUnavailable, "select claude profile", fmt.Errorf("%q", name))
 	}
 	return profile, nil
+}
+
+func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
+	argv := append([]string(nil), r.cfg.Command...)
+	argv = append(argv, argsForProfile(profile)...)
+	if req.Metadata.MCPConfigFile != "" {
+		argv = append(argv, "--mcp-config", req.Metadata.MCPConfigFile, "--strict-mcp-config")
+	}
+	return argv
 }
 
 func argsForProfile(profile ProfileConfig) []string {

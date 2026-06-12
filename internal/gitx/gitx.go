@@ -166,6 +166,10 @@ func (r *Repository) RemoveWorktree(ctx context.Context, path string) error {
 	return r.run(ctx, "worktree", "remove", "--force", path)
 }
 
+func (r *Repository) PruneWorktrees(ctx context.Context) error {
+	return r.run(ctx, "worktree", "prune")
+}
+
 func (r *Repository) AddAll(ctx context.Context) error {
 	return r.run(ctx, "add", "-A")
 }

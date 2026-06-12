@@ -85,18 +85,17 @@ func cmdUp(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := failClosedRestart(ctx, st, auditWriter); err != nil {
+	if err := failClosedRestart(ctx, cfg.Node.DataDir, st, auditWriter); err != nil {
 		return err
 	}
-	if err := cleanupRetainedTaskArtifacts(ctx, cfg, st); err != nil {
-		return err
-	}
+	warnCleanup(cleanupRetainedTaskArtifacts(ctx, cfg, st))
 	resolver := tsid.NewResolver()
 	mesh := &meshrpc.Server{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine, Identity: resolver, Runners: registry}
 	local := &gateway.Gateway{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine}
 	errCh := make(chan error, 2)
 	go func() { errCh <- mesh.ListenAndServe(ctx) }()
 	go func() { errCh <- local.ListenAndServe(ctx) }()
+	go cleanupLoop(ctx, cfg, st)
 	meshAddr, _ := mesh.BindAddress(ctx)
 	fmt.Printf("cmesh up: mesh=%s gateway=127.0.0.1:%d\n", meshAddr, cfg.Node.MCPPort)
 	select {
@@ -333,7 +332,7 @@ func applyManifestPath(run runner.Runner, path string) (runner.Runner, error) {
 	return manifestOverrideRunner{Runner: run, manifest: manifest}, nil
 }
 
-func failClosedRestart(ctx context.Context, st *store.Store, auditWriter *audit.Writer) error {
+func failClosedRestart(ctx context.Context, dataDir string, st *store.Store, auditWriter *audit.Writer) error {
 	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning)
 	if err != nil {
 		return err
@@ -343,6 +342,7 @@ func failClosedRestart(ctx context.Context, st *store.Store, auditWriter *audit.
 		if err != nil {
 			return err
 		}
+		warnCleanup(cleanupTaskSecrets(dataDir, updated.ID))
 		event, err := auditWriter.Append(audit.Event{
 			Type:           "task.failed",
 			TaskID:         updated.ID,
@@ -368,22 +368,89 @@ func cleanupRetainedTaskArtifacts(ctx context.Context, cfg *config.Config, st *s
 	if err != nil {
 		return err
 	}
+	var cleanupErr error
 	for _, rec := range tasks {
-		if err := cleanupTaskFiles(cfg.Node.DataDir, rec.ID); err != nil {
-			return err
+		if err := cleanupTaskArtifacts(ctx, cfg.Node.DataDir, rec); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
 		}
-		if rec.Result != nil && rec.Result.Branch != "" {
-			repo, err := gitx.Open(rec.CWD)
-			if err == nil {
-				_ = repo.DeleteBranch(ctx, rec.Result.Branch)
+	}
+	if _, err = st.DeleteExpiredIdempotencyRecords(ctx, time.Now().UTC()); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	return cleanupErr
+}
+
+func cleanupLoop(ctx context.Context, cfg *config.Config, st *store.Store) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			warnCleanup(cleanupRetainedTaskArtifacts(ctx, cfg, st))
+		}
+	}
+}
+
+func warnCleanup(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmesh cleanup warning: %v\n", err)
+	}
+}
+
+func cleanupTaskArtifacts(ctx context.Context, dataDir string, rec task.Record) error {
+	var cleanupErr error
+	var repo *gitx.Repository
+	if rec.Result != nil && rec.Result.Branch != "" {
+		opened, err := gitx.Open(rec.CWD)
+		if err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			repo = opened
+		}
+		if worktreePath := stringValue(rec.Result.RunnerExtra, "worktree_path"); worktreePath != "" {
+			if repo != nil {
+				if err := repo.RemoveWorktree(ctx, filepath.FromSlash(worktreePath)); err != nil {
+					cleanupErr = errors.Join(cleanupErr, err)
+				}
+			} else if err := os.RemoveAll(filepath.FromSlash(worktreePath)); err != nil {
+				cleanupErr = errors.Join(cleanupErr, err)
 			}
 		}
 	}
-	_, err = st.DeleteExpiredIdempotencyRecords(ctx, time.Now().UTC())
-	return err
+	if err := cleanupTaskFiles(dataDir, rec.ID); err != nil {
+		cleanupErr = errors.Join(cleanupErr, err)
+	}
+	if rec.Result != nil && rec.Result.Branch != "" && repo != nil {
+		if err := repo.PruneWorktrees(ctx); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		if err := repo.DeleteBranch(ctx, rec.Result.Branch); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	return cleanupErr
 }
 
 func cleanupTaskFiles(dataDir, taskID string) error {
+	if err := cleanupTaskSecrets(dataDir, taskID); err != nil {
+		return err
+	}
+	contextPath := filepath.Join(dataDir, "task-contexts", taskID+".json")
+	for _, path := range []string{
+		contextPath,
+		filepath.Join(dataDir, "artifacts", taskID+".bundle"),
+		filepath.Join(dataDir, "worktrees", taskID),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanupTaskSecrets(dataDir, taskID string) error {
 	contextPath := filepath.Join(dataDir, "task-contexts", taskID+".json")
 	if body, err := os.ReadFile(contextPath); err == nil {
 		var raw struct {
@@ -395,16 +462,20 @@ func cleanupTaskFiles(dataDir, taskID string) error {
 			}
 		}
 	}
-	for _, path := range []string{
-		contextPath,
-		filepath.Join(dataDir, "artifacts", taskID+".bundle"),
-		filepath.Join(dataDir, "worktrees", taskID),
-	} {
-		if err := os.RemoveAll(path); err != nil {
-			return err
-		}
+	if err := os.Remove(filepath.Join(dataDir, "task-mcp", taskID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
+}
+
+func stringValue(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	if value, ok := values[key].(string); ok {
+		return value
+	}
+	return ""
 }
 
 func usage() {

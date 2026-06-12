@@ -62,7 +62,7 @@ cmesh does not trust identity headers. The loopback gateway rejects forwarded id
 
 ### A worker trying to forge delegation provenance
 
-Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context and exposes a task token to that runner as `CMESH_TASK_TOKEN`. If that worker delegates again, it should pass the token as `task_token`; the worker's local gateway maps the token back to the stored task context and derives the origin, delegation chain, and hop count server-side.
+Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and writes a task-scoped MCP config with `Authorization: Bearer <task-token>`. The Claude Code runner loads that file with `--mcp-config` and `--strict-mcp-config`, so MCP calls from the worker carry the token structurally even when the gateway requires `host_token`.
 
 Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. They are ignored when a task token is present, and they are not authoritative for subdelegation policy. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance.
 
@@ -99,7 +99,8 @@ It also avoids common footguns:
 - no daemon-to-daemon bearer token in Tailscale mode;
 - no trust in forwarded identity headers;
 - no silent task loss on restart;
-- no automatic inlining of full transcripts into agent context.
+- no automatic inlining of full transcripts into agent context;
+- no long-lived task token after the worker reaches a terminal state.
 
 ## What cmesh does not protect by itself
 

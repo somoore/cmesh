@@ -2,8 +2,10 @@ package rpc
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -87,6 +89,64 @@ func TestEffectiveRuntimeLimitHasDefaultCeiling(t *testing.T) {
 	}
 	if got := server.effectiveRuntimeLimit("dev", 30); got != 30*time.Second {
 		t.Fatalf("short requested timeout = %v, want 30s", got)
+	}
+}
+
+func TestTaskMCPConfigCarriesTaskTokenAndSecretsAreRemoved(t *testing.T) {
+	dataDir := t.TempDir()
+	metadata := runner.TaskMetadata{
+		TaskID:          "task-1",
+		OriginNodeID:    "origin",
+		OriginSessionID: "session",
+		WorkerNodeID:    "worker",
+		Runner:          "fake",
+		Profile:         "dev",
+		DelegationChain: []string{"origin", "worker"},
+		HopCount:        1,
+		TaskToken:       "task-token",
+	}
+	if _, err := writeTaskContextFile(dataDir, metadata); err != nil {
+		t.Fatalf("writeTaskContextFile: %v", err)
+	}
+	mcpPath, err := writeTaskMCPConfigFile(dataDir, 7777, metadata)
+	if err != nil {
+		t.Fatalf("writeTaskMCPConfigFile: %v", err)
+	}
+	body, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var raw struct {
+		MCPServers map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	cmesh := raw.MCPServers["cmesh"]
+	if cmesh.Type != "http" || cmesh.URL != "http://127.0.0.1:7777/mcp" {
+		t.Fatalf("cmesh MCP server = %+v", cmesh)
+	}
+	if got := cmesh.Headers["Authorization"]; got != "Bearer task-token" {
+		t.Fatalf("Authorization header = %q", got)
+	}
+
+	hash := task.SHA256Hex([]byte("task-token"))
+	tokenPath := filepath.Join(dataDir, taskTokenDirName, hash+".json")
+	if _, err := os.Stat(tokenPath); err != nil {
+		t.Fatalf("token context missing before removal: %v", err)
+	}
+	if err := removeTaskSecrets(dataDir, "task-1"); err != nil {
+		t.Fatalf("removeTaskSecrets: %v", err)
+	}
+	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {
+		t.Fatalf("token context still exists or unexpected error: %v", err)
+	}
+	if _, err := os.Stat(mcpPath); !os.IsNotExist(err) {
+		t.Fatalf("MCP config still exists or unexpected error: %v", err)
 	}
 }
 

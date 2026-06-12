@@ -40,6 +40,34 @@ func TestHardenLocalRequiresHostTokenWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestHardenLocalAcceptsTaskTokenWhenHostTokenConfigured(t *testing.T) {
+	want := gatewayProvenance{OriginNodeID: "origin", OriginSessionID: "session", Chain: []string{"origin", "worker"}, HopCount: 1}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, ok := r.Context().Value(provenanceContextKey{}).(gatewayProvenance)
+		if !ok {
+			t.Fatalf("missing provenance context")
+		}
+		if got.OriginNodeID != want.OriginNodeID || got.OriginSessionID != want.OriginSessionID || got.HopCount != want.HopCount {
+			t.Fatalf("provenance = %+v, want %+v", got, want)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := hardenLocalWithLookup(next, "host-secret", func(token string) (gatewayProvenance, error) {
+		if token != "task-token" {
+			t.Fatalf("lookup token = %q", token)
+		}
+		return want, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", nil)
+	req.Header.Set("Authorization", "Bearer task-token")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status with task token = %d, want no content", res.Code)
+	}
+}
+
 func TestStatusFallsBackToMirroredPeerTask(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)

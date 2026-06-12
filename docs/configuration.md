@@ -116,6 +116,17 @@ Supported runner adapters:
 - `claude-code`
 - `codex`
 
+## Gateway
+
+`[gateway]` controls the local loopback MCP gateway:
+
+```toml
+[gateway]
+host_token = "local-random-secret"
+```
+
+When `host_token` is set, the gateway rejects tokenless local MCP requests. Claude Code worker subdelegation still works because cmesh writes a per-task MCP config with a bearer task token and launches the runner with that config. Task tokens are removed when the worker task reaches a terminal state.
+
 ## Peers
 
 Peers are static in the current implementation:
@@ -129,4 +140,3 @@ port = 7778
 ```
 
 Use the peer's Tailscale IP for `address`.
-

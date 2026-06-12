@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -817,7 +818,7 @@ func hardenLocalWithLookup(next http.Handler, hostToken string, lookup func(stri
 		}
 		token := requestHostToken(r)
 		if hostToken != "" {
-			if token == hostToken {
+			if validHostToken(r, hostToken) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -844,7 +845,7 @@ func hardenLocalWithLookup(next http.Handler, hostToken string, lookup func(stri
 }
 
 func validHostToken(r *http.Request, hostToken string) bool {
-	return requestHostToken(r) == hostToken
+	return subtle.ConstantTimeCompare([]byte(requestHostToken(r)), []byte(hostToken)) == 1
 }
 
 func requestHostToken(r *http.Request) string {
