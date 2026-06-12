@@ -107,6 +107,9 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	if strings.TrimSpace(req.Prompt) == "" {
 		return runner.Result{}, runner.E(runner.ErrWorkerFailed, "validate prompt", errors.New("empty prompt"))
 	}
+	if req.Metadata.ResumeSessionID != "" {
+		return runner.Result{}, runner.E(runner.ErrWorkerFailed, "resume codex session", errors.New("codex runner does not support resume_session_id"))
+	}
 	argv := r.argv(req, profile)
 	env := merge(profile.Env, req.Env)
 	ctx := req.Context

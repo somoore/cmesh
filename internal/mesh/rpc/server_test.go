@@ -75,6 +75,21 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 	}
 }
 
+func TestEffectiveRuntimeLimitHasDefaultCeiling(t *testing.T) {
+	server := &Server{Config: &config.Config{Profiles: map[string]config.ProfileConfig{
+		"dev": {Runner: "fake"},
+	}}}
+	if got := server.effectiveRuntimeLimit("dev", 0); got != defaultRuntimeLimit {
+		t.Fatalf("default timeout = %v, want %v", got, defaultRuntimeLimit)
+	}
+	if got := server.effectiveRuntimeLimit("dev", int((defaultRuntimeLimit+time.Hour)/time.Second)); got != defaultRuntimeLimit {
+		t.Fatalf("oversized requested timeout = %v, want %v", got, defaultRuntimeLimit)
+	}
+	if got := server.effectiveRuntimeLimit("dev", 30); got != 30*time.Second {
+		t.Fatalf("short requested timeout = %v, want 30s", got)
+	}
+}
+
 func newTestServer(t *testing.T, root string, run runner.Runner) *Server {
 	t.Helper()
 	cfg := &config.Config{

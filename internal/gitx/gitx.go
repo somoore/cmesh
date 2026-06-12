@@ -136,6 +136,16 @@ func (r *Repository) CheckoutBranch(ctx context.Context, branch string) error {
 	return r.run(ctx, "checkout", "-B", branch)
 }
 
+func (r *Repository) CheckoutBranchAt(ctx context.Context, branch, base string) error {
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	if strings.TrimSpace(base) == "" {
+		base = "HEAD"
+	}
+	return r.run(ctx, "checkout", "-B", branch, base)
+}
+
 func (r *Repository) AddWorktree(ctx context.Context, path, branch, base string) error {
 	if strings.TrimSpace(path) == "" {
 		return errors.New("empty worktree path")

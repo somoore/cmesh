@@ -30,17 +30,20 @@ type Gateway struct {
 }
 
 type DelegateRequest struct {
-	Peer            string `json:"peer"`
-	Prompt          string `json:"prompt"`
-	CWD             string `json:"cwd"`
-	Runner          string `json:"runner,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	TimeoutSeconds  int    `json:"timeout_s,omitempty"`
-	Wait            bool   `json:"wait,omitempty"`
-	AllowDirty      bool   `json:"allow_dirty,omitempty"`
-	OriginSessionID string `json:"origin_session_id,omitempty"`
-	IdempotencyKey  string `json:"idempotency_key,omitempty"`
-	FollowupTaskID  string `json:"followup_task_id,omitempty"`
+	Peer            string   `json:"peer"`
+	Prompt          string   `json:"prompt"`
+	CWD             string   `json:"cwd"`
+	Runner          string   `json:"runner,omitempty"`
+	Profile         string   `json:"profile,omitempty"`
+	TimeoutSeconds  int      `json:"timeout_s,omitempty"`
+	Wait            bool     `json:"wait,omitempty"`
+	AllowDirty      bool     `json:"allow_dirty,omitempty"`
+	OriginNodeID    string   `json:"origin_node_id,omitempty"`
+	OriginSessionID string   `json:"origin_session_id,omitempty"`
+	DelegationChain []string `json:"delegation_chain,omitempty"`
+	HopCount        int      `json:"hop_count,omitempty"`
+	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
+	FollowupTaskID  string   `json:"followup_task_id,omitempty"`
 }
 
 type ToolResponse struct {
@@ -354,7 +357,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if !ok {
 		return toolFailure(task.ErrorPeerUnreachable, "unknown peer "+req.Peer)
 	}
-	prov := g.currentProvenance()
+	prov := g.currentProvenance(req)
 	sessionID := req.OriginSessionID
 	if sessionID == "" {
 		sessionID = firstNonEmpty(prov.OriginSessionID, "gateway-default")
@@ -397,24 +400,32 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
 	resumeSessionID := ""
+	followupBaseCommit := ""
 	if req.FollowupTaskID != "" {
 		if result, err := client.TaskResult(ctx, followupPeerTask.RemoteTaskID); err == nil && result.Result != nil {
 			resumeSessionID = stringValue(result.Result.RunnerExtra, "session_id")
+			followupBaseCommit = result.Result.HeadCommit
+		} else {
+			return toolFailure(task.ErrorWorkerFailed, "followup task result is not available; cannot resume file state")
+		}
+		if followupBaseCommit == "" {
+			return toolFailure(task.ErrorWorkerFailed, "followup task result has no head_commit; cannot branch from prior task state")
 		}
 	}
 	resp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
-		TaskID:          taskID,
-		OriginNodeID:    originNodeID,
-		OriginSessionID: sessionID,
-		Prompt:          req.Prompt,
-		CWD:             req.CWD,
-		Runner:          req.Runner,
-		Profile:         req.Profile,
-		TimeoutSeconds:  req.TimeoutSeconds,
-		Wait:            req.Wait,
-		AllowDirty:      req.AllowDirty,
-		FollowupTaskID:  req.FollowupTaskID,
-		ResumeSessionID: resumeSessionID,
+		TaskID:             taskID,
+		OriginNodeID:       originNodeID,
+		OriginSessionID:    sessionID,
+		Prompt:             req.Prompt,
+		CWD:                req.CWD,
+		Runner:             req.Runner,
+		Profile:            req.Profile,
+		TimeoutSeconds:     req.TimeoutSeconds,
+		Wait:               req.Wait,
+		AllowDirty:         req.AllowDirty,
+		FollowupTaskID:     req.FollowupTaskID,
+		FollowupBaseCommit: followupBaseCommit,
+		ResumeSessionID:    resumeSessionID,
 		Provenance: schema.Provenance{
 			OriginNodeID:    originNodeID,
 			OriginSessionID: sessionID,
@@ -664,8 +675,17 @@ type gatewayProvenance struct {
 	HopCount        int
 }
 
-func (g *Gateway) currentProvenance() gatewayProvenance {
+func (g *Gateway) currentProvenance(req DelegateRequest) gatewayProvenance {
 	prov := gatewayProvenance{
+		OriginNodeID:    req.OriginNodeID,
+		OriginSessionID: req.OriginSessionID,
+		Chain:           append([]string(nil), req.DelegationChain...),
+		HopCount:        req.HopCount,
+	}
+	if prov.OriginNodeID != "" || prov.OriginSessionID != "" || len(prov.Chain) > 0 || prov.HopCount > 0 {
+		return prov
+	}
+	prov = gatewayProvenance{
 		OriginNodeID:    os.Getenv("CMESH_ORIGIN_NODE_ID"),
 		OriginSessionID: os.Getenv("CMESH_ORIGIN_SESSION_ID"),
 	}
@@ -833,7 +853,10 @@ func mcpTools() []map[string]any {
 				"timeout_s":         map[string]any{"type": "integer", "minimum": 1},
 				"wait":              map[string]any{"type": "boolean"},
 				"allow_dirty":       map[string]any{"type": "boolean"},
+				"origin_node_id":    stringSchema("Optional origin node id. Subdelegating workers must copy this from task context."),
 				"origin_session_id": stringSchema("Optional stable origin session id for idempotency."),
+				"delegation_chain":  arraySchema(stringSchema("Node id already in the delegation path. Subdelegating workers must copy this from task context.")),
+				"hop_count":         map[string]any{"type": "integer", "minimum": 0},
 				"idempotency_key":   stringSchema("Optional stable key for retry-safe delegation."),
 				"followup_task_id":  stringSchema("Optional previous task id to continue on the same peer/session."),
 			}, []string{"peer", "prompt", "cwd"}),
@@ -893,6 +916,10 @@ func objectSchema(properties map[string]any, required []string) map[string]any {
 		"required":             required,
 		"additionalProperties": false,
 	}
+}
+
+func arraySchema(items map[string]any) map[string]any {
+	return map[string]any{"type": "array", "items": items}
 }
 
 func stringSchema(description string) map[string]any {

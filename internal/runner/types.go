@@ -115,6 +115,7 @@ type TaskMetadata struct {
 	DelegationChain []string
 	HopCount        int
 	ResumeSessionID string
+	ContextFile     string
 }
 
 type Result struct {

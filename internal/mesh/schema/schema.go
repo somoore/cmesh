@@ -53,19 +53,20 @@ type Provenance struct {
 }
 
 type CreateTaskRequest struct {
-	TaskID          string     `json:"task_id"`
-	OriginNodeID    string     `json:"origin_node_id"`
-	OriginSessionID string     `json:"origin_session_id"`
-	Prompt          string     `json:"prompt"`
-	CWD             string     `json:"cwd"`
-	Runner          string     `json:"runner,omitempty"`
-	Profile         string     `json:"profile,omitempty"`
-	TimeoutSeconds  int        `json:"timeout_s,omitempty"`
-	Wait            bool       `json:"wait,omitempty"`
-	AllowDirty      bool       `json:"allow_dirty,omitempty"`
-	FollowupTaskID  string     `json:"followup_task_id,omitempty"`
-	ResumeSessionID string     `json:"resume_session_id,omitempty"`
-	Provenance      Provenance `json:"provenance"`
+	TaskID             string     `json:"task_id"`
+	OriginNodeID       string     `json:"origin_node_id"`
+	OriginSessionID    string     `json:"origin_session_id"`
+	Prompt             string     `json:"prompt"`
+	CWD                string     `json:"cwd"`
+	Runner             string     `json:"runner,omitempty"`
+	Profile            string     `json:"profile,omitempty"`
+	TimeoutSeconds     int        `json:"timeout_s,omitempty"`
+	Wait               bool       `json:"wait,omitempty"`
+	AllowDirty         bool       `json:"allow_dirty,omitempty"`
+	FollowupTaskID     string     `json:"followup_task_id,omitempty"`
+	FollowupBaseCommit string     `json:"followup_base_commit,omitempty"`
+	ResumeSessionID    string     `json:"resume_session_id,omitempty"`
+	Provenance         Provenance `json:"provenance"`
 }
 
 type CreateTaskResponse struct {

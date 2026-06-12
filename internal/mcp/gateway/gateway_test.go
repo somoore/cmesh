@@ -83,6 +83,30 @@ func TestListTasksIncludesDelegatedMirror(t *testing.T) {
 	}
 }
 
+func TestCurrentProvenancePrefersDelegateRequest(t *testing.T) {
+	t.Setenv("CMESH_ORIGIN_NODE_ID", "ambient-origin")
+	t.Setenv("CMESH_ORIGIN_SESSION_ID", "ambient-session")
+	t.Setenv("CMESH_DELEGATION_CHAIN", `["ambient"]`)
+	t.Setenv("CMESH_HOP_COUNT", "9")
+
+	g := newTestGateway(t)
+	prov := g.currentProvenance(DelegateRequest{
+		OriginNodeID:    "wire-origin",
+		OriginSessionID: "wire-session",
+		DelegationChain: []string{"wire-origin", "wire-worker"},
+		HopCount:        1,
+	})
+	if prov.OriginNodeID != "wire-origin" || prov.OriginSessionID != "wire-session" {
+		t.Fatalf("origin provenance = %+v", prov)
+	}
+	if prov.HopCount != 1 {
+		t.Fatalf("hop count = %d, want 1", prov.HopCount)
+	}
+	if len(prov.Chain) != 2 || prov.Chain[0] != "wire-origin" || prov.Chain[1] != "wire-worker" {
+		t.Fatalf("chain = %+v", prov.Chain)
+	}
+}
+
 func newTestGateway(t *testing.T) *Gateway {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "cmesh.db"))
