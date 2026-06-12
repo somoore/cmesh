@@ -29,8 +29,7 @@ import (
 const (
 	maxRequestBytes     = 2 << 20
 	defaultRuntimeLimit = 2 * time.Hour
-	taskContextFileName = "task-context.json"
-	taskContextDirName  = ".cmesh"
+	taskContextDirName  = "task-contexts"
 )
 
 type Server struct {
@@ -302,7 +301,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		ResumeSessionID: req.ResumeSessionID,
 	}
 	if gitPrep.WorkDir != "" {
-		contextPath, err := writeTaskContextFile(gitPrep.WorkDir, metadata)
+		contextPath, err := writeTaskContextFile(s.Config.Node.DataDir, metadata)
 		if err != nil {
 			s.failTask(ctx, rec, task.ErrorWorkerFailed, err.Error())
 			return
@@ -617,12 +616,12 @@ type taskContextFile struct {
 	HopCount        int      `json:"hop_count"`
 }
 
-func writeTaskContextFile(workDir string, metadata runner.TaskMetadata) (string, error) {
-	dir := filepath.Join(workDir, taskContextDirName)
+func writeTaskContextFile(dataDir string, metadata runner.TaskMetadata) (string, error) {
+	dir := filepath.Join(dataDir, taskContextDirName)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create task context dir: %w", err)
 	}
-	path := filepath.Join(dir, taskContextFileName)
+	path := filepath.Join(dir, metadata.TaskID+".json")
 	body, err := json.MarshalIndent(taskContextFile{
 		TaskID:          metadata.TaskID,
 		OriginNodeID:    metadata.OriginNodeID,
