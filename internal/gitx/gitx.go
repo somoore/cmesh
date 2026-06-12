@@ -136,6 +136,26 @@ func (r *Repository) CheckoutBranch(ctx context.Context, branch string) error {
 	return r.run(ctx, "checkout", "-B", branch)
 }
 
+func (r *Repository) AddWorktree(ctx context.Context, path, branch, base string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty worktree path")
+	}
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	if strings.TrimSpace(base) == "" {
+		base = "HEAD"
+	}
+	return r.run(ctx, "worktree", "add", "-B", branch, path, base)
+}
+
+func (r *Repository) RemoveWorktree(ctx context.Context, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty worktree path")
+	}
+	return r.run(ctx, "worktree", "remove", "--force", path)
+}
+
 func (r *Repository) AddAll(ctx context.Context) error {
 	return r.run(ctx, "add", "-A")
 }
@@ -191,6 +211,30 @@ func (r *Repository) ChangedFiles(ctx context.Context, base, head string) ([]str
 		}
 	}
 	return files, nil
+}
+
+func (r *Repository) Bundle(ctx context.Context, path, branch, base string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("empty bundle path")
+	}
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	args := []string{"bundle", "create", path, branch}
+	if strings.TrimSpace(base) != "" {
+		args = append(args, "^"+base)
+	}
+	return r.run(ctx, args...)
+}
+
+func (r *Repository) Push(ctx context.Context, remote, branch string) error {
+	if strings.TrimSpace(remote) == "" {
+		remote = "origin"
+	}
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	return r.run(ctx, "push", remote, branch)
 }
 
 func (r *Repository) run(ctx context.Context, args ...string) error {

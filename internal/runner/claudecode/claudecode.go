@@ -122,6 +122,9 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	}
 	argv := append([]string(nil), r.cfg.Command...)
 	argv = append(argv, argsForProfile(profile)...)
+	if req.Metadata.ResumeSessionID != "" {
+		argv = append(argv, "--resume", req.Metadata.ResumeSessionID)
+	}
 	argv = append(argv, req.Prompt)
 	env := merge(profile.Env, req.Env)
 	ctx := req.Context

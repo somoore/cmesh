@@ -217,7 +217,7 @@ func defaultProfiles() map[string]ProfileConfig {
 		"dev": {
 			Claims:     []string{"read_files", "edit_repo", "execute_repo_commands"},
 			Sandbox:    "workspace-write",
-			Approval:   "on-request",
+			Approval:   "never",
 			Network:    "disabled_or_limited",
 			Confidence: "medium",
 			KnownGaps: []string{

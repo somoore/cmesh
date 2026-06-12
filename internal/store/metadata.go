@@ -9,13 +9,14 @@ import (
 )
 
 type PeerTask struct {
-	TaskID       string     `json:"task_id"`
-	PeerNodeID   string     `json:"peer_node_id"`
-	RemoteTaskID string     `json:"remote_task_id"`
-	State        task.State `json:"state"`
-	ResultRef    string     `json:"result_ref,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	TaskID          string     `json:"task_id"`
+	PeerNodeID      string     `json:"peer_node_id"`
+	RemoteTaskID    string     `json:"remote_task_id"`
+	OriginSessionID string     `json:"origin_session_id,omitempty"`
+	State           task.State `json:"state"`
+	ResultRef       string     `json:"result_ref,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 func (s *Store) UpsertPeerTask(ctx context.Context, peerTask PeerTask) error {
@@ -24,15 +25,16 @@ func (s *Store) UpsertPeerTask(ctx context.Context, peerTask PeerTask) error {
 		peerTask.CreatedAt = now
 	}
 	peerTask.UpdatedAt = now
-	_, err := s.db.ExecContext(ctx, `INSERT INTO peer_tasks(task_id, peer_node_id, remote_task_id, state, result_ref, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO peer_tasks(task_id, peer_node_id, remote_task_id, origin_session_id, state, result_ref, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(task_id) DO UPDATE SET
 			peer_node_id = excluded.peer_node_id,
 			remote_task_id = excluded.remote_task_id,
+			origin_session_id = excluded.origin_session_id,
 			state = excluded.state,
 			result_ref = excluded.result_ref,
 			updated_at = excluded.updated_at`,
-		peerTask.TaskID, peerTask.PeerNodeID, peerTask.RemoteTaskID, peerTask.State, peerTask.ResultRef, formatTime(peerTask.CreatedAt), formatTime(peerTask.UpdatedAt),
+		peerTask.TaskID, peerTask.PeerNodeID, peerTask.RemoteTaskID, peerTask.OriginSessionID, peerTask.State, peerTask.ResultRef, formatTime(peerTask.CreatedAt), formatTime(peerTask.UpdatedAt),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert peer task: %w", err)
@@ -43,8 +45,8 @@ func (s *Store) UpsertPeerTask(ctx context.Context, peerTask PeerTask) error {
 func (s *Store) GetPeerTask(ctx context.Context, taskID string) (PeerTask, error) {
 	var peerTask PeerTask
 	var created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT task_id, peer_node_id, remote_task_id, state, result_ref, created_at, updated_at FROM peer_tasks WHERE task_id = ?`, taskID).
-		Scan(&peerTask.TaskID, &peerTask.PeerNodeID, &peerTask.RemoteTaskID, &peerTask.State, &peerTask.ResultRef, &created, &updated)
+	err := s.db.QueryRowContext(ctx, `SELECT task_id, peer_node_id, remote_task_id, origin_session_id, state, result_ref, created_at, updated_at FROM peer_tasks WHERE task_id = ?`, taskID).
+		Scan(&peerTask.TaskID, &peerTask.PeerNodeID, &peerTask.RemoteTaskID, &peerTask.OriginSessionID, &peerTask.State, &peerTask.ResultRef, &created, &updated)
 	if err != nil {
 		return PeerTask{}, notFound(err)
 	}
@@ -58,6 +60,36 @@ func (s *Store) GetPeerTask(ctx context.Context, taskID string) (PeerTask, error
 		return PeerTask{}, fmt.Errorf("decode peer task updated_at: %w", parseErr)
 	}
 	return peerTask, nil
+}
+
+func (s *Store) ListPeerTasks(ctx context.Context, limit int) ([]PeerTask, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT task_id, peer_node_id, remote_task_id, origin_session_id, state, result_ref, created_at, updated_at FROM peer_tasks ORDER BY updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list peer tasks: %w", err)
+	}
+	defer rows.Close()
+	var out []PeerTask
+	for rows.Next() {
+		var peerTask PeerTask
+		var created, updated string
+		if err := rows.Scan(&peerTask.TaskID, &peerTask.PeerNodeID, &peerTask.RemoteTaskID, &peerTask.OriginSessionID, &peerTask.State, &peerTask.ResultRef, &created, &updated); err != nil {
+			return nil, err
+		}
+		var parseErr error
+		peerTask.CreatedAt, parseErr = parseTime(created)
+		if parseErr != nil {
+			return nil, fmt.Errorf("decode peer task created_at: %w", parseErr)
+		}
+		peerTask.UpdatedAt, parseErr = parseTime(updated)
+		if parseErr != nil {
+			return nil, fmt.Errorf("decode peer task updated_at: %w", parseErr)
+		}
+		out = append(out, peerTask)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UpsertRunnerManifest(ctx context.Context, runner, version, manifestJSON string) error {

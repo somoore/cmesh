@@ -36,6 +36,23 @@ func TestInboundRejectsSpoofedOriginNodeID(t *testing.T) {
 	}
 }
 
+func TestInboundAllowsTrustedPeerTag(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Policy.AllowedPeers = []string{"tag:cmesh"}
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "tagged-worker",
+		PeerNodeID:   "node-1",
+		PeerTags:     []string{"tag:cmesh"},
+		CWD:          root,
+		Profile:      "dev",
+		OriginNodeID: "spoofed-origin",
+	})
+	if !decision.Allowed {
+		t.Fatalf("expected tag-based allow decision: %+v", decision)
+	}
+}
+
 func TestInboundAllowsSymlinkedAllowedRoot(t *testing.T) {
 	root := t.TempDir()
 	link := filepath.Join(t.TempDir(), "allowed")

@@ -111,6 +111,17 @@ func NewID() (string, error) {
 	return "tsk_" + strings.ToLower(encoded), nil
 }
 
+func DeterministicID(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	sum := h.Sum(nil)
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:20])
+	return "tsk_" + strings.ToLower(encoded)
+}
+
 func SHA256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

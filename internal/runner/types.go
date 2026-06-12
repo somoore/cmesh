@@ -111,6 +111,10 @@ type TaskMetadata struct {
 	WorkerNodeID    string
 	Runner          string
 	Profile         string
+	TaskID          string
+	DelegationChain []string
+	HopCount        int
+	ResumeSessionID string
 }
 
 type Result struct {

@@ -22,6 +22,8 @@ type Decision struct {
 type TaskIntent struct {
 	PeerName      string
 	PeerNodeID    string
+	PeerStableID  string
+	PeerTags      []string
 	CWD           string
 	Runner        string
 	Profile       string
@@ -192,7 +194,8 @@ func normalizeAllowedRoot(path string) (string, error) {
 }
 
 func peerIdentityCandidates(intent TaskIntent) []string {
-	values := []string{intent.PeerName, intent.PeerNodeID}
+	values := []string{intent.PeerName, intent.PeerNodeID, intent.PeerStableID}
+	values = append(values, intent.PeerTags...)
 	out := values[:0]
 	for _, v := range values {
 		if v != "" {
@@ -203,7 +206,8 @@ func peerIdentityCandidates(intent TaskIntent) []string {
 }
 
 func identityCandidates(intent TaskIntent) []string {
-	values := []string{intent.PeerName, intent.PeerNodeID, intent.OriginNodeID}
+	values := []string{intent.PeerName, intent.PeerNodeID, intent.PeerStableID, intent.OriginNodeID}
+	values = append(values, intent.PeerTags...)
 	out := values[:0]
 	for _, v := range values {
 		if v != "" {

@@ -30,3 +30,18 @@ func TestIdempotencyKeyIncludesAllParts(t *testing.T) {
 		t.Fatalf("idempotency keys collided: %q %q %q", a, b, c)
 	}
 }
+
+func TestDeterministicIDIsStableAndScoped(t *testing.T) {
+	a := DeterministicID("node-a", "session-1", "prompt")
+	b := DeterministicID("node-a", "session-1", "prompt")
+	c := DeterministicID("node-a", "session-2", "prompt")
+	if a != b {
+		t.Fatalf("deterministic ids differed: %q %q", a, b)
+	}
+	if a == c {
+		t.Fatalf("deterministic ids collided across session scope: %q", a)
+	}
+	if len(a) <= len("tsk_") || a[:4] != "tsk_" {
+		t.Fatalf("unexpected deterministic id format: %q", a)
+	}
+}

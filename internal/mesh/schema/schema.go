@@ -63,6 +63,8 @@ type CreateTaskRequest struct {
 	TimeoutSeconds  int        `json:"timeout_s,omitempty"`
 	Wait            bool       `json:"wait,omitempty"`
 	AllowDirty      bool       `json:"allow_dirty,omitempty"`
+	FollowupTaskID  string     `json:"followup_task_id,omitempty"`
+	ResumeSessionID string     `json:"resume_session_id,omitempty"`
 	Provenance      Provenance `json:"provenance"`
 }
 
@@ -88,6 +90,16 @@ type TaskResultResponse struct {
 	TaskID string               `json:"task_id"`
 	Result *task.ResultEnvelope `json:"result,omitempty"`
 	Error  *Error               `json:"error,omitempty"`
+}
+
+type TaskListResponse struct {
+	Tasks []task.Record `json:"tasks"`
+}
+
+type TaskTranscriptResponse struct {
+	TaskID string `json:"task_id"`
+	Stdout string `json:"stdout,omitempty"`
+	Stderr string `json:"stderr,omitempty"`
 }
 
 type CancelTaskRequest struct {

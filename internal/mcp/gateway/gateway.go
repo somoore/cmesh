@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +39,8 @@ type DelegateRequest struct {
 	Wait            bool   `json:"wait,omitempty"`
 	AllowDirty      bool   `json:"allow_dirty,omitempty"`
 	OriginSessionID string `json:"origin_session_id,omitempty"`
+	IdempotencyKey  string `json:"idempotency_key,omitempty"`
+	FollowupTaskID  string `json:"followup_task_id,omitempty"`
 }
 
 type ToolResponse struct {
@@ -57,10 +62,13 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /tools/list_peers", g.listPeers)
 	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
 	mux.HandleFunc("POST /tools/delegate", g.delegate)
+	mux.HandleFunc("POST /tools/list_tasks", g.listTasks)
 	mux.HandleFunc("POST /tools/task_status", g.taskStatus)
 	mux.HandleFunc("POST /tools/task_result", g.taskResult)
+	mux.HandleFunc("POST /tools/task_transcript", g.taskTranscript)
+	mux.HandleFunc("POST /tools/task_artifact", g.taskArtifact)
 	mux.HandleFunc("POST /tools/cancel", g.cancel)
-	return hardenLocal(mux)
+	return hardenLocal(mux, g.Config.Gateway.HostToken)
 }
 
 type rpcRequest struct {
@@ -197,14 +205,24 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		return g.delegateCall(ctx, req)
-	case "task_status":
+	case "list_tasks":
 		var req struct {
-			TaskID string `json:"task_id"`
+			Limit int `json:"limit,omitempty"`
 		}
 		if err := json.Unmarshal(args, &req); err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		return g.statusCall(ctx, req.TaskID)
+		return g.listTasksCall(ctx, req.Limit)
+	case "task_status":
+		var req struct {
+			TaskID         string `json:"task_id"`
+			Wait           bool   `json:"wait,omitempty"`
+			TimeoutSeconds int    `json:"timeout_s,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.statusCall(ctx, req.TaskID, req.Wait, req.TimeoutSeconds)
 	case "task_result":
 		var req struct {
 			TaskID string `json:"task_id"`
@@ -213,6 +231,23 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		return g.resultCall(ctx, req.TaskID)
+	case "task_transcript":
+		var req struct {
+			TaskID string `json:"task_id"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.transcriptCall(ctx, req.TaskID)
+	case "task_artifact":
+		var req struct {
+			TaskID string `json:"task_id"`
+			Kind   string `json:"kind,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.artifactCall(ctx, req.TaskID, req.Kind)
 	case "cancel":
 		var req struct {
 			TaskID string `json:"task_id"`
@@ -299,28 +334,59 @@ func (g *Gateway) delegate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolResponse, error) {
+	var followupPeerTask store.PeerTask
+	if req.FollowupTaskID != "" {
+		peerTask, err := g.Store.GetPeerTask(ctx, req.FollowupTaskID)
+		if err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		followupPeerTask = peerTask
+		if req.Peer == "" {
+			name, err := g.peerNameByNode(peerTask.PeerNodeID)
+			if err != nil {
+				return toolFailure(task.ErrorPeerUnreachable, err.Error())
+			}
+			req.Peer = name
+		}
+		req.OriginSessionID = firstNonEmpty(req.OriginSessionID, peerTask.OriginSessionID)
+	}
 	peer, ok := g.Config.Peers[req.Peer]
 	if !ok {
 		return toolFailure(task.ErrorPeerUnreachable, "unknown peer "+req.Peer)
 	}
+	prov := g.currentProvenance()
 	sessionID := req.OriginSessionID
 	if sessionID == "" {
-		sessionID = "gateway-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		sessionID = firstNonEmpty(prov.OriginSessionID, "gateway-default")
 	}
-	taskID, err := task.NewID()
-	if err != nil {
-		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	idempotencyKey := req.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = strings.Join([]string{req.FollowupTaskID, req.Peer, req.CWD, req.Runner, req.Profile, strconv.Itoa(req.TimeoutSeconds), strconv.FormatBool(req.AllowDirty), task.PromptHash(req.Prompt)}, "\x00")
 	}
+	taskID := task.DeterministicID(g.Config.Node.ID, sessionID, idempotencyKey)
+	hopCount := prov.HopCount
+	subdelegation := len(prov.Chain) > 0
+	if subdelegation {
+		hopCount++
+	}
+	chain := append([]string(nil), prov.Chain...)
+	if len(chain) == 0 {
+		chain = []string{g.Config.Node.ID}
+	} else if !contains(chain, g.Config.Node.ID) {
+		chain = append(chain, g.Config.Node.ID)
+	}
+	originNodeID := firstNonEmpty(prov.OriginNodeID, g.Config.Node.ID)
 	intent := policy.TaskIntent{
 		PeerName:      firstNonEmpty(peer.Name, req.Peer),
 		PeerNodeID:    peer.NodeID,
 		CWD:           req.CWD,
 		Runner:        req.Runner,
 		Profile:       req.Profile,
-		HopCount:      0,
-		OriginNodeID:  g.Config.Node.ID,
+		HopCount:      hopCount,
+		Chain:         chain,
+		OriginNodeID:  originNodeID,
 		AllowDirty:    req.AllowDirty,
-		Subdelegation: false,
+		Subdelegation: subdelegation,
 	}
 	decision := g.Policy.CheckOutbound(intent)
 	if !decision.Allowed {
@@ -330,9 +396,15 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
+	resumeSessionID := ""
+	if req.FollowupTaskID != "" {
+		if result, err := client.TaskResult(ctx, followupPeerTask.RemoteTaskID); err == nil && result.Result != nil {
+			resumeSessionID = stringValue(result.Result.RunnerExtra, "session_id")
+		}
+	}
 	resp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
 		TaskID:          taskID,
-		OriginNodeID:    g.Config.Node.ID,
+		OriginNodeID:    originNodeID,
 		OriginSessionID: sessionID,
 		Prompt:          req.Prompt,
 		CWD:             req.CWD,
@@ -341,30 +413,33 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		TimeoutSeconds:  req.TimeoutSeconds,
 		Wait:            req.Wait,
 		AllowDirty:      req.AllowDirty,
+		FollowupTaskID:  req.FollowupTaskID,
+		ResumeSessionID: resumeSessionID,
 		Provenance: schema.Provenance{
-			OriginNodeID:    g.Config.Node.ID,
+			OriginNodeID:    originNodeID,
 			OriginSessionID: sessionID,
 			WorkerNodeID:    peer.NodeID,
 			PromptHash:      task.PromptHash(req.Prompt),
-			DelegationChain: []string{g.Config.Node.ID},
-			HopCount:        0,
+			DelegationChain: chain,
+			HopCount:        hopCount,
 		},
 	})
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
 	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{
-		TaskID:       taskID,
-		PeerNodeID:   firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
-		RemoteTaskID: resp.TaskID,
-		State:        resp.State,
+		TaskID:          taskID,
+		PeerNodeID:      firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
+		RemoteTaskID:    resp.TaskID,
+		OriginSessionID: sessionID,
+		State:           resp.State,
 	})
 	g.record(ctx, audit.Event{
 		Type:           "task.dispatch.requested",
 		TaskID:         taskID,
 		PeerIdentity:   firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
 		OriginSession:  sessionID,
-		Chain:          []string{g.Config.Node.ID},
+		Chain:          chain,
 		Runner:         req.Runner,
 		Profile:        decision.EffectiveProfile,
 		PolicyDecision: "allowed",
@@ -375,12 +450,25 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 
 func (g *Gateway) taskStatus(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TaskID string `json:"task_id"`
+		TaskID         string `json:"task_id"`
+		Wait           bool   `json:"wait,omitempty"`
+		TimeoutSeconds int    `json:"timeout_s,omitempty"`
 	}
 	if !decodeTool(w, r, &req) {
 		return
 	}
-	resp, _ := g.statusCall(r.Context(), req.TaskID)
+	resp, _ := g.statusCall(r.Context(), req.TaskID, req.Wait, req.TimeoutSeconds)
+	writeTool(w, resp)
+}
+
+func (g *Gateway) listTasks(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Limit int `json:"limit,omitempty"`
+	}
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	resp, _ := g.listTasksCall(r.Context(), req.Limit)
 	writeTool(w, resp)
 }
 
@@ -392,6 +480,29 @@ func (g *Gateway) taskResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp, _ := g.resultCall(r.Context(), req.TaskID)
+	writeTool(w, resp)
+}
+
+func (g *Gateway) taskTranscript(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"task_id"`
+	}
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	resp, _ := g.transcriptCall(r.Context(), req.TaskID)
+	writeTool(w, resp)
+}
+
+func (g *Gateway) taskArtifact(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"task_id"`
+		Kind   string `json:"kind,omitempty"`
+	}
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	resp, _ := g.artifactCall(r.Context(), req.TaskID, req.Kind)
 	writeTool(w, resp)
 }
 
@@ -407,20 +518,32 @@ func (g *Gateway) cancel(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
-func (g *Gateway) statusCall(ctx context.Context, taskID string) (ToolResponse, error) {
+func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, error) {
+	peerTasks, err := g.Store.ListPeerTasks(ctx, limit)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	localTasks, err := g.Store.RecentTasks(ctx, limit)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{"delegated": peerTasks, "local": localTasks}}, nil
+}
+
+func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, timeoutSeconds int) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return ToolResponse{OK: true, Result: mirroredStatus(peerTask, err)}, nil
 	}
-	resp, err := client.TaskStatus(ctx, peerTask.RemoteTaskID)
+	resp, err := client.TaskStatus(ctx, peerTask.RemoteTaskID, wait, timeoutSeconds)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return ToolResponse{OK: true, Result: mirroredStatus(peerTask, err)}, nil
 	}
-	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, State: resp.State})
+	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, OriginSessionID: peerTask.OriginSessionID, State: resp.State})
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
@@ -438,6 +561,52 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
+}
+
+func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolResponse, error) {
+	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	client, err := g.clientByNode(peerTask.PeerNodeID)
+	if err != nil {
+		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+	}
+	resp, err := client.TaskTranscript(ctx, peerTask.RemoteTaskID)
+	if err != nil {
+		return toolFailure(task.ErrorTranscriptUnavailable, err.Error())
+	}
+	return ToolResponse{OK: true, Result: resp}, nil
+}
+
+func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolResponse, error) {
+	if kind == "" {
+		kind = "git-bundle"
+	}
+	if kind != "git-bundle" {
+		return toolFailure(task.ErrorWorkerFailed, "unsupported artifact kind "+kind)
+	}
+	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	client, err := g.clientByNode(peerTask.PeerNodeID)
+	if err != nil {
+		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+	}
+	body, err := client.TaskArtifact(ctx, peerTask.RemoteTaskID, kind)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	dir := filepath.Join(g.Config.Node.DataDir, "artifacts", "from-peers")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	path := filepath.Join(dir, taskID+"."+kind)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{"task_id": taskID, "kind": kind, "path": path, "bytes": len(body)}}, nil
 }
 
 func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolResponse, error) {
@@ -472,12 +641,86 @@ func (g *Gateway) client(peerName string) (*rpc.Client, error) {
 }
 
 func (g *Gateway) clientByNode(nodeID string) (*rpc.Client, error) {
+	name, err := g.peerNameByNode(nodeID)
+	if err != nil {
+		return nil, err
+	}
+	return g.client(name)
+}
+
+func (g *Gateway) peerNameByNode(nodeID string) (string, error) {
 	for name, peer := range g.Config.Peers {
 		if peer.NodeID == nodeID || peer.Name == nodeID || name == nodeID {
-			return g.client(name)
+			return name, nil
 		}
 	}
-	return nil, fmt.Errorf("no configured peer for node %q", nodeID)
+	return "", fmt.Errorf("no configured peer for node %q", nodeID)
+}
+
+type gatewayProvenance struct {
+	OriginNodeID    string
+	OriginSessionID string
+	Chain           []string
+	HopCount        int
+}
+
+func (g *Gateway) currentProvenance() gatewayProvenance {
+	prov := gatewayProvenance{
+		OriginNodeID:    os.Getenv("CMESH_ORIGIN_NODE_ID"),
+		OriginSessionID: os.Getenv("CMESH_ORIGIN_SESSION_ID"),
+	}
+	if chainJSON := os.Getenv("CMESH_DELEGATION_CHAIN"); chainJSON != "" {
+		_ = json.Unmarshal([]byte(chainJSON), &prov.Chain)
+	}
+	if len(prov.Chain) == 0 {
+		if chainText := os.Getenv("CMESH_DELEGATION_CHAIN_TEXT"); chainText != "" {
+			for _, part := range strings.Split(chainText, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					prov.Chain = append(prov.Chain, trimmed)
+				}
+			}
+		}
+	}
+	if hopText := os.Getenv("CMESH_HOP_COUNT"); hopText != "" {
+		if hop, err := strconv.Atoi(hopText); err == nil && hop >= 0 {
+			prov.HopCount = hop
+		}
+	}
+	return prov
+}
+
+func mirroredStatus(peerTask store.PeerTask, cause error) map[string]any {
+	out := map[string]any{
+		"task_id":        peerTask.TaskID,
+		"remote_task_id": peerTask.RemoteTaskID,
+		"peer_node_id":   peerTask.PeerNodeID,
+		"state":          peerTask.State,
+		"stale":          true,
+		"updated_at":     peerTask.UpdatedAt,
+	}
+	if cause != nil {
+		out["peer_error"] = cause.Error()
+	}
+	return out
+}
+
+func stringValue(values map[string]interface{}, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	if value, ok := values[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func contains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *Gateway) record(ctx context.Context, event audit.Event) {
@@ -487,7 +730,7 @@ func (g *Gateway) record(ctx context.Context, event audit.Event) {
 	}
 }
 
-func hardenLocal(next http.Handler) http.Handler {
+func hardenLocal(next http.Handler, hostToken string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Forwarded-Host") != "" || r.Header.Get("X-Real-IP") != "" {
 			writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "forwarded identity headers are not accepted")
@@ -514,8 +757,20 @@ func hardenLocal(next http.Handler) http.Handler {
 				return
 			}
 		}
+		if hostToken != "" && !validHostToken(r, hostToken) {
+			writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "missing or invalid gateway host token")
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func validHostToken(r *http.Request, hostToken string) bool {
+	if r.Header.Get("X-Cmesh-Host-Token") == hostToken {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	return strings.HasPrefix(auth, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) == hostToken
 }
 
 func decodeTool(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -579,17 +834,43 @@ func mcpTools() []map[string]any {
 				"wait":              map[string]any{"type": "boolean"},
 				"allow_dirty":       map[string]any{"type": "boolean"},
 				"origin_session_id": stringSchema("Optional stable origin session id for idempotency."),
+				"idempotency_key":   stringSchema("Optional stable key for retry-safe delegation."),
+				"followup_task_id":  stringSchema("Optional previous task id to continue on the same peer/session."),
 			}, []string{"peer", "prompt", "cwd"}),
 		},
 		{
+			"name":        "list_tasks",
+			"description": "List recent local and delegated tasks so a fresh session can rediscover task ids.",
+			"inputSchema": objectSchema(map[string]any{
+				"limit": map[string]any{"type": "integer", "minimum": 1},
+			}, nil),
+		},
+		{
 			"name":        "task_status",
-			"description": "Poll delegated task state.",
-			"inputSchema": objectSchema(map[string]any{"task_id": stringSchema("Origin-local task id.")}, []string{"task_id"}),
+			"description": "Poll delegated task state, optionally long-polling until terminal or timeout.",
+			"inputSchema": objectSchema(map[string]any{
+				"task_id":   stringSchema("Origin-local task id."),
+				"wait":      map[string]any{"type": "boolean"},
+				"timeout_s": map[string]any{"type": "integer", "minimum": 1},
+			}, []string{"task_id"}),
 		},
 		{
 			"name":        "task_result",
 			"description": "Fetch the bounded result envelope for a terminal delegated task.",
 			"inputSchema": objectSchema(map[string]any{"task_id": stringSchema("Origin-local task id.")}, []string{"task_id"}),
+		},
+		{
+			"name":        "task_transcript",
+			"description": "Fetch bounded stdout/stderr transcript logs from the worker for a delegated task.",
+			"inputSchema": objectSchema(map[string]any{"task_id": stringSchema("Origin-local task id.")}, []string{"task_id"}),
+		},
+		{
+			"name":        "task_artifact",
+			"description": "Fetch a worker artifact such as a git bundle and save it under the local cmesh data directory.",
+			"inputSchema": objectSchema(map[string]any{
+				"task_id": stringSchema("Origin-local task id."),
+				"kind":    stringSchema("Artifact kind. Currently git-bundle."),
+			}, []string{"task_id"}),
 		},
 		{
 			"name":        "cancel",

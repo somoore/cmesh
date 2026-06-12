@@ -6,12 +6,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -86,7 +84,7 @@ func cmdUp(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := failClosedRestart(ctx, cfg, st, auditWriter); err != nil {
+	if err := failClosedRestart(ctx, st, auditWriter); err != nil {
 		return err
 	}
 	resolver := tsid.NewResolver()
@@ -269,7 +267,12 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				}
 				profiles[pname] = claudecode.ProfileConfig{Claims: pcfg.Claims, Bare: pcfg.Bare, OutputFormat: "json"}
 			}
-			if err := reg.Register(claudecode.New(claudecode.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})); err != nil {
+			run := claudecode.New(claudecode.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
+			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
+			if err != nil {
+				return nil, err
+			}
+			if err := reg.Register(wrapped); err != nil {
 				return nil, err
 			}
 		case codex.Name:
@@ -282,9 +285,14 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Network {
 					network = "enabled_by_profile"
 				}
-				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: "workspace-write", Approval: "on-request", Network: network}
+				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: "workspace-write", Approval: "never", Network: network}
 			}
-			if err := reg.Register(codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})); err != nil {
+			run := codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
+			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
+			if err != nil {
+				return nil, err
+			}
+			if err := reg.Register(wrapped); err != nil {
 				return nil, err
 			}
 		default:
@@ -294,7 +302,34 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	return reg, nil
 }
 
-func failClosedRestart(ctx context.Context, cfg *config.Config, st *store.Store, auditWriter *audit.Writer) error {
+type manifestOverrideRunner struct {
+	runner.Runner
+	manifest runner.CapabilityManifest
+}
+
+func (r manifestOverrideRunner) Manifest() runner.CapabilityManifest {
+	return r.manifest
+}
+
+func applyManifestPath(run runner.Runner, path string) (runner.Runner, error) {
+	if path == "" {
+		return run, nil
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read runner manifest %s: %w", path, err)
+	}
+	var manifest runner.CapabilityManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return nil, fmt.Errorf("parse runner manifest %s: %w", path, err)
+	}
+	if manifest.Runner == "" {
+		manifest.Runner = run.Name()
+	}
+	return manifestOverrideRunner{Runner: run, manifest: manifest}, nil
+}
+
+func failClosedRestart(ctx context.Context, st *store.Store, auditWriter *audit.Writer) error {
 	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning)
 	if err != nil {
 		return err
@@ -320,21 +355,9 @@ func failClosedRestart(ctx context.Context, cfg *config.Config, st *store.Store,
 			_ = st.RecordAuditEvent(ctx, event)
 		}
 	}
-	_ = cfg
 	return nil
 }
 
 func usage() {
 	fmt.Println("usage: cmesh <up|doctor|status|log|connect|hello|version>")
-}
-
-func firstTailnetURL(address string, port int) string {
-	host, _, err := net.SplitHostPort(address)
-	if err == nil {
-		address = host
-	}
-	if strings.HasPrefix(address, "http://") || strings.HasPrefix(address, "https://") {
-		return address
-	}
-	return "http://" + net.JoinHostPort(address, fmt.Sprintf("%d", port))
 }

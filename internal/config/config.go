@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -205,7 +204,6 @@ func (c *Config) ApplyDefaults(configDir string) error {
 		}
 		c.Runners[name] = runner
 	}
-	_ = runtime.GOOS
 	return nil
 }
 

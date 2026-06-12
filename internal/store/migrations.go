@@ -81,6 +81,12 @@ var migrations = []migration{
 			)`,
 		},
 	},
+	{
+		version: 2,
+		statements: []string{
+			`ALTER TABLE peer_tasks ADD COLUMN origin_session_id TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
