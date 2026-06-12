@@ -247,6 +247,13 @@ func (r *Repository) Push(ctx context.Context, remote, branch string) error {
 	return r.run(ctx, "push", remote, branch)
 }
 
+func (r *Repository) DeleteBranch(ctx context.Context, branch string) error {
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	return r.run(ctx, "branch", "-D", branch)
+}
+
 func (r *Repository) run(ctx context.Context, args ...string) error {
 	_, err := r.output(ctx, args...)
 	return err

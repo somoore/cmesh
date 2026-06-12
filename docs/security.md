@@ -60,6 +60,12 @@ If `random-laptop` is on the tailnet but not in `allowed_peers`, the task is den
 
 cmesh does not trust identity headers. The loopback gateway rejects forwarded identity headers, and mesh RPC identity comes from Tailscale LocalAPI, not from `X-Forwarded-*`, bearer tokens, or request JSON.
 
+### A worker trying to forge delegation provenance
+
+Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context and exposes a task token to that runner as `CMESH_TASK_TOKEN`. If that worker delegates again, it should pass the token as `task_token`; the worker's local gateway maps the token back to the stored task context and derives the origin, delegation chain, and hop count server-side.
+
+Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. They are ignored when a task token is present, and they are not authoritative for subdelegation policy. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance.
+
 ### A valid peer asking for too much
 
 A legitimate peer can still be denied. cmesh checks:
@@ -69,8 +75,8 @@ A legitimate peer can still be denied. cmesh checks:
 - requested profile;
 - effective profile ceiling;
 - runner availability;
-- hop limit;
-- cycle detection.
+- token-backed hop limit;
+- token-backed cycle detection.
 
 If any check fails, the task reaches a queryable terminal state such as `denied` or `failed`.
 
@@ -84,6 +90,7 @@ cmesh protects the delegation boundary:
 - whether a replayed request is identical or conflicting;
 - whether every task has a durable state;
 - whether every dispatch, denial, result, and failure is auditable.
+- whether subdelegation provenance is derived from stored task context instead of worker claims.
 
 It also avoids common footguns:
 
@@ -186,4 +193,3 @@ Before relying on a node as a worker:
 - Dirty worktrees are refused unless explicitly allowed.
 - Audit logs are being written.
 - You can retrieve task status and result after restarting the origin daemon.
-

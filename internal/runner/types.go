@@ -116,6 +116,7 @@ type TaskMetadata struct {
 	HopCount        int
 	ResumeSessionID string
 	ContextFile     string
+	TaskToken       string
 }
 
 type Result struct {

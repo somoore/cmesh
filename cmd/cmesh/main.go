@@ -16,6 +16,7 @@ import (
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
 	"cmesh/internal/doctor"
+	"cmesh/internal/gitx"
 	tsid "cmesh/internal/identity/tailscale"
 	"cmesh/internal/mcp/gateway"
 	meshrpc "cmesh/internal/mesh/rpc"
@@ -85,6 +86,9 @@ func cmdUp(args []string) error {
 		return err
 	}
 	if err := failClosedRestart(ctx, st, auditWriter); err != nil {
+		return err
+	}
+	if err := cleanupRetainedTaskArtifacts(ctx, cfg, st); err != nil {
 		return err
 	}
 	resolver := tsid.NewResolver()
@@ -353,6 +357,51 @@ func failClosedRestart(ctx context.Context, st *store.Store, auditWriter *audit.
 		})
 		if err == nil {
 			_ = st.RecordAuditEvent(ctx, event)
+		}
+	}
+	return nil
+}
+
+func cleanupRetainedTaskArtifacts(ctx context.Context, cfg *config.Config, st *store.Store) error {
+	cutoff := time.Now().UTC().Add(-task.DefaultIdempotencyDays * 24 * time.Hour)
+	tasks, err := st.TerminalTasksCompletedBefore(ctx, cutoff, 1000)
+	if err != nil {
+		return err
+	}
+	for _, rec := range tasks {
+		if err := cleanupTaskFiles(cfg.Node.DataDir, rec.ID); err != nil {
+			return err
+		}
+		if rec.Result != nil && rec.Result.Branch != "" {
+			repo, err := gitx.Open(rec.CWD)
+			if err == nil {
+				_ = repo.DeleteBranch(ctx, rec.Result.Branch)
+			}
+		}
+	}
+	_, err = st.DeleteExpiredIdempotencyRecords(ctx, time.Now().UTC())
+	return err
+}
+
+func cleanupTaskFiles(dataDir, taskID string) error {
+	contextPath := filepath.Join(dataDir, "task-contexts", taskID+".json")
+	if body, err := os.ReadFile(contextPath); err == nil {
+		var raw struct {
+			TaskTokenHash string `json:"task_token_hash"`
+		}
+		if json.Unmarshal(body, &raw) == nil && raw.TaskTokenHash != "" {
+			if err := os.Remove(filepath.Join(dataDir, "task-tokens", raw.TaskTokenHash+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	for _, path := range []string{
+		contextPath,
+		filepath.Join(dataDir, "artifacts", taskID+".bundle"),
+		filepath.Join(dataDir, "worktrees", taskID),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return err
 		}
 	}
 	return nil

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -44,6 +45,7 @@ type DelegateRequest struct {
 	HopCount        int      `json:"hop_count,omitempty"`
 	IdempotencyKey  string   `json:"idempotency_key,omitempty"`
 	FollowupTaskID  string   `json:"followup_task_id,omitempty"`
+	TaskToken       string   `json:"task_token,omitempty"`
 }
 
 type ToolResponse struct {
@@ -71,7 +73,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /tools/task_transcript", g.taskTranscript)
 	mux.HandleFunc("POST /tools/task_artifact", g.taskArtifact)
 	mux.HandleFunc("POST /tools/cancel", g.cancel)
-	return hardenLocal(mux, g.Config.Gateway.HostToken)
+	return g.hardenLocal(mux)
 }
 
 type rpcRequest struct {
@@ -344,7 +346,11 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		followupPeerTask = peerTask
-		if req.Peer == "" {
+		if req.Peer != "" {
+			if !g.peerMatchesNode(req.Peer, peerTask.PeerNodeID) {
+				return toolFailure(task.ErrorWorkerFailed, "followup_task_id belongs to peer "+peerTask.PeerNodeID+"; omit peer or use the same peer")
+			}
+		} else {
 			name, err := g.peerNameByNode(peerTask.PeerNodeID)
 			if err != nil {
 				return toolFailure(task.ErrorPeerUnreachable, err.Error())
@@ -357,7 +363,10 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if !ok {
 		return toolFailure(task.ErrorPeerUnreachable, "unknown peer "+req.Peer)
 	}
-	prov := g.currentProvenance(req)
+	prov, err := g.currentProvenance(ctx, req)
+	if err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
+	}
 	sessionID := req.OriginSessionID
 	if sessionID == "" {
 		sessionID = firstNonEmpty(prov.OriginSessionID, "gateway-default")
@@ -406,10 +415,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 			resumeSessionID = stringValue(result.Result.RunnerExtra, "session_id")
 			followupBaseCommit = result.Result.HeadCommit
 		} else {
-			return toolFailure(task.ErrorWorkerFailed, "followup task result is not available; cannot resume file state")
-		}
-		if followupBaseCommit == "" {
-			return toolFailure(task.ErrorWorkerFailed, "followup task result has no head_commit; cannot branch from prior task state")
+			return toolFailure(task.ErrorWorkerFailed, "followup task result is not available; cannot resume session")
 		}
 	}
 	resp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
@@ -668,6 +674,14 @@ func (g *Gateway) peerNameByNode(nodeID string) (string, error) {
 	return "", fmt.Errorf("no configured peer for node %q", nodeID)
 }
 
+func (g *Gateway) peerMatchesNode(peerName, nodeID string) bool {
+	peer, ok := g.Config.Peers[peerName]
+	if !ok {
+		return false
+	}
+	return peer.NodeID == nodeID || peer.Name == nodeID || peerName == nodeID
+}
+
 type gatewayProvenance struct {
 	OriginNodeID    string
 	OriginSessionID string
@@ -675,38 +689,54 @@ type gatewayProvenance struct {
 	HopCount        int
 }
 
-func (g *Gateway) currentProvenance(req DelegateRequest) gatewayProvenance {
-	prov := gatewayProvenance{
-		OriginNodeID:    req.OriginNodeID,
-		OriginSessionID: req.OriginSessionID,
-		Chain:           append([]string(nil), req.DelegationChain...),
-		HopCount:        req.HopCount,
+type provenanceContextKey struct{}
+
+func (g *Gateway) currentProvenance(ctx context.Context, req DelegateRequest) (gatewayProvenance, error) {
+	if prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance); ok {
+		return prov, nil
 	}
-	if prov.OriginNodeID != "" || prov.OriginSessionID != "" || len(prov.Chain) > 0 || prov.HopCount > 0 {
-		return prov
+	if req.TaskToken != "" {
+		return g.provenanceFromTaskToken(req.TaskToken)
 	}
-	prov = gatewayProvenance{
-		OriginNodeID:    os.Getenv("CMESH_ORIGIN_NODE_ID"),
-		OriginSessionID: os.Getenv("CMESH_ORIGIN_SESSION_ID"),
+	return gatewayProvenance{}, nil
+}
+
+type taskContextFile struct {
+	TaskID          string   `json:"task_id"`
+	OriginNodeID    string   `json:"origin_node_id"`
+	OriginSessionID string   `json:"origin_session_id"`
+	WorkerNodeID    string   `json:"worker_node_id"`
+	Runner          string   `json:"runner"`
+	Profile         string   `json:"profile"`
+	DelegationChain []string `json:"delegation_chain"`
+	HopCount        int      `json:"hop_count"`
+	TaskTokenHash   string   `json:"task_token_hash"`
+}
+
+func (g *Gateway) provenanceFromTaskToken(token string) (gatewayProvenance, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return gatewayProvenance{}, errors.New("empty task token")
 	}
-	if chainJSON := os.Getenv("CMESH_DELEGATION_CHAIN"); chainJSON != "" {
-		_ = json.Unmarshal([]byte(chainJSON), &prov.Chain)
+	tokenHash := task.SHA256Hex([]byte(token))
+	path := filepath.Join(g.Config.Node.DataDir, "task-tokens", tokenHash+".json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return gatewayProvenance{}, fmt.Errorf("invalid task token")
 	}
-	if len(prov.Chain) == 0 {
-		if chainText := os.Getenv("CMESH_DELEGATION_CHAIN_TEXT"); chainText != "" {
-			for _, part := range strings.Split(chainText, ",") {
-				if trimmed := strings.TrimSpace(part); trimmed != "" {
-					prov.Chain = append(prov.Chain, trimmed)
-				}
-			}
-		}
+	var ctxFile taskContextFile
+	if err := json.Unmarshal(body, &ctxFile); err != nil {
+		return gatewayProvenance{}, fmt.Errorf("invalid task token context: %w", err)
 	}
-	if hopText := os.Getenv("CMESH_HOP_COUNT"); hopText != "" {
-		if hop, err := strconv.Atoi(hopText); err == nil && hop >= 0 {
-			prov.HopCount = hop
-		}
+	if ctxFile.TaskTokenHash != tokenHash {
+		return gatewayProvenance{}, fmt.Errorf("task token context hash mismatch")
 	}
-	return prov
+	return gatewayProvenance{
+		OriginNodeID:    ctxFile.OriginNodeID,
+		OriginSessionID: ctxFile.OriginSessionID,
+		Chain:           append([]string(nil), ctxFile.DelegationChain...),
+		HopCount:        ctxFile.HopCount,
+	}, nil
 }
 
 func mirroredStatus(peerTask store.PeerTask, cause error) map[string]any {
@@ -750,7 +780,15 @@ func (g *Gateway) record(ctx context.Context, event audit.Event) {
 	}
 }
 
+func (g *Gateway) hardenLocal(next http.Handler) http.Handler {
+	return hardenLocalWithLookup(next, g.Config.Gateway.HostToken, g.provenanceFromTaskToken)
+}
+
 func hardenLocal(next http.Handler, hostToken string) http.Handler {
+	return hardenLocalWithLookup(next, hostToken, nil)
+}
+
+func hardenLocalWithLookup(next http.Handler, hostToken string, lookup func(string) (gatewayProvenance, error)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-Forwarded-For") != "" || r.Header.Get("X-Forwarded-Host") != "" || r.Header.Get("X-Real-IP") != "" {
 			writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "forwarded identity headers are not accepted")
@@ -777,8 +815,28 @@ func hardenLocal(next http.Handler, hostToken string) http.Handler {
 				return
 			}
 		}
-		if hostToken != "" && !validHostToken(r, hostToken) {
+		token := requestHostToken(r)
+		if hostToken != "" {
+			if token == hostToken {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if lookup != nil && token != "" {
+				if prov, err := lookup(token); err == nil {
+					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), provenanceContextKey{}, prov)))
+					return
+				}
+			}
 			writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "missing or invalid gateway host token")
+			return
+		}
+		if lookup != nil && token != "" {
+			prov, err := lookup(token)
+			if err != nil {
+				writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "invalid task token")
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), provenanceContextKey{}, prov)))
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -786,11 +844,18 @@ func hardenLocal(next http.Handler, hostToken string) http.Handler {
 }
 
 func validHostToken(r *http.Request, hostToken string) bool {
-	if r.Header.Get("X-Cmesh-Host-Token") == hostToken {
-		return true
+	return requestHostToken(r) == hostToken
+}
+
+func requestHostToken(r *http.Request) string {
+	if token := strings.TrimSpace(r.Header.Get("X-Cmesh-Host-Token")); token != "" {
+		return token
 	}
 	auth := r.Header.Get("Authorization")
-	return strings.HasPrefix(auth, "Bearer ") && strings.TrimSpace(strings.TrimPrefix(auth, "Bearer ")) == hostToken
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	return ""
 }
 
 func decodeTool(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -853,12 +918,13 @@ func mcpTools() []map[string]any {
 				"timeout_s":         map[string]any{"type": "integer", "minimum": 1},
 				"wait":              map[string]any{"type": "boolean"},
 				"allow_dirty":       map[string]any{"type": "boolean"},
-				"origin_node_id":    stringSchema("Optional origin node id. Subdelegating workers must copy this from task context."),
+				"origin_node_id":    stringSchema("Legacy origin node id. Ignored when task_token is present."),
 				"origin_session_id": stringSchema("Optional stable origin session id for idempotency."),
-				"delegation_chain":  arraySchema(stringSchema("Node id already in the delegation path. Subdelegating workers must copy this from task context.")),
+				"delegation_chain":  arraySchema(stringSchema("Legacy delegation path entry. Ignored when task_token is present.")),
 				"hop_count":         map[string]any{"type": "integer", "minimum": 0},
 				"idempotency_key":   stringSchema("Optional stable key for retry-safe delegation."),
 				"followup_task_id":  stringSchema("Optional previous task id to continue on the same peer/session."),
+				"task_token":        stringSchema("Optional CMESH_TASK_TOKEN for worker subdelegation. When present, gateway derives provenance server-side."),
 			}, []string{"peer", "prompt", "cwd"}),
 		},
 		{

@@ -135,6 +135,8 @@ Use these responses for stable v1 error codes:
 
 Default hop limit is 2. Subdelegate only when the next machine has a concrete locality advantage. Never subdelegate to a node already in the chain.
 
+When subdelegating from inside a cmesh worker task, pass `task_token` from `CMESH_TASK_TOKEN`. Do not copy or invent `origin_node_id`, `delegation_chain`, or `hop_count`; the local gateway derives those values from stored task context and ignores model-supplied provenance when a task token is present.
+
 Good subdelegation reason:
 
 ```text
