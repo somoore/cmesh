@@ -1,33 +1,59 @@
 # cmesh
 
-**Policy-governed delegation for coding agents across machines you control.**
+**Ask the coding agent on another machine to do work for you, without leaving your current agent session.**
 
-cmesh turns your laptop, desktop, homelab box, VM, or Windows build target into a small local-first delegation mesh. An agent on one machine can hand a task to an agent on another machine, keep working, then retrieve a durable result with provenance, audit events, and a git branch to review.
+cmesh lets Claude Code, Codex, or another local coding agent on your current machine delegate a task to a different machine you control.
 
-The point is simple: coding agents are usually trapped on one machine, but real development work is not.
+For example: you are on your Mac with Claude Code open, but you need to inspect a service, run a Linux build, or check logs on a bare-metal server in a datacenter. If both machines are on your Tailscale tailnet and the server has a supported runner installed, cmesh gives your local agent a tool for sending that task to the server and getting the result back.
+
+```text
+Use cmesh to ask the datacenter server to inspect /srv/myapp and check why the deploy failed.
+```
+
+Your local agent keeps running on your Mac. The work runs on the server.
+
+## What this actually does
+
+cmesh is for people who already have multiple machines and want their coding agents to use the right one for the job.
+
+You bring:
+
+- Tailscale on each machine.
+- Claude Code, Codex, or another supported runner on each machine that should do work.
+- Runner credentials/auth working locally on that machine.
+- The repo, files, services, or toolchains available on that machine.
+
+cmesh provides:
+
+- a local MCP tool your agent can call;
+- a daemon on each machine;
+- secure peer-to-peer task dispatch over Tailscale;
+- policy checks for which peers can run which tasks in which directories;
+- durable task status and results;
+- audit logs;
+- git branch handoff for code changes.
+
+In plain terms: **you set up the machines, Tailscale, and runner auth; cmesh handles the agent-to-agent handoff.**
 
 ## Why it exists
 
-You may have a Linux box for production-like builds, a Mac for Apple targets, a Windows machine for native tests, or a snapshot VM for risky edits. Without cmesh, using those machines means manual SSH, copied prompts, lost context, fuzzy permissions, and no durable task state.
+Coding agents are usually trapped on one machine, but real development work is not.
 
-cmesh makes that handoff a local tool call:
+You may have a Linux box for production-like builds, a Mac for Apple targets, a Windows machine for native tests, a snapshot VM for risky edits, or a bare-metal server with the exact service state you need to inspect. Without cmesh, using those machines means manual SSH, copied prompts, lost context, fuzzy permissions, and no durable task state.
 
-```text
-delegate the Linux build to homelab and keep working
-```
+cmesh makes that handoff an agent tool call instead of a manual ritual.
 
-Your local agent talks only to the local cmesh gateway. The local daemon enforces outbound policy, sends a typed mesh RPC request over your tailnet, and the remote daemon enforces inbound policy before launching the configured runner.
+## How the handoff works
 
-## What it provides
+1. Your local agent calls the local cmesh MCP tool.
+2. Your local cmesh daemon checks outbound policy.
+3. It sends a task to the peer's cmesh daemon over Tailscale.
+4. The peer daemon verifies the caller with Tailscale LocalAPI `whois`.
+5. The peer daemon checks inbound policy.
+6. The peer runs its local Claude Code/Codex runner.
+7. Your local agent can poll status and fetch the result.
 
-- A loopback-only MCP gateway for agent harnesses.
-- Daemon-to-daemon mesh RPC over Tailscale.
-- Tailscale LocalAPI identity checks with cmesh policy authorization.
-- Durable async task state in SQLite.
-- Append-only JSONL audit events.
-- Claude Code and Codex runner adapters.
-- Deterministic git branch and commit handoff.
-- Prompt-injection-aware result envelopes.
+The remote MCP surface is never exposed. The only MCP endpoint is local loopback on the machine where the agent is running.
 
 ## Current status
 
@@ -67,4 +93,3 @@ schemas/                   JSON Schemas
 examples/                  runnable config and Tailscale grant examples
 docs/                      architecture and operator guidance
 ```
-
