@@ -1,0 +1,140 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"time"
+)
+
+type migration struct {
+	version    int
+	statements []string
+}
+
+var migrations = []migration{
+	{
+		version: 1,
+		statements: []string{
+			`CREATE TABLE IF NOT EXISTS tasks (
+				task_id TEXT PRIMARY KEY,
+				origin_node_id TEXT NOT NULL,
+				origin_session_id TEXT NOT NULL,
+				worker_node_id TEXT NOT NULL DEFAULT '',
+				state TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				runner TEXT NOT NULL,
+				profile_requested TEXT NOT NULL,
+				profile_effective TEXT NOT NULL DEFAULT '',
+				prompt_hash TEXT NOT NULL,
+				payload_hash TEXT NOT NULL,
+				allow_dirty INTEGER NOT NULL DEFAULT 0,
+				delegation_chain_json TEXT NOT NULL DEFAULT '[]',
+				hop_count INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				started_at TEXT NOT NULL DEFAULT '',
+				completed_at TEXT NOT NULL DEFAULT '',
+				terminal_error_code TEXT NOT NULL DEFAULT '',
+				result_ref TEXT NOT NULL DEFAULT '',
+				result_json TEXT NOT NULL DEFAULT ''
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_tasks_origin ON tasks(origin_node_id, origin_session_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_tasks_state_updated ON tasks(state, updated_at)`,
+			`CREATE TABLE IF NOT EXISTS idempotency_keys (
+				key TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL,
+				origin_node_id TEXT NOT NULL,
+				origin_session_id TEXT NOT NULL,
+				payload_hash TEXT NOT NULL,
+				request_json TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				last_seen_at TEXT NOT NULL,
+				retain_until TEXT NOT NULL,
+				replay_count INTEGER NOT NULL DEFAULT 0,
+				FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_idempotency_retain_until ON idempotency_keys(retain_until)`,
+			`CREATE TABLE IF NOT EXISTS task_events (
+				event_id TEXT PRIMARY KEY,
+				event_type TEXT NOT NULL,
+				task_id TEXT NOT NULL DEFAULT '',
+				node_id TEXT NOT NULL,
+				timestamp TEXT NOT NULL,
+				payload_json TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_events_task_time ON task_events(task_id, timestamp)`,
+			`CREATE TABLE IF NOT EXISTS peer_tasks (
+				task_id TEXT PRIMARY KEY,
+				peer_node_id TEXT NOT NULL,
+				remote_task_id TEXT NOT NULL,
+				state TEXT NOT NULL,
+				result_ref TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+			`CREATE TABLE IF NOT EXISTS runner_manifests (
+				runner TEXT PRIMARY KEY,
+				version TEXT NOT NULL DEFAULT '',
+				manifest_json TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			)`,
+		},
+	},
+}
+
+func (s *Store) Migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schema migrations table: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration: %w", err)
+	}
+	defer rollback(tx)
+	applied := map[int]bool{}
+	rows, err := tx.QueryContext(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("read schema migrations: %w", err)
+	}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan schema migration: %w", err)
+		}
+		applied[version] = true
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close schema migration rows: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate schema migrations: %w", err)
+	}
+	for _, migration := range migrations {
+		if applied[migration.version] {
+			continue
+		}
+		for _, statement := range migration.statements {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("apply migration %d: %w", migration.version, err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(?, ?)`, migration.version, formatTime(time.Now().UTC())); err != nil {
+			return fmt.Errorf("record migration %d: %w", migration.version, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+	return nil
+}
+
+func rollback(tx *sql.Tx) {
+	if tx != nil {
+		_ = tx.Rollback()
+	}
+}

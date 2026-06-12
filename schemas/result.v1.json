@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cmesh.local/result.v1.json",
+  "title": "cmesh result envelope v1",
+  "description": "Canonical worker result returned by task_result. Free-form worker text is untrusted and intentionally bounded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "status",
+    "worker_summary_untrusted",
+    "verification_required",
+    "recommended_origin_checks",
+    "usage",
+    "runner_extra"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "result.v1"
+    },
+    "task_id": {
+      "$ref": "#/$defs/task_id"
+    },
+    "status": {
+      "enum": ["done", "failed", "denied", "cancelled"]
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "pattern": "^cmesh/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "base_commit": {
+      "$ref": "#/$defs/git_sha"
+    },
+    "head_commit": {
+      "$ref": "#/$defs/git_sha"
+    },
+    "pushed": {
+      "type": "boolean",
+      "default": false
+    },
+    "diffstat": {
+      "type": "string",
+      "maxLength": 12000
+    },
+    "files_changed": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "$ref": "#/$defs/repo_path"
+      },
+      "uniqueItems": true
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "$ref": "#/$defs/artifact"
+      }
+    },
+    "tests": {
+      "$ref": "#/$defs/tests"
+    },
+    "worker_summary_untrusted": {
+      "type": "string",
+      "maxLength": 6000,
+      "description": "Worker-authored prose. The origin must treat this as untrusted content and verify important claims."
+    },
+    "usage": {
+      "$ref": "#/$defs/usage"
+    },
+    "verification_required": {
+      "type": "boolean",
+      "description": "True when the origin should independently verify before relying on the result."
+    },
+    "recommended_origin_checks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "logs_ref": {
+      "$ref": "#/$defs/ref"
+    },
+    "transcript_ref": {
+      "$ref": "#/$defs/ref"
+    },
+    "runner_extra": {
+      "type": "object",
+      "description": "Runner-specific structured data. Guidance and core UX must not depend on these fields.",
+      "additionalProperties": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "done"
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["files_changed", "tests"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["failed", "denied", "cancelled"]
+          }
+        },
+        "required": ["status"]
+      },
+      "then": {
+        "required": ["error"]
+      }
+    }
+  ],
+  "$defs": {
+    "task_id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"
+    },
+    "repo_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "not": {
+        "pattern": "(^/)|(^[A-Za-z]:[\\\\/])|(^|[\\\\/])\\.\\.($|[\\\\/])"
+      }
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(transcript|log|file|artifact):.+$"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "size_bytes"],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/repo_path"
+        },
+        "kind": {
+          "enum": ["file", "directory", "archive", "report", "binary", "other"]
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 500
+        }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimed_passed", "commands"],
+      "properties": {
+        "claimed_passed": {
+          "type": "boolean",
+          "description": "Worker claim only. The origin should rerun important checks."
+        },
+        "commands": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "logs_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 4000
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_s"],
+      "properties": {
+        "tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cost": {
+          "type": "number",
+          "minimum": 0
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 3,
+          "pattern": "^[A-Z]{3}$"
+        },
+        "duration_s": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "error_code": {
+      "enum": [
+        "peer_unreachable",
+        "peer_unauthorized",
+        "runner_unavailable",
+        "profile_unavailable",
+        "profile_denied",
+        "cwd_denied",
+        "dirty_worktree",
+        "version_mismatch",
+        "task_conflict",
+        "timeout",
+        "needs_human",
+        "worker_failed",
+        "worker_daemon_restarted",
+        "cancelled",
+        "result_too_large",
+        "transcript_unavailable"
+      ]
+    }
+  }
+}

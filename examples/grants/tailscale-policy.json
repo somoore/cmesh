@@ -1,0 +1,23 @@
+{
+  "tagOwners": {
+    "tag:cmesh": ["autogroup:admin"],
+    "tag:cmesh-snapshot": ["autogroup:admin"]
+  },
+  "grants": [
+    {
+      "src": ["tag:cmesh"],
+      "dst": ["tag:cmesh"],
+      "ip": ["tcp:7778"]
+    },
+    {
+      "src": ["tag:cmesh"],
+      "dst": ["tag:cmesh-snapshot"],
+      "ip": ["tcp:7778"]
+    },
+    {
+      "src": ["tag:cmesh-snapshot"],
+      "dst": ["tag:cmesh"],
+      "ip": ["tcp:7778"]
+    }
+  ]
+}

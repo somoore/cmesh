@@ -1,0 +1,48 @@
+[node]
+id = "homelab-vm"
+name = "homelab-vm"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = "~/.local/share/cmesh"
+
+[tailscale]
+mode = "host"
+bind = "tailnet_ip"
+
+[policy]
+allowed_peers = ["mac-studio"]
+allowed_cwds = ["~/code/**", "~/builds/**"]
+hop_limit = 2
+
+[policy.outbound]
+allowed_peers = ["mac-studio"]
+denied_profiles = ["yolo"]
+allow_subdelegation = false
+
+[profiles.readonly]
+runner = "claude-code"
+claims = ["read_files"]
+bare = true
+network = false
+git_push = false
+max_runtime = "30m"
+
+[profiles.dev]
+runner = "claude-code"
+claims = ["read_files", "edit_repo", "execute_repo_commands"]
+bare = false
+network = false
+git_push = false
+max_runtime = "2h"
+
+[runners.claude-code]
+command = ["claude", "-p"]
+default_profile = "dev"
+manifest_path = "~/.config/cmesh/manifests/claude-code.runner_manifest.v1.json"
+concurrency = 1
+
+[peers.mac-studio]
+name = "mac-studio"
+node_id = "mac-studio"
+address = "100.64.10.10"
+port = 7778

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cmesh.local/runner_manifest.v1.json",
+  "title": "cmesh runner capability manifest v1",
+  "description": "Evidence-backed capability declaration for a runner and its profiles.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "runner",
+    "runner_version",
+    "manifest_version",
+    "generated_at",
+    "profiles"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "runner_manifest.v1"
+    },
+    "runner": {
+      "$ref": "#/$defs/runner_id"
+    },
+    "runner_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "manifest_version": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "platforms": {
+      "type": "array",
+      "items": {
+        "enum": ["darwin", "linux", "windows", "freebsd"]
+      },
+      "uniqueItems": true
+    },
+    "default_profile": {
+      "$ref": "#/$defs/profile_name"
+    },
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/profile_name"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/profile"
+      }
+    },
+    "runner_extra": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "claims",
+        "native_controls",
+        "credential_source",
+        "billing",
+        "enforcement_confidence",
+        "known_gaps",
+        "bare"
+      ],
+      "properties": {
+        "claims": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/capability_claim"
+          },
+          "uniqueItems": true
+        },
+        "native_flags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        },
+        "native_controls": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": ["string", "number", "boolean", "array", "object", "null"]
+          }
+        },
+        "credential_source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "The credential route used by this profile, such as ANTHROPIC_API_KEY, apiKeyHelper, subscription_login, or local_config."
+        },
+        "billing": {
+          "enum": ["api", "subscription", "local", "unknown"]
+        },
+        "enforcement_confidence": {
+          "enum": ["low", "medium", "high"]
+        },
+        "known_gaps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "bare": {
+          "type": "boolean"
+        },
+        "network": {
+          "enum": ["denied", "limited", "allowed", "unknown"]
+        },
+        "git_push": {
+          "type": "boolean",
+          "default": false
+        },
+        "max_prompt_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_result_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "os_wrappers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/os_wrapper"
+          }
+        }
+      }
+    },
+    "os_wrapper": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "control", "confidence"],
+      "properties": {
+        "platform": {
+          "enum": ["darwin", "linux", "windows", "freebsd"]
+        },
+        "control": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "confidence": {
+          "enum": ["low", "medium", "high"]
+        },
+        "details": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "capability_claim": {
+      "enum": [
+        "read_files",
+        "edit_repo",
+        "execute_repo_commands",
+        "network",
+        "git_push",
+        "subdelegate",
+        "access_local_credentials",
+        "use_mcp_tools"
+      ]
+    },
+    "runner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "profile_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    }
+  }
+}

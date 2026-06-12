@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.cmesh.local/task.v1.json",
+  "title": "cmesh task API v1",
+  "description": "Schemas for task dispatch, durable task records, task status, and cancellation.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/dispatch_request"
+    },
+    {
+      "$ref": "#/$defs/task_record"
+    },
+    {
+      "$ref": "#/$defs/status_response"
+    },
+    {
+      "$ref": "#/$defs/cancel_request"
+    }
+  ],
+  "$defs": {
+    "dispatch_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task_id",
+        "origin",
+        "worker_node_id",
+        "prompt",
+        "cwd",
+        "profile_requested",
+        "allow_dirty",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "task.v1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "worker_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "runner": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "profile_requested": {
+          "$ref": "#/$defs/profile_name"
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200000
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "wait": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_dirty": {
+          "type": "boolean",
+          "default": false
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "task_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task_id",
+        "origin",
+        "worker_node_id",
+        "state",
+        "cwd",
+        "runner",
+        "profile_requested",
+        "profile_effective",
+        "prompt_sha256",
+        "payload_sha256",
+        "created_at",
+        "updated_at",
+        "provenance"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "task.v1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "origin": {
+          "$ref": "#/$defs/origin"
+        },
+        "worker_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "state": {
+          "$ref": "#/$defs/task_state"
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "cwd_realpath": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "runner": {
+          "$ref": "#/$defs/runner_id"
+        },
+        "profile_requested": {
+          "$ref": "#/$defs/profile_name"
+        },
+        "profile_effective": {
+          "$ref": "#/$defs/profile_name"
+        },
+        "prompt_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "created_at": {
+          "$ref": "#/$defs/rfc3339"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/rfc3339"
+        },
+        "started_at": {
+          "$ref": "#/$defs/rfc3339"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/rfc3339"
+        },
+        "terminal_error": {
+          "$ref": "#/$defs/error"
+        },
+        "result_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "status_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "task_id",
+        "state",
+        "elapsed_s",
+        "last_activity"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "task.v1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "state": {
+          "$ref": "#/$defs/task_state"
+        },
+        "elapsed_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "last_activity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "queue_position": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "worker_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "terminal_error": {
+          "$ref": "#/$defs/error"
+        },
+        "result_available": {
+          "type": "boolean"
+        }
+      }
+    },
+    "cancel_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "task_id", "requested_by"],
+      "properties": {
+        "schema_version": {
+          "const": "task.v1"
+        },
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "requested_by": {
+          "$ref": "#/$defs/origin"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      }
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id",
+        "node_name",
+        "session_id",
+        "harness",
+        "harness_version"
+      ],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "node_name": {
+          "$ref": "#/$defs/node_name"
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "harness_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chain", "hop_count", "hop_limit"],
+      "properties": {
+        "chain": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "$ref": "#/$defs/chain_entry"
+          }
+        },
+        "hop_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "hop_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8,
+          "default": 2
+        },
+        "parent_task_id": {
+          "$ref": "#/$defs/task_id"
+        }
+      }
+    },
+    "chain_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "node_name", "timestamp"],
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "node_name": {
+          "$ref": "#/$defs/node_name"
+        },
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "timestamp": {
+          "$ref": "#/$defs/rfc3339"
+        }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "detail"],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        }
+      }
+    },
+    "task_state": {
+      "enum": ["queued", "running", "done", "failed", "denied", "cancelled"]
+    },
+    "error_code": {
+      "enum": [
+        "peer_unreachable",
+        "peer_unauthorized",
+        "runner_unavailable",
+        "profile_unavailable",
+        "profile_denied",
+        "cwd_denied",
+        "dirty_worktree",
+        "version_mismatch",
+        "task_conflict",
+        "timeout",
+        "needs_human",
+        "worker_failed",
+        "worker_daemon_restarted",
+        "cancelled",
+        "result_too_large",
+        "transcript_unavailable"
+      ]
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "node_id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "node_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "runner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "profile_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+    },
+    "rfc3339": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(task|result|log|transcript):.+$"
+    }
+  }
+}
