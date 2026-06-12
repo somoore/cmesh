@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"cmesh/internal/runner"
 )
@@ -126,7 +124,11 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	argv = append(argv, argsForProfile(profile)...)
 	argv = append(argv, req.Prompt)
 	env := merge(profile.Env, req.Env)
-	proc, err := runner.RunProgram(context.Background(), runner.Program{
+	ctx := req.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	proc, err := runner.RunProgram(ctx, runner.Program{
 		Argv:        argv,
 		Dir:         req.CWD,
 		Env:         env,
@@ -202,38 +204,8 @@ func checkBareCredentials(profile ProfileConfig, env map[string]string) error {
 }
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
-	logsRef := proc.TranscriptRef
-	summary := strings.TrimSpace(proc.Combined)
-	if len(summary) > 8000 {
-		summary = summary[:8000]
-	}
-	return runner.Result{
-		Status:                 "done",
-		Tests:                  runner.TestClaims{ClaimedPassed: proc.ExitCode == 0, Commands: []string{redactedCommand(argv)}, LogsRef: logsRef},
-		WorkerSummaryUntrusted: summary,
-		Usage:                  runner.Usage{DurationS: int64(proc.Duration / time.Second)},
-		VerificationRequired:   true,
-		RecommendedOriginChecks: []string{
-			"review worker summary as untrusted text",
-			"inspect transcript logs before acting on high-risk claims",
-		},
-		RunnerExtra: map[string]any{
-			"runner":      Name,
-			"exit_code":   proc.ExitCode,
-			"stdout_path": filepath.ToSlash(proc.StdoutPath),
-			"stderr_path": filepath.ToSlash(proc.StderrPath),
-		},
-		TranscriptRef: logsRef,
-	}
-}
-
-func redactedCommand(argv []string) string {
-	if len(argv) == 0 {
-		return ""
-	}
-	copyArgv := append([]string(nil), argv...)
-	copyArgv[len(copyArgv)-1] = "<prompt>"
-	return strings.Join(copyArgv, " ")
+	_ = req
+	return runner.ResultFromProcess(Name, proc, argv)
 }
 
 func defaultProfiles() map[string]ProfileConfig {

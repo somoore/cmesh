@@ -22,6 +22,39 @@ func TestInboundAllowsConfiguredPeerAndCWD(t *testing.T) {
 	}
 }
 
+func TestInboundRejectsSpoofedOriginNodeID(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "untrusted-laptop",
+		CWD:          root,
+		Profile:      "dev",
+		OriginNodeID: "mac-studio",
+	})
+	if decision.Allowed || decision.Code != "peer_unauthorized" {
+		t.Fatalf("expected peer_unauthorized, got %+v", decision)
+	}
+}
+
+func TestInboundAllowsSymlinkedAllowedRoot(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "allowed")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := testConfig(root)
+	cfg.Policy.AllowedCWDs = []string{filepath.Join(link, "**")}
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          root,
+		Profile:      "dev",
+		OriginNodeID: "mac-studio",
+	})
+	if !decision.Allowed {
+		t.Fatalf("expected allowed decision: %+v", decision)
+	}
+}
+
 func TestInboundRejectsSymlinkEscape(t *testing.T) {
 	allowed := t.TempDir()
 	outside := t.TempDir()

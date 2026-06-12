@@ -15,14 +15,42 @@ go build -o cmesh.exe ./cmd/cmesh
 ## Test
 
 ```bash
-go test ./...
+make test
 ```
+
+`make test` runs formatting checks, module hygiene, supply-chain checks, duplicate-code detection, vulnerability scanning, and unit tests.
 
 ## Format
 
 ```bash
-go fmt ./...
+make fmt
 ```
+
+## Build release artifacts
+
+```bash
+make build VERSION=v0.1.0
+```
+
+Artifacts are written to `dist/`.
+
+## Cut a release
+
+```bash
+make deploy VERSION=v0.1.0
+```
+
+This runs the full test suite, requires a clean tree, creates a signed git tag, and pushes the tag. GitHub Actions builds, signs, and publishes the release assets.
+
+## Pre-commit hook
+
+Install the repository hook:
+
+```bash
+make install-hooks
+```
+
+The hook runs `make precommit`, which includes the local checks that should stay fast enough for commit-time feedback.
 
 ## Validate docs and schemas
 
@@ -63,4 +91,3 @@ schemas                    JSON Schemas
 examples                   runnable config and Tailscale grant examples
 docs                       architecture and operator guidance
 ```
-

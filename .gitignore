@@ -2,6 +2,7 @@
 phase0/
 cmesh.md
 cmesh_PLAN.md
+feedback.md
 docs/PRD.md
 docs/PLAN.md
 
@@ -11,6 +12,7 @@ docs/PLAN.md
 AGENTS.md
 CLAUDE.md
 .codex/
+.codex-go/
 .claude/
 
 # macOS
@@ -109,4 +111,3 @@ vite.config.*.mjs.timestamp-*
 *.dll
 *.so
 *.dylib
-

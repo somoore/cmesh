@@ -27,6 +27,7 @@ import (
 	"cmesh/internal/runner/codex"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
+	"cmesh/internal/version"
 )
 
 func main() {
@@ -54,6 +55,8 @@ func run(args []string) error {
 		return cmdConnect(args[1:])
 	case "hello":
 		return cmdHello(args[1:])
+	case "version":
+		return cmdVersion(args[1:])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -236,6 +239,24 @@ func cmdHello(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(resp)
 }
 
+func cmdVersion(args []string) error {
+	fs := flag.NewFlagSet("version", flag.ExitOnError)
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	info := map[string]string{
+		"version": version.Version,
+		"commit":  version.Commit,
+		"date":    version.Date,
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(info)
+	}
+	fmt.Printf("cmesh %s (%s, %s)\n", version.Version, version.Commit, version.Date)
+	return nil
+}
+
 func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	reg := runner.NewRegistry()
 	for name, rcfg := range cfg.Runners {
@@ -304,7 +325,7 @@ func failClosedRestart(ctx context.Context, cfg *config.Config, st *store.Store,
 }
 
 func usage() {
-	fmt.Println("usage: cmesh <up|doctor|status|log|connect|hello>")
+	fmt.Println("usage: cmesh <up|doctor|status|log|connect|hello|version>")
 }
 
 func firstTailnetURL(address string, port int) string {

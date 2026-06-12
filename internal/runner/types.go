@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -91,6 +92,7 @@ type ProfileManifest struct {
 }
 
 type RunRequest struct {
+	Context     context.Context
 	TaskID      string
 	Prompt      string
 	CWD         string

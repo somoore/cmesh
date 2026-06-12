@@ -41,7 +41,7 @@ func New(cfg *config.Config) *Engine {
 }
 
 func (e *Engine) CheckInbound(intent TaskIntent) Decision {
-	if !matchesAny(identityCandidates(intent), e.cfg.Policy.AllowedPeers) {
+	if !matchesAny(peerIdentityCandidates(intent), e.cfg.Policy.AllowedPeers) {
 		return denied("peer_unauthorized", "origin peer is not allowed by inbound policy", intent.Profile, "")
 	}
 	if intent.HopCount > e.cfg.Policy.HopLimit {
@@ -159,7 +159,10 @@ func pathAllowed(cwd string, patterns []string) bool {
 			abs = strings.ToLower(abs)
 		}
 		if strings.HasSuffix(abs, string(filepath.Separator)+"**") {
-			root := strings.TrimSuffix(abs, string(filepath.Separator)+"**")
+			root, err := normalizeAllowedRoot(strings.TrimSuffix(abs, string(filepath.Separator)+"**"))
+			if err != nil {
+				continue
+			}
 			if cwd == root || strings.HasPrefix(cwd, root+string(filepath.Separator)) {
 				return true
 			}
@@ -174,6 +177,29 @@ func pathAllowed(cwd string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAllowedRoot(path string) (string, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	real = filepath.Clean(real)
+	if runtime.GOOS == "windows" {
+		real = strings.ToLower(real)
+	}
+	return real, nil
+}
+
+func peerIdentityCandidates(intent TaskIntent) []string {
+	values := []string{intent.PeerName, intent.PeerNodeID}
+	out := values[:0]
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func identityCandidates(intent TaskIntent) []string {

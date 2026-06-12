@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"cmesh/internal/audit"
@@ -32,6 +33,9 @@ type Server struct {
 	Policy   *policy.Engine
 	Identity tsid.Provider
 	Runners  *runner.Registry
+
+	runningMu sync.Mutex
+	running   map[string]context.CancelFunc
 }
 
 func (s *Server) Handler() http.Handler {
@@ -215,7 +219,13 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Source:         "mesh_rpc",
 		Claims:         decision.Claims,
 	})
-	go s.runTask(context.Background(), outcome.Task, req)
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.registerRunningTask(outcome.Task.ID, cancel)
+	go func() {
+		defer cancel()
+		defer s.unregisterRunningTask(outcome.Task.ID)
+		s.runTask(runCtx, outcome.Task, req)
+	}()
 	if req.Wait {
 		s.waitForTask(w, r, outcome.Task.ID, time.Duration(req.TimeoutSeconds)*time.Second)
 		return
@@ -230,6 +240,10 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	}
 	rec = updated
 	s.record(ctx, audit.Event{Type: "task.started", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
+	if ctx.Err() != nil {
+		s.cancelTaskFromWorker(ctx, rec, runner.Result{}, ctx.Err().Error())
+		return
+	}
 	run, ok := s.Runners.Get(rec.Runner)
 	if !ok {
 		s.failTask(ctx, rec, task.ErrorRunnerUnavailable, "runner is not registered")
@@ -239,14 +253,23 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		s.failTask(ctx, rec, task.ErrorCode(runner.CodeOf(err)), err.Error())
 		return
 	}
+	if ctx.Err() != nil {
+		s.cancelTaskFromWorker(ctx, rec, runner.Result{}, ctx.Err().Error())
+		return
+	}
 	base, branch, gitAvailable, err := prepareGit(ctx, rec, s.Config.Node.Name)
 	if err != nil {
+		if ctx.Err() != nil {
+			s.cancelTaskFromWorker(ctx, rec, runner.Result{}, ctx.Err().Error())
+			return
+		}
 		s.failTask(ctx, rec, task.ErrorDirtyWorktree, err.Error())
 		return
 	}
-	timeout := time.Duration(req.TimeoutSeconds) * time.Second
+	timeout := s.effectiveRuntimeLimit(rec.ProfileEffective, req.TimeoutSeconds)
 	logDir := filepath.Join(s.Config.Node.DataDir, "logs", rec.ID)
 	result, err := run.Run(runner.RunRequest{
+		Context: ctx,
 		TaskID:  rec.ID,
 		Prompt:  req.Prompt,
 		CWD:     rec.CWD,
@@ -262,7 +285,10 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		},
 		OutputLimit: runner.DefaultOutputLimit,
 	})
-	if gitAvailable {
+	if ctx.Err() != nil && err == nil {
+		err = runner.E(runner.ErrCancelled, "run command", ctx.Err())
+	}
+	if gitAvailable && runner.CodeOf(err) != runner.ErrCancelled {
 		head, diffstat, files, commitErr := commitGit(ctx, rec, branch, base, s.Config.Node.Name)
 		if commitErr != nil && err == nil {
 			err = commitErr
@@ -281,6 +307,10 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		code := task.ErrorWorkerFailed
 		if rc := runner.CodeOf(err); rc != "" {
 			code = task.ErrorCode(rc)
+		}
+		if code == task.ErrorCancelled {
+			s.cancelTaskFromWorker(ctx, rec, result, err.Error())
+			return
 		}
 		result.Status = string(task.StateFailed)
 		ref := result.TranscriptRef
@@ -344,8 +374,46 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, task.ErrorCancelled, err.Error())
 		return
 	}
+	if cancel := s.cancelRunningTask(taskID); cancel != nil {
+		cancel()
+	}
 	s.record(r.Context(), audit.Event{Type: "task.cancelled", TaskID: taskID, Source: "mesh_rpc", ErrorCode: string(task.ErrorCancelled)})
 	writeJSON(w, http.StatusOK, schema.CancelTaskResponse{TaskID: taskID, State: rec.State})
+}
+
+func (s *Server) effectiveRuntimeLimit(profileName string, requestedSeconds int) time.Duration {
+	var limit time.Duration
+	if requestedSeconds > 0 {
+		limit = time.Duration(requestedSeconds) * time.Second
+	}
+	if profile, ok := s.Config.Profiles[profileName]; ok && profile.MaxRuntime.Duration > 0 {
+		maxRuntime := profile.MaxRuntime.Duration
+		if limit == 0 || maxRuntime < limit {
+			limit = maxRuntime
+		}
+	}
+	return limit
+}
+
+func (s *Server) registerRunningTask(taskID string, cancel context.CancelFunc) {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.running == nil {
+		s.running = map[string]context.CancelFunc{}
+	}
+	s.running[taskID] = cancel
+}
+
+func (s *Server) unregisterRunningTask(taskID string) {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	delete(s.running, taskID)
+}
+
+func (s *Server) cancelRunningTask(taskID string) context.CancelFunc {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	return s.running[taskID]
 }
 
 func (s *Server) waitForTask(w http.ResponseWriter, r *http.Request, taskID string, timeout time.Duration) {
@@ -475,6 +543,14 @@ func (s *Server) failTask(ctx context.Context, rec task.Record, code task.ErrorC
 	}
 	_, _ = s.Store.UpdateTaskState(ctx, rec.ID, store.StateUpdate{State: task.StateFailed, TerminalErrorCode: code})
 	s.record(ctx, audit.Event{Type: "task.failed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker", ErrorCode: string(code), ErrorDetail: detail})
+}
+
+func (s *Server) cancelTaskFromWorker(ctx context.Context, rec task.Record, result runner.Result, detail string) {
+	result.Status = string(task.StateCancelled)
+	ref := result.TranscriptRef
+	if _, err := s.Store.UpdateTaskState(ctx, rec.ID, store.StateUpdate{State: task.StateCancelled, TerminalErrorCode: task.ErrorCancelled, Result: resultAsTask(result), ResultRef: ref}); err == nil {
+		s.record(ctx, audit.Event{Type: "task.cancelled", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker", ErrorCode: string(task.ErrorCancelled), ErrorDetail: detail})
+	}
 }
 
 func (s *Server) record(ctx context.Context, event audit.Event) {

@@ -79,6 +79,7 @@ Full setup instructions live in [docs/quickstart.md](docs/quickstart.md).
 - [Quickstart](docs/quickstart.md)
 - [Configuration](docs/configuration.md)
 - [Security model](docs/security.md)
+- [Release process](docs/release.md)
 - [Development](docs/development.md)
 - [Delegation guidance](docs/delegation-guidance.md)
 - [Runner manifests](docs/runner-manifests.md)
