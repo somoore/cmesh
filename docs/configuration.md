@@ -125,6 +125,19 @@ default_profile = "dev"
 concurrency = 1
 ```
 
+For services, prefer absolute runner paths so the service account does not depend on an interactive shell `PATH`. On Windows, install the service under the same authenticated user account used by the runner:
+
+```powershell
+.\cmesh.exe up service install --user ".\scott" --prompt-password
+```
+
+Example Windows runner command:
+
+```toml
+[runners.claude-code]
+command = ["C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"]
+```
+
 Supported runner adapters:
 
 - `claude-code`

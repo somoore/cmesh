@@ -35,6 +35,8 @@ import (
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/version"
+
+	"golang.org/x/term"
 )
 
 func main() {
@@ -385,13 +387,24 @@ func cmdService(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: cmesh up service <install|start|status|logs>")
 	}
-	configPath := config.DefaultPath()
-	if len(args) > 2 && args[1] == "--config" {
-		configPath = args[2]
-	}
 	switch args[0] {
 	case "install":
-		return serviceInstall(configPath)
+		fs := flag.NewFlagSet("up service install", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		user := fs.String("user", "", `Windows service account, such as ".\scott" or "DOMAIN\user"`)
+		password := fs.String("password", "", "Windows service account password; prefer --prompt-password or --password-env")
+		passwordEnv := fs.String("password-env", "", "environment variable containing the Windows service account password")
+		promptPassword := fs.Bool("prompt-password", false, "prompt for the Windows service account password")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		return serviceInstall(serviceInstallOptions{
+			ConfigPath:     *configPath,
+			User:           *user,
+			Password:       *password,
+			PasswordEnv:    *passwordEnv,
+			PromptPassword: *promptPassword,
+		})
 	case "start":
 		return serviceStart()
 	case "status":
@@ -403,10 +416,22 @@ func cmdService(args []string) error {
 	}
 }
 
-func serviceInstall(configPath string) error {
+type serviceInstallOptions struct {
+	ConfigPath     string
+	User           string
+	Password       string
+	PasswordEnv    string
+	PromptPassword bool
+}
+
+func serviceInstall(opts serviceInstallOptions) error {
+	configPath := firstNonEmpty(opts.ConfigPath, config.DefaultPath())
 	exe, err := os.Executable()
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS != "windows" && (opts.User != "" || opts.Password != "" || opts.PasswordEnv != "" || opts.PromptPassword) {
+		return fmt.Errorf("Windows service account options are only supported on Windows")
 	}
 	switch runtime.GOOS {
 	case "linux":
@@ -436,11 +461,28 @@ func serviceInstall(configPath string) error {
 		}
 		fmt.Printf("Installed launchd agent: %s\n", plistPath)
 	case "windows":
-		cmdLine := serviceCommandLine(exe, configPath)
-		if err := runServiceCommand("sc.exe", "create", "cmesh", "binPath=", cmdLine, "start=", "auto"); err != nil {
+		password, err := resolveWindowsServicePassword(opts)
+		if err != nil {
 			return err
 		}
-		fmt.Println("Installed Windows service: cmesh")
+		cmdLine := serviceCommandLine(exe, configPath)
+		action := "create"
+		if windowsServiceExists() {
+			action = "config"
+		}
+		args := windowsServiceSCArgs(action, cmdLine, opts.User, password)
+		if err := runServiceCommand("sc.exe", args...); err != nil {
+			return err
+		}
+		if opts.User == "" {
+			fmt.Println("Installed Windows service: cmesh")
+			fmt.Println("Warning: service will run as LocalSystem. Runner auth from your interactive user session will not be available.")
+			fmt.Println(`For Claude Code/Codex auth, reinstall with: cmesh up service install --user ".\YOURUSER" --prompt-password`)
+		} else if action == "config" {
+			fmt.Printf("Updated Windows service cmesh to run as %s\n", opts.User)
+		} else {
+			fmt.Printf("Installed Windows service cmesh to run as %s\n", opts.User)
+		}
 	default:
 		return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
 	}
@@ -449,6 +491,64 @@ func serviceInstall(configPath string) error {
 
 func serviceCommandLine(exe, configPath string) string {
 	return fmt.Sprintf(`"%s" _service --config "%s"`, exe, configPath)
+}
+
+func resolveWindowsServicePassword(opts serviceInstallOptions) (string, error) {
+	if opts.User == "" {
+		if opts.Password != "" || opts.PasswordEnv != "" || opts.PromptPassword {
+			return "", fmt.Errorf("Windows service password options require --user")
+		}
+		return "", nil
+	}
+	methods := 0
+	if opts.Password != "" {
+		methods++
+	}
+	if opts.PasswordEnv != "" {
+		methods++
+	}
+	if opts.PromptPassword {
+		methods++
+	}
+	if methods == 0 {
+		return "", fmt.Errorf("Windows service --user requires --prompt-password, --password-env, or --password")
+	}
+	if methods > 1 {
+		return "", fmt.Errorf("use only one of --prompt-password, --password-env, or --password")
+	}
+	if opts.Password != "" {
+		return opts.Password, nil
+	}
+	if opts.PasswordEnv != "" {
+		password := os.Getenv(opts.PasswordEnv)
+		if password == "" {
+			return "", fmt.Errorf("environment variable %s is empty", opts.PasswordEnv)
+		}
+		return password, nil
+	}
+	fmt.Fprintf(os.Stderr, "Password for Windows service account %s: ", opts.User)
+	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	password := string(passwordBytes)
+	if password == "" {
+		return "", fmt.Errorf("password is empty")
+	}
+	return password, nil
+}
+
+func windowsServiceExists() bool {
+	return exec.Command("sc.exe", "query", "cmesh").Run() == nil
+}
+
+func windowsServiceSCArgs(action, cmdLine, user, password string) []string {
+	args := []string{action, "cmesh", "binPath=", cmdLine, "start=", "auto"}
+	if user != "" {
+		args = append(args, "obj=", user, "password=", password)
+	}
+	return args
 }
 
 func serviceStart() error {

@@ -114,6 +114,22 @@ For a service:
 
 Service management uses launchd on macOS, systemd user services on Linux, and Windows services on Windows.
 
+On Windows, install the service under the same account that has Tailscale and runner auth when you want Claude Code or Codex to reuse that user's credentials:
+
+```powershell
+.\cmesh.exe up service install --user ".\scott" --prompt-password
+.\cmesh.exe up service start
+```
+
+Keep runner commands absolute in Windows service configs, for example:
+
+```toml
+[runners.claude-code]
+command = ["C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"]
+```
+
+If you install without `--user`, the Windows service runs as LocalSystem and will not inherit the interactive user's runner auth or PATH.
+
 ## 6. Find and test peers
 
 ```bash

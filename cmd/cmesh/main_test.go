@@ -85,6 +85,32 @@ func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceSCArgsWithUser(t *testing.T) {
+	got := strings.Join(windowsServiceSCArgs("config", `C:\Tools\cmesh.exe _service`, `.\scott`, "secret"), "\x00")
+	for _, want := range []string{"config", "cmesh", "binPath=", `C:\Tools\cmesh.exe _service`, "start=", "auto", "obj=", `.\scott`, "password=", "secret"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("windowsServiceSCArgs missing %q in %#v", want, got)
+		}
+	}
+}
+
+func TestResolveWindowsServicePasswordSources(t *testing.T) {
+	if _, err := resolveWindowsServicePassword(serviceInstallOptions{Password: "secret"}); err == nil {
+		t.Fatal("password without user should fail")
+	}
+	if _, err := resolveWindowsServicePassword(serviceInstallOptions{User: `.\scott`}); err == nil {
+		t.Fatal("user without password source should fail")
+	}
+	t.Setenv("CMESH_TEST_SERVICE_PASSWORD", "secret")
+	got, err := resolveWindowsServicePassword(serviceInstallOptions{User: `.\scott`, PasswordEnv: "CMESH_TEST_SERVICE_PASSWORD"})
+	if err != nil {
+		t.Fatalf("resolve env password: %v", err)
+	}
+	if got != "secret" {
+		t.Fatalf("password = %q", got)
+	}
+}
+
 func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
 	req := schemaSmokeRequest(&config.Config{Node: config.NodeConfig{ID: "origin"}}, "peer", "/tmp/repo", "readonly", true, 30)
 	if req.Prompt != "Reply with exactly: cmesh smoke ok" {
