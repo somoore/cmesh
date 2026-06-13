@@ -64,11 +64,21 @@ type ToolError struct {
 	Detail string         `json:"detail"`
 }
 
+type TaskRecipe struct {
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	DefaultProfile   string   `json:"default_profile"`
+	PromptTemplate   string   `json:"prompt_template"`
+	ExpectedEvidence []string `json:"expected_evidence"`
+	OriginChecks     []string `json:"origin_checks"`
+}
+
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /", g.mcp)
 	mux.HandleFunc("POST /mcp", g.mcp)
 	mux.HandleFunc("GET /health", g.health)
+	mux.HandleFunc("POST /tools/task_catalog", g.taskCatalog)
 	mux.HandleFunc("POST /tools/list_peers", g.listPeers)
 	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
 	mux.HandleFunc("POST /tools/delegate", g.delegate)
@@ -188,6 +198,8 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}, nil
 	case "detect_runners":
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
+	case "task_catalog":
+		return ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}}, nil
 	case "list_tailnet_peers":
 		peers, err := onboard.TailnetPeers(ctx, g.Config.Node.MeshPort, true)
 		if err != nil {
@@ -403,6 +415,10 @@ func (g *Gateway) ListenAndServe(ctx context.Context) error {
 
 func (g *Gateway) health(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, ToolResponse{OK: true, Result: map[string]string{"status": "ok"}})
+}
+
+func (g *Gateway) taskCatalog(w http.ResponseWriter, r *http.Request) {
+	writeTool(w, ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}})
 }
 
 func (g *Gateway) listPeers(w http.ResponseWriter, r *http.Request) {
@@ -1158,6 +1174,101 @@ func rpcFailure(fallback task.ErrorCode, err error) (ToolResponse, error) {
 	return toolFailure(code, err.Error())
 }
 
+func taskRecipes() []TaskRecipe {
+	return []TaskRecipe{
+		{
+			ID:             "disk_check",
+			Title:          "Disk check",
+			DefaultProfile: "readonly",
+			PromptTemplate: "On this machine, run local read-only commands to report disk usage for {path_or_drive}. Return total, used, free, and percent free. Include the exact command names used and do not edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0",
+				"command_output stdout/stderr contains the runner transcript for the disk check",
+				"worker summary cites total, used, free, and percent free",
+			},
+			OriginChecks: []string{
+				"parse numeric disk values from command_output or cited command output",
+				"compare against a follow-up only when the numbers look inconsistent",
+			},
+		},
+		{
+			ID:             "repo_status",
+			Title:          "Repository status",
+			DefaultProfile: "readonly",
+			PromptTemplate: "In {repo_path}, inspect repository status. Report current branch, HEAD commit, dirty files, untracked files, and whether the branch is ahead or behind its upstream. Do not edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0",
+				"worker summary names branch and HEAD commit",
+				"worker summary lists dirty and untracked file counts",
+			},
+			OriginChecks: []string{
+				"check command_output before trusting the summary",
+				"ask a follow-up only for surprising dirty or divergent state",
+			},
+		},
+		{
+			ID:             "native_build",
+			Title:          "Native build",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, build the project using the native command for this machine: {build_command}. Fix only small, directly related build issues if requested by the origin. Return commands run, result, changed files, and verification steps.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code reflects the runner result",
+				"result envelope includes files_changed and diffstat when edits were made",
+				"worker summary lists build commands and status",
+			},
+			OriginChecks: []string{
+				"review files_changed before applying or merging work",
+				"rerun the relevant build locally or on the target peer when risk is high",
+			},
+		},
+		{
+			ID:             "service_log_summary",
+			Title:          "Service log summary",
+			DefaultProfile: "readonly",
+			PromptTemplate: "On this machine, inspect recent logs for service {service_name}. Summarize failures, timestamps, likely cause, and the exact log commands used. Do not restart services or edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0 unless log access failed",
+				"worker summary cites concrete timestamps or log lines",
+				"worker summary names the log source inspected",
+			},
+			OriginChecks: []string{
+				"treat summarized causes as hypotheses until verified",
+				"fetch transcript or ask for narrower logs before remediation",
+			},
+		},
+		{
+			ID:             "test_runner",
+			Title:          "Test runner",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, run the target test command: {test_command}. If it fails, diagnose and fix only directly related issues when allowed. Return commands run, failing output, changed files, and verification status.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code reflects the runner result",
+				"worker summary lists test command and status",
+				"result envelope includes files_changed and diffstat when edits were made",
+			},
+			OriginChecks: []string{
+				"rerun the exact test command before trusting a fix",
+				"inspect command_output and files_changed before follow-up delegation",
+			},
+		},
+		{
+			ID:             "branch_handoff",
+			Title:          "Branch handoff",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, continue work on the requested branch or task. Keep edits scoped to {scope}. Commit only if requested. Return branch, base commit, head commit, diffstat, files changed, tests run, and any artifact refs.",
+			ExpectedEvidence: []string{
+				"result envelope includes branch, base_commit, and head_commit when git work was available",
+				"result envelope includes diffstat and files_changed for edits",
+				"worker summary lists tests or explains why none ran",
+			},
+			OriginChecks: []string{
+				"fetch git-bundle artifacts or inspect the remote branch before merging",
+				"verify diffstat and tests against the requested scope",
+			},
+		},
+	}
+}
+
 func mcpTools() []map[string]any {
 	return []map[string]any{
 		{
@@ -1173,6 +1284,11 @@ func mcpTools() []map[string]any {
 		{
 			"name":        "detect_runners",
 			"description": "Detect supported local coding-agent runners such as Claude Code and Codex.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "task_catalog",
+			"description": "List bounded delegation recipes such as disk checks, repo status, native builds, service log summaries, test runs, and branch handoff.",
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{

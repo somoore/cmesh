@@ -445,6 +445,46 @@ func TestRegisterHarnessAdviceUsesHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestTaskCatalogIncludesFeedbackRecipes(t *testing.T) {
+	g := newTestGateway(t)
+	resp, err := g.callTool(context.Background(), "task_catalog", []byte(`{}`))
+	if err != nil || !resp.OK {
+		t.Fatalf("task_catalog returned resp=%+v err=%v", resp, err)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v", resp.Result)
+	}
+	recipes, ok := result["recipes"].([]TaskRecipe)
+	if !ok {
+		t.Fatalf("recipes = %#v", result["recipes"])
+	}
+	byID := map[string]TaskRecipe{}
+	for _, recipe := range recipes {
+		byID[recipe.ID] = recipe
+	}
+	for _, id := range []string{"disk_check", "repo_status", "native_build", "service_log_summary", "test_runner", "branch_handoff"} {
+		recipe, ok := byID[id]
+		if !ok {
+			t.Fatalf("missing recipe %q in %+v", id, recipes)
+		}
+		if recipe.DefaultProfile == "" || recipe.PromptTemplate == "" || len(recipe.ExpectedEvidence) == 0 || len(recipe.OriginChecks) == 0 {
+			t.Fatalf("recipe %q is incomplete: %+v", id, recipe)
+		}
+	}
+	tools := mcpTools()
+	foundTool := false
+	for _, tool := range tools {
+		if tool["name"] == "task_catalog" {
+			foundTool = true
+			break
+		}
+	}
+	if !foundTool {
+		t.Fatal("task_catalog is not advertised in MCP tools")
+	}
+}
+
 func TestCurrentProvenanceIgnoresDelegateRequestWithoutTaskToken(t *testing.T) {
 	t.Setenv("CMESH_ORIGIN_NODE_ID", "ambient-origin")
 	t.Setenv("CMESH_ORIGIN_SESSION_ID", "ambient-session")
