@@ -41,6 +41,13 @@ func Install(agent Agent, cmeshPath string) Result {
 	}
 }
 
+func ClaudeHTTPAddArgs(serverName, gatewayURL string) []string {
+	if serverName == "" {
+		serverName = ServerName
+	}
+	return []string{"mcp", "add", "--transport", "http", serverName, gatewayURL}
+}
+
 func UpsertCodexConfig(path, cmeshPath string) error {
 	if path == "" {
 		path = CodexConfigPath()

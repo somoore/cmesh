@@ -9,6 +9,7 @@
     "schema_version",
     "task_id",
     "status",
+    "command_output",
     "worker_summary_untrusted",
     "verification_required",
     "recommended_origin_checks",
@@ -65,6 +66,9 @@
     },
     "tests": {
       "$ref": "#/$defs/tests"
+    },
+    "command_output": {
+      "$ref": "#/$defs/command_output"
     },
     "worker_summary_untrusted": {
       "type": "string",
@@ -202,6 +206,40 @@
         "summary": {
           "type": "string",
           "maxLength": 4000
+        }
+      }
+    },
+    "command_output": {
+      "type": "object",
+      "description": "Machine-verifiable raw runner process artifact. Automated downstream logic must key off this field, not worker_summary_untrusted.",
+      "additionalProperties": false,
+      "required": ["command", "exit_code", "stdout", "stderr", "duration_s"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "stdout": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "stderr": {
+          "type": "string",
+          "maxLength": 1048576
+        },
+        "stdout_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "stderr_ref": {
+          "$ref": "#/$defs/ref"
+        },
+        "duration_s": {
+          "type": "integer",
+          "minimum": 0
         }
       }
     },

@@ -67,6 +67,7 @@ logs/
 *.db-wal
 
 # Go
+/cmesh
 bin/
 dist/
 build/

@@ -18,6 +18,7 @@ import (
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
+	"cmesh/internal/mcp/setupinstall"
 	"cmesh/internal/mesh/rpc"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/onboard"
@@ -35,6 +36,7 @@ type Gateway struct {
 
 type DelegateRequest struct {
 	Peer            string   `json:"peer"`
+	Peers           []string `json:"peers,omitempty"`
 	Prompt          string   `json:"prompt"`
 	CWD             string   `json:"cwd"`
 	Runner          string   `json:"runner,omitempty"`
@@ -62,11 +64,21 @@ type ToolError struct {
 	Detail string         `json:"detail"`
 }
 
+type TaskRecipe struct {
+	ID               string   `json:"id"`
+	Title            string   `json:"title"`
+	DefaultProfile   string   `json:"default_profile"`
+	PromptTemplate   string   `json:"prompt_template"`
+	ExpectedEvidence []string `json:"expected_evidence"`
+	OriginChecks     []string `json:"origin_checks"`
+}
+
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /", g.mcp)
 	mux.HandleFunc("POST /mcp", g.mcp)
 	mux.HandleFunc("GET /health", g.health)
+	mux.HandleFunc("POST /tools/task_catalog", g.taskCatalog)
 	mux.HandleFunc("POST /tools/list_peers", g.listPeers)
 	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
 	mux.HandleFunc("POST /tools/delegate", g.delegate)
@@ -186,6 +198,8 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}, nil
 	case "detect_runners":
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
+	case "task_catalog":
+		return ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}}, nil
 	case "list_tailnet_peers":
 		peers, err := onboard.TailnetPeers(ctx, g.Config.Node.MeshPort, true)
 		if err != nil {
@@ -259,9 +273,10 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		}
 		gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", g.Config.Node.MCPPort)
 		if !req.Confirmed {
+			claudeCommand := append([]string{"claude"}, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...)
 			return ToolResponse{OK: true, Result: map[string]any{
 				"requires_confirmation": true,
-				"claude_code_command":   "claude mcp add cmesh " + gatewayURL,
+				"claude_code_command":   strings.Join(claudeCommand, " "),
 				"codex_instruction":     "add a local HTTP MCP server named cmesh at " + gatewayURL,
 			}}, nil
 		}
@@ -270,7 +285,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			if err != nil {
 				return toolFailure(task.ErrorRunnerUnavailable, "Claude Code not found on PATH")
 			}
-			if err := exec.Command(claude, "mcp", "add", "cmesh", gatewayURL).Run(); err != nil {
+			if err := exec.Command(claude, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...).Run(); err != nil {
 				return toolFailure(task.ErrorWorkerFailed, err.Error())
 			}
 			return ToolResponse{OK: true, Result: map[string]string{"harness": "claude-code", "url": gatewayURL}}, nil
@@ -301,31 +316,20 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		}
 		info, err := client.Hello(ctx)
 		if err != nil {
-			return toolFailure(task.ErrorPeerUnreachable, err.Error())
+			return rpcFailure(task.ErrorPeerUnreachable, err)
 		}
 		return ToolResponse{OK: true, Result: info}, nil
 	case "test_peer":
 		var req struct {
-			Peer string `json:"peer"`
+			Peer           string `json:"peer"`
+			CWD            string `json:"cwd,omitempty"`
+			Profile        string `json:"profile,omitempty"`
+			TimeoutSeconds int    `json:"timeout_s,omitempty"`
 		}
 		if err := json.Unmarshal(args, &req); err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		client, err := g.client(req.Peer)
-		if err != nil {
-			return toolFailure(task.ErrorPeerUnreachable, err.Error())
-		}
-		info, err := client.Hello(ctx)
-		if err != nil {
-			return toolFailure(task.ErrorPeerUnreachable, err.Error())
-		}
-		return ToolResponse{OK: true, Result: map[string]any{
-			"peer_reachable": true,
-			"node_id":        info.NodeID,
-			"node_name":      info.NodeName,
-			"runners":        info.Runners,
-			"capabilities":   info.Capabilities,
-		}}, nil
+		return g.testPeerCall(ctx, req.Peer, req.CWD, req.Profile, req.TimeoutSeconds)
 	case "delegate":
 		var req DelegateRequest
 		if err := json.Unmarshal(args, &req); err != nil {
@@ -413,6 +417,10 @@ func (g *Gateway) health(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, ToolResponse{OK: true, Result: map[string]string{"status": "ok"}})
 }
 
+func (g *Gateway) taskCatalog(w http.ResponseWriter, r *http.Request) {
+	writeTool(w, ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}})
+}
+
 func (g *Gateway) listPeers(w http.ResponseWriter, r *http.Request) {
 	type peer struct {
 		Name    string `json:"name"`
@@ -461,6 +469,9 @@ func (g *Gateway) delegate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolResponse, error) {
+	if len(req.Peers) > 0 {
+		return g.delegateManyCall(ctx, req)
+	}
 	var followupPeerTask store.PeerTask
 	if req.FollowupTaskID != "" {
 		peerTask, err := g.Store.GetPeerTask(ctx, req.FollowupTaskID)
@@ -536,6 +547,8 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		if result, err := client.TaskResult(ctx, followupPeerTask.RemoteTaskID); err == nil && result.Result != nil {
 			resumeSessionID = stringValue(result.Result.RunnerExtra, "session_id")
 			followupBaseCommit = result.Result.HeadCommit
+		} else if err != nil {
+			return rpcFailure(task.ErrorWorkerFailed, err)
 		} else {
 			return toolFailure(task.ErrorWorkerFailed, "followup task result is not available; cannot resume session")
 		}
@@ -564,12 +577,15 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		},
 	})
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
+	remoteTaskID := resp.TaskID
+	localResp := resp
+	localResp.TaskID = taskID
 	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{
 		TaskID:          taskID,
 		PeerNodeID:      firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
-		RemoteTaskID:    resp.TaskID,
+		RemoteTaskID:    remoteTaskID,
 		OriginSessionID: sessionID,
 		State:           resp.State,
 	})
@@ -584,7 +600,126 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		PolicyDecision: "allowed",
 		Source:         "local_gateway",
 	})
-	return ToolResponse{OK: true, Result: resp}, nil
+	return ToolResponse{OK: true, Result: localResp}, nil
+}
+
+func (g *Gateway) delegateManyCall(ctx context.Context, req DelegateRequest) (ToolResponse, error) {
+	peers := uniqueNonEmpty(req.Peers)
+	if req.Peer != "" {
+		peers = uniqueNonEmpty(append([]string{req.Peer}, peers...))
+	}
+	if len(peers) == 0 {
+		return toolFailure(task.ErrorPeerUnreachable, "no peers supplied")
+	}
+	results := make(map[string]ToolResponse, len(peers))
+	okAll := true
+	for _, peer := range peers {
+		peerReq := req
+		peerReq.Peer = peer
+		peerReq.Peers = nil
+		resp, _ := g.delegateCall(ctx, peerReq)
+		results[peer] = resp
+		if !resp.OK {
+			okAll = false
+		}
+	}
+	return ToolResponse{OK: okAll, Result: map[string]any{"peers": results}}, nil
+}
+
+const gatewaySmokeExpectedResponse = "cmesh smoke ok"
+
+func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, timeoutSeconds int) (ToolResponse, error) {
+	if strings.TrimSpace(peer) == "" {
+		return toolFailure(task.ErrorPeerUnreachable, "peer is required")
+	}
+	if strings.TrimSpace(cwd) == "" {
+		cwd = "~"
+	}
+	if strings.TrimSpace(profile) == "" {
+		profile = "readonly"
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+	client, err := g.client(peer)
+	if err != nil {
+		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+	}
+	info, err := client.Hello(ctx)
+	if err != nil {
+		return rpcFailure(task.ErrorPeerUnreachable, err)
+	}
+	delegated, err := g.delegateCall(ctx, DelegateRequest{
+		Peer:           peer,
+		Prompt:         "Reply with exactly: " + gatewaySmokeExpectedResponse,
+		CWD:            cwd,
+		Profile:        profile,
+		TimeoutSeconds: timeoutSeconds,
+		Wait:           true,
+		IdempotencyKey: strings.Join([]string{"mcp-smoke", peer, cwd, profile, strconv.Itoa(timeoutSeconds)}, "\x00"),
+	})
+	if err != nil {
+		return delegated, err
+	}
+	created, ok := delegated.Result.(schema.CreateTaskResponse)
+	if !ok {
+		return toolFailure(task.ErrorWorkerFailed, "smoke task response was not a result envelope")
+	}
+	result, err := g.resultCall(ctx, created.TaskID)
+	if err != nil {
+		return result, err
+	}
+	taskResult, ok := result.Result.(schema.TaskResultResponse)
+	if !ok || taskResult.Result == nil {
+		return toolFailure(task.ErrorTranscriptUnavailable, "smoke task result envelope is not available")
+	}
+	auditEventWritten, err := g.Store.HasAuditEvent(ctx, created.TaskID, "task.dispatch.requested")
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	verified := gatewaySmokeResultMatches(taskResult.Result)
+	checks := map[string]bool{
+		"peer_reachable":          true,
+		"policy_allowed":          delegated.OK,
+		"task_created":            created.TaskID != "",
+		"runner_invoked":          taskResult.Result.CommandOutput.Command != "",
+		"prompt_received":         verified,
+		"smoke_response_verified": verified,
+		"result_envelope_parsed":  taskResult.Result.Status == task.StateDone,
+		"audit_event_written":     auditEventWritten,
+	}
+	if !verified {
+		return ToolResponse{OK: false, Result: map[string]any{
+			"checks":       checks,
+			"peer":         peer,
+			"node_id":      info.NodeID,
+			"node_name":    info.NodeName,
+			"task_id":      created.TaskID,
+			"result":       taskResult,
+			"expected":     gatewaySmokeExpectedResponse,
+			"failure_hint": "runner did not return the expected smoke response in command_output",
+		}}, fmt.Errorf("smoke task did not return %q", gatewaySmokeExpectedResponse)
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"checks":       checks,
+		"peer":         peer,
+		"node_id":      info.NodeID,
+		"node_name":    info.NodeName,
+		"runners":      info.Runners,
+		"capabilities": info.Capabilities,
+		"task_id":      created.TaskID,
+		"result":       taskResult,
+	}}, nil
+}
+
+func gatewaySmokeResultMatches(result *task.ResultEnvelope) bool {
+	if result == nil {
+		return false
+	}
+	if result.CommandOutput.Command == "" || result.CommandOutput.ExitCode != 0 {
+		return false
+	}
+	return strings.Contains(result.CommandOutput.Stdout, gatewaySmokeExpectedResponse) || strings.Contains(result.CommandOutput.Stderr, gatewaySmokeExpectedResponse)
 }
 
 func (g *Gateway) taskStatus(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +832,7 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 	}
 	resp, err := client.TaskResult(ctx, peerTask.RemoteTaskID)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -713,7 +848,7 @@ func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolRespon
 	}
 	resp, err := client.TaskTranscript(ctx, peerTask.RemoteTaskID)
 	if err != nil {
-		return toolFailure(task.ErrorTranscriptUnavailable, err.Error())
+		return rpcFailure(task.ErrorTranscriptUnavailable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -735,7 +870,7 @@ func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolRe
 	}
 	body, err := client.TaskArtifact(ctx, peerTask.RemoteTaskID, kind)
 	if err != nil {
-		return toolFailure(task.ErrorWorkerFailed, err.Error())
+		return rpcFailure(task.ErrorWorkerFailed, err)
 	}
 	dir := filepath.Join(g.Config.Node.DataDir, "artifacts", "from-peers")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -759,7 +894,7 @@ func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolRe
 	}
 	resp, err := client.Cancel(ctx, peerTask.RemoteTaskID, reason)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -895,6 +1030,23 @@ func contains(values []string, needle string) bool {
 	return false
 }
 
+func uniqueNonEmpty(values []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 func (g *Gateway) record(ctx context.Context, event audit.Event) {
 	written, err := g.Audit.Append(event)
 	if err == nil {
@@ -1014,6 +1166,109 @@ func toolFailure(code task.ErrorCode, detail string) (ToolResponse, error) {
 	return resp, fmt.Errorf("%s: %s", code, detail)
 }
 
+func rpcFailure(fallback task.ErrorCode, err error) (ToolResponse, error) {
+	code := rpc.CodeOf(err)
+	if code == "" {
+		code = fallback
+	}
+	return toolFailure(code, err.Error())
+}
+
+func taskRecipes() []TaskRecipe {
+	return []TaskRecipe{
+		{
+			ID:             "disk_check",
+			Title:          "Disk check",
+			DefaultProfile: "readonly",
+			PromptTemplate: "On this machine, run local read-only commands to report disk usage for {path_or_drive}. Return total, used, free, and percent free. Include the exact command names used and do not edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0",
+				"command_output stdout/stderr contains the runner transcript for the disk check",
+				"worker summary cites total, used, free, and percent free",
+			},
+			OriginChecks: []string{
+				"parse numeric disk values from command_output or cited command output",
+				"compare against a follow-up only when the numbers look inconsistent",
+			},
+		},
+		{
+			ID:             "repo_status",
+			Title:          "Repository status",
+			DefaultProfile: "readonly",
+			PromptTemplate: "In {repo_path}, inspect repository status. Report current branch, HEAD commit, dirty files, untracked files, and whether the branch is ahead or behind its upstream. Do not edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0",
+				"worker summary names branch and HEAD commit",
+				"worker summary lists dirty and untracked file counts",
+			},
+			OriginChecks: []string{
+				"check command_output before trusting the summary",
+				"ask a follow-up only for surprising dirty or divergent state",
+			},
+		},
+		{
+			ID:             "native_build",
+			Title:          "Native build",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, build the project using the native command for this machine: {build_command}. Fix only small, directly related build issues if requested by the origin. Return commands run, result, changed files, and verification steps.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code reflects the runner result",
+				"result envelope includes files_changed and diffstat when edits were made",
+				"worker summary lists build commands and status",
+			},
+			OriginChecks: []string{
+				"review files_changed before applying or merging work",
+				"rerun the relevant build locally or on the target peer when risk is high",
+			},
+		},
+		{
+			ID:             "service_log_summary",
+			Title:          "Service log summary",
+			DefaultProfile: "readonly",
+			PromptTemplate: "On this machine, inspect recent logs for service {service_name}. Summarize failures, timestamps, likely cause, and the exact log commands used. Do not restart services or edit files.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code is 0 unless log access failed",
+				"worker summary cites concrete timestamps or log lines",
+				"worker summary names the log source inspected",
+			},
+			OriginChecks: []string{
+				"treat summarized causes as hypotheses until verified",
+				"fetch transcript or ask for narrower logs before remediation",
+			},
+		},
+		{
+			ID:             "test_runner",
+			Title:          "Test runner",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, run the target test command: {test_command}. If it fails, diagnose and fix only directly related issues when allowed. Return commands run, failing output, changed files, and verification status.",
+			ExpectedEvidence: []string{
+				"command_output.exit_code reflects the runner result",
+				"worker summary lists test command and status",
+				"result envelope includes files_changed and diffstat when edits were made",
+			},
+			OriginChecks: []string{
+				"rerun the exact test command before trusting a fix",
+				"inspect command_output and files_changed before follow-up delegation",
+			},
+		},
+		{
+			ID:             "branch_handoff",
+			Title:          "Branch handoff",
+			DefaultProfile: "dev",
+			PromptTemplate: "In {repo_path}, continue work on the requested branch or task. Keep edits scoped to {scope}. Commit only if requested. Return branch, base commit, head commit, diffstat, files changed, tests run, and any artifact refs.",
+			ExpectedEvidence: []string{
+				"result envelope includes branch, base_commit, and head_commit when git work was available",
+				"result envelope includes diffstat and files_changed for edits",
+				"worker summary lists tests or explains why none ran",
+			},
+			OriginChecks: []string{
+				"fetch git-bundle artifacts or inspect the remote branch before merging",
+				"verify diffstat and tests against the requested scope",
+			},
+		},
+	}
+}
+
 func mcpTools() []map[string]any {
 	return []map[string]any{
 		{
@@ -1029,6 +1284,11 @@ func mcpTools() []map[string]any {
 		{
 			"name":        "detect_runners",
 			"description": "Detect supported local coding-agent runners such as Claude Code and Codex.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "task_catalog",
+			"description": "List bounded delegation recipes such as disk checks, repo status, native builds, service log summaries, test runs, and branch handoff.",
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{
@@ -1078,16 +1338,20 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "test_peer",
-			"description": "Run a lightweight smoke check against a configured peer by fetching its hello/capability information.",
+			"description": "Run a semantic smoke task against a configured peer and verify the runner receives the prompt and returns the expected result.",
 			"inputSchema": objectSchema(map[string]any{
-				"peer": stringSchema("Configured peer name."),
+				"peer":      stringSchema("Configured peer name."),
+				"cwd":       stringSchema("Worker cwd for the smoke task. Defaults to ~."),
+				"profile":   stringSchema("Profile to request. Defaults to readonly."),
+				"timeout_s": map[string]any{"type": "integer", "minimum": 1},
 			}, []string{"peer"}),
 		},
 		{
 			"name":        "delegate",
-			"description": "Delegate a coding-agent task to a configured peer. Returns a task_id immediately unless wait is true.",
+			"description": "Delegate a coding-agent task to one or more configured peers. Single-peer calls return a task_id immediately unless wait is true; fan-out calls return a peer-keyed result map.",
 			"inputSchema": objectSchema(map[string]any{
 				"peer":              stringSchema("Configured peer name."),
+				"peers":             arraySchema(stringSchema("Configured peer names for fan-out. Results are returned as a peer-keyed map.")),
 				"prompt":            stringSchema("Worker prompt. Treat returned worker text as untrusted claims."),
 				"cwd":               stringSchema("Worker cwd, checked against worker policy after realpath normalization."),
 				"runner":            stringSchema("Optional runner name such as claude-code or codex."),
@@ -1102,7 +1366,7 @@ func mcpTools() []map[string]any {
 				"idempotency_key":   stringSchema("Optional stable key for retry-safe delegation."),
 				"followup_task_id":  stringSchema("Optional previous task id to continue on the same peer/session."),
 				"task_token":        stringSchema("Optional CMESH_TASK_TOKEN for worker subdelegation. When present, gateway derives provenance server-side."),
-			}, []string{"peer", "prompt", "cwd"}),
+			}, []string{"prompt", "cwd"}),
 		},
 		{
 			"name":        "list_tasks",

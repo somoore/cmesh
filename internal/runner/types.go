@@ -92,8 +92,9 @@ type ProfileManifest struct {
 }
 
 type RunRequest struct {
-	Context     context.Context
-	TaskID      string
+	Context context.Context
+	TaskID  string
+	// Prompt is the task body. Runner adapters pass it on stdin by default; argv prompt delivery is opt-in only for a runner that explicitly proves it is safe.
 	Prompt      string
 	CWD         string
 	Profile     string
@@ -129,12 +130,23 @@ type Result struct {
 	Diffstat                string         `json:"diffstat,omitempty"`
 	FilesChanged            []string       `json:"files_changed,omitempty"`
 	Tests                   TestClaims     `json:"tests"`
+	CommandOutput           CommandOutput  `json:"command_output"`
 	WorkerSummaryUntrusted  string         `json:"worker_summary_untrusted"`
 	Usage                   Usage          `json:"usage"`
 	VerificationRequired    bool           `json:"verification_required"`
 	RecommendedOriginChecks []string       `json:"recommended_origin_checks,omitempty"`
 	RunnerExtra             map[string]any `json:"runner_extra,omitempty"`
 	TranscriptRef           string         `json:"-"`
+}
+
+type CommandOutput struct {
+	Command   string `json:"command"`
+	ExitCode  int    `json:"exit_code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	StdoutRef string `json:"stdout_ref,omitempty"`
+	StderrRef string `json:"stderr_ref,omitempty"`
+	DurationS int64  `json:"duration_s"`
 }
 
 type TestClaims struct {

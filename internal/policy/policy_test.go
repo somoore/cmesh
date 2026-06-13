@@ -91,6 +91,35 @@ func TestInboundRejectsSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestInboundRejectsDisallowedCWD(t *testing.T) {
+	allowed := t.TempDir()
+	outside := t.TempDir()
+	cfg := testConfig(allowed)
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          outside,
+		Profile:      "dev",
+		OriginNodeID: "mac-studio",
+	})
+	if decision.Allowed || decision.Code != "cwd_denied" {
+		t.Fatalf("expected cwd_denied, got %+v", decision)
+	}
+}
+
+func TestInboundRejectsUnavailableProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          root,
+		Profile:      "network",
+		OriginNodeID: "mac-studio",
+	})
+	if decision.Allowed || decision.Code != "profile_unavailable" {
+		t.Fatalf("expected profile_unavailable, got %+v", decision)
+	}
+}
+
 func TestInboundRejectsCycle(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -103,6 +132,21 @@ func TestInboundRejectsCycle(t *testing.T) {
 	})
 	if decision.Allowed || decision.Code != "profile_denied" {
 		t.Fatalf("expected cycle denial, got %+v", decision)
+	}
+}
+
+func TestOutboundRejectsUnknownPeer(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Policy.Outbound.AllowedPeers = []string{"homelab-vm"}
+	decision := New(cfg).CheckOutbound(TaskIntent{
+		PeerName:     "unknown-peer",
+		CWD:          root,
+		Profile:      "dev",
+		OriginNodeID: "mac-studio",
+	})
+	if decision.Allowed || decision.Code != "peer_unauthorized" {
+		t.Fatalf("expected peer_unauthorized, got %+v", decision)
 	}
 }
 

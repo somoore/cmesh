@@ -60,6 +60,12 @@ If `random-laptop` is on the tailnet but not in `allowed_peers`, the task is den
 
 cmesh does not trust identity headers. The loopback gateway rejects forwarded identity headers, and mesh RPC identity comes from Tailscale LocalAPI, not from `X-Forwarded-*`, bearer tokens, or request JSON.
 
+### A direct mesh RPC request with forged origin fields
+
+The worker treats `origin_node_id`, `provenance.origin_node_id`, and `delegation_chain` as claims that must be consistent with the whois-derived peer identity. A first-hop request is rejected if the claimed origin does not match the authenticated peer. A subdelegation request is rejected if the authenticated peer is not the last hop in the supplied chain.
+
+Task lookup operations are scoped the same way: the original origin can fetch its task, and an intermediate worker can fetch the downstream task it directly created, but another tailnet peer cannot list, read, cancel, or fetch artifacts for tasks it does not own.
+
 ### A worker trying to forge delegation provenance
 
 Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and writes a task-scoped MCP config with `Authorization: Bearer <task-token>`. The Claude Code runner loads that file with `--mcp-config` and `--strict-mcp-config`, so MCP calls from the worker carry the token structurally even when the gateway requires `host_token`.
@@ -89,6 +95,7 @@ cmesh protects the delegation boundary:
 - which runner/profile may be used;
 - whether a replayed request is identical or conflicting;
 - whether every task has a durable state;
+- whether task read/cancel/artifact operations are limited to the origin or direct requester;
 - whether every dispatch, denial, result, and failure is auditable.
 - whether subdelegation provenance is derived from stored task context instead of worker claims.
 
@@ -132,6 +139,7 @@ For a personal tailnet or trusted small-team tailnet, cmesh is designed to be re
 - risky profiles are used only on disposable or snapshot-protected machines;
 - runner credentials are scoped appropriately;
 - high-risk worker results are verified locally.
+- `cmesh doctor runner <runner>` and `cmesh doctor service-context` pass under the same account or service user that runs the daemon.
 
 For production or team-wide use, treat cmesh as security-sensitive infrastructure. Review policy, audit logs, runner manifests, OS permissions, and Tailscale grants before allowing broad access.
 
@@ -161,6 +169,14 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 - Do not configure cmesh to pass skip-all-permissions flags.
 - Keep runner credentials local to the machine that uses them.
 
+### Service credentials
+
+Runner credentials are ambient authority for whatever OS account runs `cmesh up`. Claude Code subscription login state normally lives under that user's home directory, commonly below `.claude`; Codex login/config state likewise lives in the runner user's local config. API-key profiles may also read environment variables or configured key helpers. Protect those locations with OS account permissions and do not place runner auth in a broadly readable service environment.
+
+Prefer a dedicated least-privilege service account for always-on workers. Give that account only the repository roots, toolchains, Tailscale LocalAPI access, and runner credentials needed by the profiles it exposes. If a human account is used on Windows to inherit existing Claude or Codex auth, treat that account as a standing remote-execution credential and keep `allowed_peers`, `allowed_cwds`, and risky profiles narrow.
+
+When a workflow can use scoped credentials, prefer them over inherited auth: bare/API-key profiles with a constrained key helper, short-lived environment injection, or per-task credentials supplied by a wrapper. cmesh removes task tokens after terminal states, but it does not automatically rotate third-party runner credentials.
+
 ### Host security
 
 - Run cmesh as a dedicated OS user where practical.
@@ -187,6 +203,8 @@ These gaps do not make the design pointless. They define the boundary: cmesh is 
 Before relying on a node as a worker:
 
 - `cmesh doctor` passes.
+- `cmesh doctor runner claude-code` or the configured runner equivalent passes.
+- `cmesh doctor service-context` passes under the service account.
 - Mesh RPC is reachable only on the Tailscale IP.
 - MCP gateway is reachable only on loopback.
 - Tailscale grants restrict `tcp:7778`.
@@ -196,3 +214,4 @@ Before relying on a node as a worker:
 - Dirty worktrees are refused unless explicitly allowed.
 - Audit logs are being written.
 - You can retrieve task status and result after restarting the origin daemon.
+- A different allowed peer cannot fetch or cancel another peer's task.

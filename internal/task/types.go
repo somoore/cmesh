@@ -83,11 +83,22 @@ type ResultEnvelope struct {
 	Diffstat                string                 `json:"diffstat,omitempty"`
 	FilesChanged            []string               `json:"files_changed,omitempty"`
 	Tests                   TestClaims             `json:"tests"`
+	CommandOutput           CommandOutput          `json:"command_output,omitempty"`
 	WorkerSummaryUntrusted  string                 `json:"worker_summary_untrusted,omitempty"`
 	Usage                   Usage                  `json:"usage"`
 	VerificationRequired    bool                   `json:"verification_required"`
 	RecommendedOriginChecks []string               `json:"recommended_origin_checks,omitempty"`
 	RunnerExtra             map[string]interface{} `json:"runner_extra,omitempty"`
+}
+
+type CommandOutput struct {
+	Command   string `json:"command"`
+	ExitCode  int    `json:"exit_code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	StdoutRef string `json:"stdout_ref,omitempty"`
+	StderrRef string `json:"stderr_ref,omitempty"`
+	DurationS int64  `json:"duration_s"`
 }
 
 type TestClaims struct {
@@ -222,6 +233,9 @@ func ValidateResult(result ResultEnvelope) error {
 	}
 	if len([]byte(result.WorkerSummaryUntrusted)) > WorkerSummaryMaxBytes {
 		return fmt.Errorf("worker summary exceeds %d bytes", WorkerSummaryMaxBytes)
+	}
+	if result.Status == StateDone && result.CommandOutput.Command != "" && result.CommandOutput.ExitCode != 0 {
+		return fmt.Errorf("done result has non-zero command exit code %d", result.CommandOutput.ExitCode)
 	}
 	return nil
 }

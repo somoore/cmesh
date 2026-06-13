@@ -35,7 +35,7 @@ flowchart LR
     Git["Git contract<br/>clean worktree check<br/>cmesh/task branch<br/>local commit + footers"]
     Runner["Runner adapter<br/>Claude Code / Codex"]
     Proc["Worker process group<br/>captured stdout/stderr<br/>transcript refs"]
-    Result["Canonical result envelope<br/>worker_summary_untrusted<br/>diffstat, files, tests,<br/>verification_required"]
+    Result["Canonical result envelope<br/>command_output artifact<br/>worker_summary_untrusted<br/>diffstat, files, tests,<br/>verification_required"]
   end
 
   Agent -. "first-run setup" .-> SetupMCP
@@ -83,21 +83,30 @@ Once `cmesh up` is running:
 5. The origin daemon sends `POST /v1/tasks` to the configured peer over Tailscale.
 6. The worker daemon rejects non-tailnet sources before policy evaluation.
 7. The worker daemon asks Tailscale LocalAPI `whois` for the inbound peer identity.
-8. The worker daemon applies inbound policy:
+8. The worker daemon validates that request provenance is consistent with the whois-derived peer identity. Direct first-hop requests must identify the authenticated peer as origin; subdelegation requests must name the authenticated peer as the last hop in the delegation chain.
+9. The worker daemon applies inbound policy:
    - allowed peer;
    - hop limit;
    - cycle detection;
    - realpath-normalized cwd allowlist;
    - configured profile;
    - configured runner.
-9. The worker daemon creates or replays the task through the idempotency table.
-10. The worker daemon prepares the git contract:
+10. The worker daemon creates or replays the task through the idempotency table.
+11. The worker daemon prepares the git contract:
     - refuse dirty worktrees unless `allow_dirty=true`;
     - create deterministic `cmesh/<task-id>/<slug>` branch;
     - commit with cmesh metadata footers after runner execution.
-11. The runner adapter launches the local worker process with captured logs.
-12. The worker stores a bounded canonical result envelope.
-13. The origin agent polls `task_status` and fetches `task_result`.
+12. The runner adapter launches the local worker process with captured logs. The task prompt is supplied on stdin by default; argv prompt delivery is not the runner contract.
+13. The worker stores a bounded canonical result envelope. `command_output` contains the redacted command, raw stdout, raw stderr, exit code, duration, and log refs. `worker_summary_untrusted` is presentation-only text.
+14. The origin agent polls `task_status` and fetches `task_result`.
+
+Task status, result, transcript, artifact, cancel, and list operations are task-owner scoped. The original origin may read its tasks, and an intermediate worker may read the downstream task it directly created during subdelegation; unrelated peers cannot enumerate or operate on those tasks.
+
+`cmesh up` runs a local preflight before binding the mesh listener. The preflight checks configured runner profiles and performs a local smoke round-trip through each runner. A daemon that cannot resolve/authenticate a runner, cannot feed prompts over stdin, or cannot verify the smoke response from the raw `command_output` artifact fails before advertising itself as reachable.
+
+Fan-out delegation is represented as a peer-keyed map of ordinary single-peer dispatches. Each peer gets its own task id, durable state, and result envelope; aggregation never merges worker prose across machines.
+
+Session continuity is opt-in. A normal task launches a fresh runner process and produces an auditable envelope. A follow-up task can name `followup_task_id`; cmesh keeps that continuation on the same peer, uses the previous head commit as the base, and passes a runner session id only when the previous result exposed one.
 
 ## Trust boundaries
 

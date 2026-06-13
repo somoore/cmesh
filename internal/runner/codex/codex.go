@@ -120,6 +120,7 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 		Argv:        argv,
 		Dir:         req.CWD,
 		Env:         env,
+		Stdin:       req.Prompt,
 		Timeout:     req.Timeout,
 		OutputLimit: req.OutputLimit,
 		LogDir:      req.LogDir,
@@ -147,7 +148,6 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	if len(r.cfg.Command) > 0 {
 		argv := append([]string(nil), r.cfg.Command...)
 		argv = append(argv, profile.ExtraArgs...)
-		argv = append(argv, req.Prompt)
 		return argv
 	}
 	argv := []string{r.cfg.Binary}
@@ -173,7 +173,6 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 		argv = append(argv, "-C", req.CWD)
 	}
 	argv = append(argv, profile.ExtraArgs...)
-	argv = append(argv, req.Prompt)
 	return argv
 }
 
@@ -200,8 +199,7 @@ func nativeFlags(profile ProfileConfig) []string {
 }
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
-	_ = req
-	return runner.ResultFromProcess(Name, proc, argv)
+	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
 }
 
 func defaultProfiles() map[string]ProfileConfig {

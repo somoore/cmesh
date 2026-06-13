@@ -124,7 +124,6 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	if req.Metadata.ResumeSessionID != "" {
 		argv = append(argv, "--resume", req.Metadata.ResumeSessionID)
 	}
-	argv = append(argv, req.Prompt)
 	env := merge(profile.Env, req.Env)
 	ctx := req.Context
 	if ctx == nil {
@@ -134,6 +133,7 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 		Argv:        argv,
 		Dir:         req.CWD,
 		Env:         env,
+		Stdin:       req.Prompt,
 		Timeout:     req.Timeout,
 		OutputLimit: req.OutputLimit,
 		LogDir:      req.LogDir,
@@ -215,8 +215,7 @@ func checkBareCredentials(profile ProfileConfig, env map[string]string) error {
 }
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
-	_ = req
-	return runner.ResultFromProcess(Name, proc, argv)
+	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
 }
 
 func defaultProfiles() map[string]ProfileConfig {

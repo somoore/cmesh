@@ -1,8 +1,8 @@
 # cmesh
 
-**Ask the coding agent on another machine to do work for you, without leaving your current agent session.**
+**Ask a machine you control to do bounded work through its local agent, without leaving your current agent session.**
 
-cmesh lets Claude Code, Codex, or another local coding agent on your current machine delegate a task to a different machine you control.
+cmesh lets Claude Code, Codex, or another local coding agent on your current machine delegate a scoped task to a different machine you control.
 
 For example: you are on your Mac with Claude Code open, but you need to inspect a service, run a Linux build, or check logs on a bare-metal server in a datacenter. If both machines are on your Tailscale tailnet and the server has a supported runner installed, cmesh gives your local agent a tool for sending that task to the server and getting the result back.
 
@@ -33,7 +33,7 @@ cmesh provides:
 - audit logs;
 - git branch handoff for code changes.
 
-In plain terms: **you set up the machines, Tailscale, and runner auth; cmesh handles the agent-to-agent handoff.**
+In plain terms: **you set up the machines, Tailscale, and runner auth; cmesh handles policy-gated remote task execution through local agents.**
 
 ## Why it exists
 
@@ -41,7 +41,7 @@ Coding agents are usually trapped on one machine, but real development work is n
 
 You may have a Linux box for production-like builds, a Mac for Apple targets, a Windows machine for native tests, a snapshot VM for risky edits, or a bare-metal server with the exact service state you need to inspect. Without cmesh, using those machines means manual SSH, copied prompts, lost context, fuzzy permissions, and no durable task state.
 
-cmesh makes that handoff an agent tool call instead of a manual ritual.
+cmesh makes that handoff an agent tool call instead of a manual ritual. It is task-driven rather than telemetry-driven: a human or agent asks a specific peer to do specific work, the peer evaluates policy, runs its local runner, and returns a structured, auditable result.
 
 ## How the handoff works
 
@@ -57,7 +57,7 @@ The remote MCP surface is never exposed. The only MCP endpoint is local loopback
 
 ## Current status
 
-cmesh is early, but it is structured as a real daemon and CLI, not a mockup. The first useful target is Mac/Linux peer delegation over Tailscale with static peers.
+cmesh is early, but it is structured as a real daemon and CLI, not a mockup. The first useful target is hardened Mac, Windows, and Linux peer delegation over Tailscale with static peers.
 
 Implemented surfaces center on four top-level commands: `cmesh init`, `cmesh doctor`, `cmesh up`, and `cmesh peers`. Compatibility aliases such as `connect`, `test`, `status`, `log`, and `hello` remain available for scripts, but the intended developer path stays small.
 

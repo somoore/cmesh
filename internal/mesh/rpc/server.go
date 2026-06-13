@@ -149,11 +149,22 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.Provenance.OriginNodeID == "" {
-		req.Provenance.OriginNodeID = req.OriginNodeID
-	}
-	if req.Provenance.OriginSessionID == "" {
-		req.Provenance.OriginSessionID = req.OriginSessionID
+	if err := validateOriginClaims(&req, identity); err != nil {
+		s.record(r.Context(), audit.Event{
+			Type:           "task.dispatch.denied",
+			TaskID:         req.TaskID,
+			PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+			OriginSession:  firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
+			Chain:          append([]string(nil), req.Provenance.DelegationChain...),
+			Runner:         req.Runner,
+			Profile:        req.Profile,
+			PolicyDecision: "provenance_mismatch",
+			Source:         "mesh_rpc",
+			ErrorCode:      string(task.ErrorPeerUnauthorized),
+			ErrorDetail:    err.Error(),
+		})
+		writeError(w, http.StatusForbidden, task.ErrorPeerUnauthorized, err.Error())
+		return
 	}
 	req.Provenance.WorkerNodeID = s.Config.Node.ID
 	req.Provenance.PromptHash = task.PromptHash(req.Prompt)
@@ -400,7 +411,8 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	limit := 20
@@ -414,11 +426,21 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, schema.TaskListResponse{Tasks: tasks})
+	visible := tasks[:0]
+	for _, rec := range tasks {
+		if taskAccessibleTo(rec, identity) {
+			visible = append(visible, rec)
+		}
+	}
+	writeJSON(w, http.StatusOK, schema.TaskListResponse{Tasks: visible})
 }
 
 func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	if _, ok := s.authorizeTaskAccess(w, r, identity, r.PathValue("task_id")); !ok {
 		return
 	}
 	if r.URL.Query().Get("wait") == "true" {
@@ -431,11 +453,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		s.waitForTaskStatus(w, r, r.PathValue("task_id"), timeout)
 		return
 	}
-	rec, err := s.Store.GetTask(r.Context(), r.PathValue("task_id"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
-		return
-	}
+	rec, _ := s.Store.GetTask(r.Context(), r.PathValue("task_id"))
 	elapsed := time.Since(rec.CreatedAt)
 	if !rec.CompletedAt.IsZero() {
 		elapsed = rec.CompletedAt.Sub(rec.CreatedAt)
@@ -452,12 +470,12 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTaskTranscript(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	taskID := r.PathValue("task_id")
-	if _, err := s.Store.GetTask(r.Context(), taskID); err != nil {
-		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
 		return
 	}
 	logDir := filepath.Join(s.Config.Node.DataDir, "logs", taskID)
@@ -482,7 +500,8 @@ func (s *Server) handleTaskTranscript(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTaskArtifact(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	taskID := r.PathValue("task_id")
@@ -490,8 +509,7 @@ func (s *Server) handleTaskArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, "unsupported artifact kind")
 		return
 	}
-	if _, err := s.Store.GetTask(r.Context(), taskID); err != nil {
-		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
 		return
 	}
 	path := filepath.Join(s.Config.Node.DataDir, "artifacts", taskID+".bundle")
@@ -508,12 +526,12 @@ func (s *Server) handleTaskArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleTaskResult(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
-	rec, err := s.Store.GetTask(r.Context(), r.PathValue("task_id"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+	rec, ok := s.authorizeTaskAccess(w, r, identity, r.PathValue("task_id"))
+	if !ok {
 		return
 	}
 	if rec.Result == nil {
@@ -524,10 +542,14 @@ func (s *Server) handleTaskResult(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
 	rec, err := s.Store.UpdateTaskState(r.Context(), taskID, store.StateUpdate{State: task.StateCancelled, TerminalErrorCode: task.ErrorCancelled})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, task.ErrorCancelled, err.Error())
@@ -835,6 +857,104 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (tsid.Iden
 	return id, true
 }
 
+func validateOriginClaims(req *schema.CreateTaskRequest, identity tsid.Identity) error {
+	origin := firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID)
+	if req.OriginNodeID != "" && req.Provenance.OriginNodeID != "" && req.OriginNodeID != req.Provenance.OriginNodeID {
+		return fmt.Errorf("origin_node_id does not match provenance origin_node_id")
+	}
+	if req.Provenance.OriginSessionID == "" {
+		req.Provenance.OriginSessionID = req.OriginSessionID
+	}
+	if req.OriginSessionID == "" {
+		req.OriginSessionID = req.Provenance.OriginSessionID
+	}
+	if len(req.Provenance.DelegationChain) == 0 {
+		if origin != "" && !matchesIdentityClaim(origin, identity) {
+			return fmt.Errorf("origin_node_id %q does not match authenticated peer", origin)
+		}
+		origin = firstNonEmpty(origin, identity.NodeID, identity.NodeName, identity.StableID)
+		req.Provenance.OriginNodeID = origin
+		req.OriginNodeID = origin
+		req.Provenance.DelegationChain = []string{origin}
+		req.Provenance.HopCount = 0
+		return nil
+	}
+	if err := validateDelegationChain(req.Provenance.DelegationChain); err != nil {
+		return err
+	}
+	lastHop := req.Provenance.DelegationChain[len(req.Provenance.DelegationChain)-1]
+	if !matchesIdentityClaim(lastHop, identity) {
+		return fmt.Errorf("delegation_chain last hop %q does not match authenticated peer", lastHop)
+	}
+	if origin == "" {
+		origin = req.Provenance.DelegationChain[0]
+	}
+	if req.Provenance.DelegationChain[0] != "" && origin != req.Provenance.DelegationChain[0] {
+		return fmt.Errorf("origin_node_id %q does not match delegation_chain origin %q", origin, req.Provenance.DelegationChain[0])
+	}
+	req.Provenance.OriginNodeID = origin
+	req.OriginNodeID = origin
+	req.Provenance.HopCount = len(req.Provenance.DelegationChain) - 1
+	return nil
+}
+
+func validateDelegationChain(chain []string) error {
+	seen := map[string]struct{}{}
+	for i, hop := range chain {
+		hop = strings.TrimSpace(hop)
+		if hop == "" {
+			return fmt.Errorf("delegation_chain contains empty hop at index %d", i)
+		}
+		key := strings.ToLower(hop)
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("delegation_chain contains duplicate hop %q", hop)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func (s *Server) authorizeTaskAccess(w http.ResponseWriter, r *http.Request, identity tsid.Identity, taskID string) (task.Record, bool) {
+	rec, err := s.Store.GetTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+		return task.Record{}, false
+	}
+	if !taskAccessibleTo(rec, identity) {
+		writeError(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "authenticated peer does not own this task")
+		return task.Record{}, false
+	}
+	return rec, true
+}
+
+func taskAccessibleTo(rec task.Record, identity tsid.Identity) bool {
+	if matchesIdentityClaim(rec.OriginNodeID, identity) {
+		return true
+	}
+	if len(rec.DelegationChain) >= 2 {
+		requester := rec.DelegationChain[len(rec.DelegationChain)-2]
+		if matchesIdentityClaim(requester, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesIdentityClaim(value string, identity tsid.Identity) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	candidates := []string{identity.NodeID, identity.NodeName, identity.StableID, identity.DNSName}
+	candidates = append(candidates, identity.Tags...)
+	for _, candidate := range candidates {
+		if strings.EqualFold(value, strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
 type gitPreparation struct {
 	Base      string
 	Branch    string
@@ -994,14 +1114,23 @@ func resultAsTask(result runner.Result) *task.ResultEnvelope {
 		status = task.StateDone
 	}
 	out := task.ResultEnvelope{
-		Status:                  status,
-		Branch:                  result.Branch,
-		BaseCommit:              result.BaseCommit,
-		HeadCommit:              result.HeadCommit,
-		Pushed:                  result.Pushed,
-		Diffstat:                result.Diffstat,
-		FilesChanged:            result.FilesChanged,
-		Tests:                   task.TestClaims{ClaimedPassed: result.Tests.ClaimedPassed, Commands: result.Tests.Commands, LogsRef: result.Tests.LogsRef},
+		Status:       status,
+		Branch:       result.Branch,
+		BaseCommit:   result.BaseCommit,
+		HeadCommit:   result.HeadCommit,
+		Pushed:       result.Pushed,
+		Diffstat:     result.Diffstat,
+		FilesChanged: result.FilesChanged,
+		Tests:        task.TestClaims{ClaimedPassed: result.Tests.ClaimedPassed, Commands: result.Tests.Commands, LogsRef: result.Tests.LogsRef},
+		CommandOutput: task.CommandOutput{
+			Command:   result.CommandOutput.Command,
+			ExitCode:  result.CommandOutput.ExitCode,
+			Stdout:    result.CommandOutput.Stdout,
+			Stderr:    result.CommandOutput.Stderr,
+			StdoutRef: result.CommandOutput.StdoutRef,
+			StderrRef: result.CommandOutput.StderrRef,
+			DurationS: result.CommandOutput.DurationS,
+		},
 		WorkerSummaryUntrusted:  result.WorkerSummaryUntrusted,
 		Usage:                   task.Usage{Tokens: int64(result.Usage.Tokens), Cost: result.Usage.Cost, DurationS: result.Usage.DurationS},
 		VerificationRequired:    result.VerificationRequired,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +14,36 @@ import (
 	"time"
 
 	"cmesh/internal/mesh/schema"
+	"cmesh/internal/task"
 )
 
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+}
+
+type Error struct {
+	StatusCode int
+	Code       task.ErrorCode
+	Detail     string
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Detail == "" {
+		return string(e.Code)
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Detail)
+}
+
+func CodeOf(err error) task.ErrorCode {
+	var rpcErr *Error
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code
+	}
+	return ""
 }
 
 func NewClient(baseURL string) *Client {
@@ -114,9 +140,11 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var apiErr schema.Error
-		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return fmt.Errorf("%s: %s", apiErr.Code, apiErr.Detail)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			if rpcErr := errorFromBody(resp.StatusCode, body); rpcErr != nil {
+				return rpcErr
+			}
 		}
 		return fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
@@ -149,11 +177,27 @@ func (c *Client) doBytes(ctx context.Context, method, path string, in any) ([]by
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var apiErr schema.Error
-		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return nil, fmt.Errorf("%s: %s", apiErr.Code, apiErr.Detail)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			if rpcErr := errorFromBody(resp.StatusCode, body); rpcErr != nil {
+				return nil, rpcErr
+			}
 		}
 		return nil, fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func errorFromBody(status int, body []byte) *Error {
+	var apiErr schema.Error
+	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Code != "" {
+		return &Error{StatusCode: status, Code: apiErr.Code, Detail: apiErr.Detail}
+	}
+	var wrapped struct {
+		Error *schema.Error `json:"error"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Error != nil && wrapped.Error.Code != "" {
+		return &Error{StatusCode: status, Code: wrapped.Error.Code, Detail: wrapped.Error.Detail}
+	}
+	return nil
 }
