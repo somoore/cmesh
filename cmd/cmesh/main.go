@@ -429,7 +429,7 @@ func serviceInstall(configPath string) error {
 		if err := os.MkdirAll(launchDir, 0o755); err != nil {
 			return err
 		}
-		plistPath := filepath.Join(launchDir, "dev.cmesh.plist")
+		plistPath := launchdPlistPath()
 		body := fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>dev.cmesh</string><key>ProgramArguments</key><array><string>%s</string><string>up</string><string>--config</string><string>%s</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", exe, configPath)
 		if err := os.WriteFile(plistPath, []byte(body), 0o644); err != nil {
 			return err
@@ -456,7 +456,14 @@ func serviceStart() error {
 	case "linux":
 		return runServiceCommand("systemctl", "--user", "start", "cmesh.service")
 	case "darwin":
-		return runServiceCommand("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/dev.cmesh")
+		domain := launchdDomain()
+		target := domain + "/dev.cmesh"
+		if err := exec.Command("launchctl", "print", target).Run(); err != nil {
+			if err := runServiceCommand("launchctl", "bootstrap", domain, launchdPlistPath()); err != nil {
+				return err
+			}
+		}
+		return runServiceCommand("launchctl", "kickstart", "-k", target)
 	case "windows":
 		return runServiceCommand("sc.exe", "start", "cmesh")
 	default:
@@ -488,6 +495,14 @@ func serviceLogs() error {
 	default:
 		return fmt.Errorf("service logs are not supported on %s", runtime.GOOS)
 	}
+}
+
+func launchdDomain() string {
+	return "gui/" + fmt.Sprint(os.Getuid())
+}
+
+func launchdPlistPath() string {
+	return filepath.Join(homeDir(), "Library", "LaunchAgents", "dev.cmesh.plist")
 }
 
 func runServiceCommand(name string, args ...string) error {
@@ -731,6 +746,7 @@ func cmdTest(args []string) error {
 		return err
 	}
 	printCheck("inbound policy allowed", true, string(resp.State))
+	printCheck("task id", resp.TaskID != "", resp.TaskID)
 	if *wait {
 		if resp.State.Terminal() {
 			printCheck("task completed", resp.State == task.StateDone, string(resp.State))
