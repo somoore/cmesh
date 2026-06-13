@@ -1,13 +1,11 @@
 package claudecode
 
 import (
-	"context"
-	"os/exec"
 	"slices"
-	"strings"
 	"testing"
 
 	"cmesh/internal/runner"
+	"cmesh/internal/runner/runnertest"
 )
 
 func TestArgvIncludesTaskMCPConfigStrictly(t *testing.T) {
@@ -28,9 +26,6 @@ func TestArgvIncludesTaskMCPConfigStrictly(t *testing.T) {
 }
 
 func TestRunSendsPromptOnStdin(t *testing.T) {
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available")
-	}
 	run := New(Config{
 		Command: []string{"sh", "-c", "cat"},
 		Profiles: map[string]ProfileConfig{
@@ -38,21 +33,5 @@ func TestRunSendsPromptOnStdin(t *testing.T) {
 		},
 		DefaultProfile: "readonly",
 	})
-	result, err := run.Run(runner.RunRequest{
-		Context: context.Background(),
-		TaskID:  "task-stdin",
-		Prompt:  "hello from stdin",
-		Profile: "readonly",
-	})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if !strings.Contains(result.WorkerSummaryUntrusted, "hello from stdin") {
-		t.Fatalf("summary = %q", result.WorkerSummaryUntrusted)
-	}
-	for _, arg := range result.Tests.Commands {
-		if strings.Contains(arg, "hello from stdin") {
-			t.Fatalf("prompt leaked into argv command: %q", arg)
-		}
-	}
+	runnertest.AssertPromptViaStdin(t, run, "task-stdin", "hello from stdin", "readonly")
 }
