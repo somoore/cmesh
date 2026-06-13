@@ -96,6 +96,15 @@ Run:
 
 It checks config, Tailscale, LocalAPI, tailnet binding, runner availability, and the local MCP endpoint.
 
+For runner-specific service readiness, run:
+
+```bash
+./cmesh doctor runner claude-code
+./cmesh doctor service-context
+```
+
+`doctor runner claude-code` verifies that the configured runner path exists, is absolute for service use, can authenticate under the current process context, receives the prompt over stdin, and returns a smoke response that can be independently verified from the raw command artifact. `doctor service-context` checks user identity, PATH, home directory, Claude config location, Tailscale LocalAPI access, cwd access, git access, and runner spawning assumptions.
+
 ## 5. Start cmesh
 
 For a foreground daemon:
@@ -103,6 +112,8 @@ For a foreground daemon:
 ```bash
 ./cmesh up
 ```
+
+Startup runs the same runner preflight gate before the mesh listener is advertised. Use `./cmesh up --skip-preflight` only for debugging a broken node locally.
 
 For a service:
 
@@ -137,7 +148,7 @@ If you install without `--user`, the Windows service runs as LocalSystem and wil
 ./cmesh peers test homelab-vm --cwd ~/code/myapp
 ```
 
-The smoke test checks peer reachability, inbound policy, runner availability, and task completion with a readonly prompt.
+The smoke test checks peer reachability, inbound policy, runner availability, and task completion with a readonly prompt. It verifies the returned `command_output` artifact has exit code 0 and contains the expected smoke string, so a runner that exits successfully after saying it did not receive a task does not count as healthy.
 
 ## 7. Use it from your agent
 
@@ -154,6 +165,8 @@ http://127.0.0.1:7777/mcp
 ```
 
 Use `cmesh mcp` when you want cmesh to install the pre-daemon setup MCP into Claude Code or Codex for you. After `cmesh up` is running, agents should use the local HTTP MCP gateway at the URL above for delegation.
+
+Direct mesh RPC calls such as `POST http://100.x.y.z:7778/v1/tasks` are for low-level debugging only. Normal user and agent flows should go through the local gateway so origin-side outbound policy and task provenance are applied before the worker sees the request.
 
 ## Optional bootstrap
 

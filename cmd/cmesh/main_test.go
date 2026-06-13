@@ -8,9 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"cmesh/internal/audit"
 	"cmesh/internal/config"
 	"cmesh/internal/gitx"
+	"cmesh/internal/store"
 	"cmesh/internal/task"
 )
 
@@ -94,6 +97,31 @@ func TestWindowsServiceSCArgsWithUser(t *testing.T) {
 	}
 }
 
+func TestParseWindowsServiceStartName(t *testing.T) {
+	out := `
+SERVICE_NAME: cmesh
+        TYPE               : 10  WIN32_OWN_PROCESS
+        START_TYPE         : 2   AUTO_START
+        SERVICE_START_NAME : .\scott
+`
+	got, err := parseWindowsServiceStartName(out)
+	if err != nil {
+		t.Fatalf("parseWindowsServiceStartName: %v", err)
+	}
+	if got != `.\scott` {
+		t.Fatalf("start name = %q", got)
+	}
+}
+
+func TestSameWindowsUserNormalizesDomainAndDotPrefix(t *testing.T) {
+	if !sameWindowsUser(`.\scott`, `DESKTOP\scott`) {
+		t.Fatal("expected dot-prefix and machine-domain names to match")
+	}
+	if sameWindowsUser(`.\scott`, `DESKTOP\other`) {
+		t.Fatal("different users should not match")
+	}
+}
+
 func TestResolveWindowsServicePasswordSources(t *testing.T) {
 	if _, err := resolveWindowsServicePassword(serviceInstallOptions{Password: "secret"}); err == nil {
 		t.Fatal("password without user should fail")
@@ -122,6 +150,12 @@ func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
 }
 
 func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
+	if !smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 0, Stdout: "cmesh smoke ok\n"}}) {
+		t.Fatal("expected raw command artifact to match")
+	}
+	if smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 1, Stdout: "cmesh smoke ok\n"}}) {
+		t.Fatal("non-zero command artifact must not pass smoke validation")
+	}
 	if !smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}) {
 		t.Fatal("expected smoke result to match")
 	}
@@ -130,6 +164,51 @@ func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
 	}
 	if smokeResultMatches(nil) {
 		t.Fatal("nil result must not pass smoke validation")
+	}
+}
+
+func TestFailClosedRestartMarksQueuedAndRunningTasksFailed(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cmesh.db"))
+	if err != nil {
+		t.Fatalf("Open store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Fatalf("Close store: %v", err)
+		}
+	})
+	for _, id := range []string{"queued-task", "running-task"} {
+		if _, err := st.BeginDispatch(ctx, task.Record{
+			ID:               id,
+			OriginNodeID:     "origin",
+			OriginSessionID:  "session",
+			WorkerNodeID:     "worker",
+			State:            task.StateQueued,
+			CWD:              t.TempDir(),
+			Runner:           "fake",
+			ProfileRequested: "dev",
+			ProfileEffective: "dev",
+			PromptHash:       task.PromptHash(id),
+		}, []byte(id), time.Hour); err != nil {
+			t.Fatalf("BeginDispatch %s: %v", id, err)
+		}
+	}
+	if _, err := st.UpdateTaskState(ctx, "running-task", store.StateUpdate{State: task.StateRunning}); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	writer := audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), "worker")
+	if err := failClosedRestart(ctx, t.TempDir(), st, writer); err != nil {
+		t.Fatalf("failClosedRestart: %v", err)
+	}
+	for _, id := range []string{"queued-task", "running-task"} {
+		rec, err := st.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTask %s: %v", id, err)
+		}
+		if rec.State != task.StateFailed || rec.TerminalErrorCode != task.ErrorWorkerDaemonRestarted {
+			t.Fatalf("%s state/code = %s/%s, want failed/%s", id, rec.State, rec.TerminalErrorCode, task.ErrorWorkerDaemonRestarted)
+		}
 	}
 }
 

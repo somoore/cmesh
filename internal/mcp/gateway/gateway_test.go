@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -134,6 +135,74 @@ func TestFollowupRejectsExplicitDifferentPeer(t *testing.T) {
 	resp, err := g.delegateCall(ctx, DelegateRequest{FollowupTaskID: "task-1", Peer: "new", Prompt: "again", CWD: t.TempDir()})
 	if err == nil || resp.OK {
 		t.Fatalf("expected cross-peer followup rejection, resp=%+v err=%v", resp, err)
+	}
+}
+
+func TestDelegateRejectsUnknownPeer(t *testing.T) {
+	g := newTestGateway(t)
+	resp, err := g.delegateCall(context.Background(), DelegateRequest{
+		Peer:   "missing-peer",
+		Prompt: "hello",
+		CWD:    t.TempDir(),
+	})
+	if err == nil || resp.OK {
+		t.Fatalf("expected unknown peer denial, resp=%+v err=%v", resp, err)
+	}
+	if resp.Error == nil || resp.Error.Code != task.ErrorPeerUnreachable {
+		t.Fatalf("error = %+v, want peer_unreachable", resp.Error)
+	}
+}
+
+func TestPeerSmokeRunsTaskAndVerifiesResult(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	var sawSmokePrompt bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/hello", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"node_id":"worker-node","node_name":"worker","schema_versions":["v1"],"runners":[{"name":"fake","profiles":["readonly"]}],"capabilities":["tasks"]}`))
+	})
+	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var raw struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode task request: %v", err)
+		}
+		sawSmokePrompt = strings.Contains(raw.Prompt, gatewaySmokeExpectedResponse)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"remote-smoke","state":"done"}`))
+	})
+	mux.HandleFunc("GET /v1/tasks/remote-smoke/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"remote-smoke","result":{"status":"done","command_output":{"command":"fake","exit_code":0,"stdout":"cmesh smoke ok\n","stderr":"","duration_s":1},"worker_summary_untrusted":"cmesh smoke ok","usage":{},"verification_required":true}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+	g.Config.Peers = map[string]config.PeerConfig{
+		"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port},
+	}
+	resp, err := g.testPeerCall(ctx, "worker", t.TempDir(), "readonly", 5)
+	if err != nil || !resp.OK {
+		t.Fatalf("testPeerCall resp=%+v err=%v", resp, err)
+	}
+	if !sawSmokePrompt {
+		t.Fatal("peer did not receive smoke prompt")
+	}
+	result := resp.Result.(map[string]any)
+	checks := result["checks"].(map[string]bool)
+	for _, name := range []string{"peer_reachable", "policy_allowed", "task_created", "runner_invoked", "prompt_received", "smoke_response_verified", "result_envelope_parsed"} {
+		if !checks[name] {
+			t.Fatalf("check %s = false in %+v", name, checks)
+		}
 	}
 }
 

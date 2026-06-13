@@ -24,7 +24,7 @@ func (s *windowsService) Execute(_ []string, requests <-chan svc.ChangeRequest, 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runDaemon(ctx, s.configPath)
+		errCh <- runDaemon(ctx, s.configPath, true)
 	}()
 
 	changes <- svc.Status{State: svc.Running, Accepts: accepts}

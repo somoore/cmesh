@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -244,15 +245,16 @@ func cmdUp(args []string) error {
 	}
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	skipPreflight := fs.Bool("skip-preflight", false, "skip runner startup self-checks")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return runDaemon(ctx, *configPath)
+	return runDaemon(ctx, *configPath, !*skipPreflight)
 }
 
-func runDaemon(ctx context.Context, configPath string) error {
+func runDaemon(ctx context.Context, configPath string, preflight bool) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
@@ -267,6 +269,18 @@ func runDaemon(ctx context.Context, configPath string) error {
 	registry, err := buildRunners(cfg)
 	if err != nil {
 		return err
+	}
+	if preflight {
+		checks := daemonPreflightChecks(ctx, cfg, registry)
+		fmt.Println("cmesh preflight")
+		fmt.Println()
+		for _, check := range checks {
+			printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+		}
+		fmt.Println()
+		if !checksOK(checks) {
+			return errors.New("cmesh preflight failed; fix the checks or use --skip-preflight to start anyway")
+		}
 	}
 	if err := failClosedRestart(ctx, cfg.Node.DataDir, st, auditWriter); err != nil {
 		return err
@@ -302,18 +316,25 @@ func cmdServiceRun(args []string) error {
 }
 
 func cmdDoctor(args []string) error {
-	if len(args) > 0 && args[0] == "tailscale" {
-		fs := flag.NewFlagSet("doctor tailscale", flag.ExitOnError)
-		port := fs.Int("mesh-port", config.DefaultMeshPort, "mesh RPC port")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
+	if len(args) > 0 {
+		switch args[0] {
+		case "tailscale":
+			fs := flag.NewFlagSet("doctor tailscale", flag.ExitOnError)
+			port := fs.Int("mesh-port", config.DefaultMeshPort, "mesh RPC port")
+			if err := fs.Parse(args[1:]); err != nil {
+				return err
+			}
+			report := doctor.Tailscale(context.Background(), doctor.TailscaleOptions{MeshPort: *port})
+			fmt.Print(report.Text())
+			if !report.OK() {
+				return errors.New("tailscale doctor failed")
+			}
+			return nil
+		case "runner":
+			return cmdDoctorRunner(args[1:])
+		case "service-context":
+			return cmdDoctorServiceContext(args[1:])
 		}
-		report := doctor.Tailscale(context.Background(), doctor.TailscaleOptions{MeshPort: *port})
-		fmt.Print(report.Text())
-		if !report.OK() {
-			return errors.New("tailscale doctor failed")
-		}
-		return nil
 	}
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
@@ -344,7 +365,11 @@ func cmdDoctor(args []string) error {
 			}
 		}
 	}
-	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: config.DefaultMeshPort})
+	meshPort := config.DefaultMeshPort
+	if cfg != nil {
+		meshPort = cfg.Node.MeshPort
+	}
+	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: meshPort})
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"status":    status,
@@ -381,6 +406,359 @@ func cmdDoctor(args []string) error {
 		return errors.New("doctor found problems")
 	}
 	return nil
+}
+
+func cmdDoctorRunner(args []string) error {
+	fs := flag.NewFlagSet("doctor runner", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	skipSmoke := fs.Bool("skip-smoke", false, "skip invoking the runner smoke prompt")
+	timeoutSeconds := fs.Int("timeout", 60, "runner smoke timeout in seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: cmesh doctor runner <runner> [--config path] [--skip-smoke]")
+	}
+	cfg, err := config.Load(*configPath)
+	checks := []doctor.Check{{Name: "config", OK: err == nil, Detail: "valid"}}
+	if err != nil {
+		checks[0].Detail = ""
+		checks[0].Err = err.Error()
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+5)*time.Second)
+		defer cancel()
+		checks = append(checks, doctorRunnerChecks(ctx, cfg, fs.Arg(0), !*skipSmoke, time.Duration(*timeoutSeconds)*time.Second)...)
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks})
+	}
+	fmt.Printf("cmesh doctor runner %s\n\n", fs.Arg(0))
+	for _, check := range checks {
+		printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+	}
+	if !checksOK(checks) {
+		return errors.New("doctor runner found problems")
+	}
+	return nil
+}
+
+func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.Registry) []doctor.Check {
+	var checks []doctor.Check
+	checks = append(checks, doctor.Check{Name: "node id", OK: strings.TrimSpace(cfg.Node.ID) != "", Detail: cfg.Node.ID})
+	if info, err := os.Stat(cfg.Node.DataDir); err != nil {
+		if err := os.MkdirAll(cfg.Node.DataDir, 0o700); err != nil {
+			checks = append(checks, doctor.Check{Name: "data directory", OK: false, Detail: cfg.Node.DataDir, Err: err.Error()})
+		} else {
+			checks = append(checks, doctor.Check{Name: "data directory", OK: true, Detail: cfg.Node.DataDir})
+		}
+	} else if !info.IsDir() {
+		checks = append(checks, doctor.Check{Name: "data directory", OK: false, Detail: cfg.Node.DataDir, Err: "path is not a directory"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "data directory", OK: true, Detail: cfg.Node.DataDir})
+	}
+	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: cfg.Node.MeshPort})
+	for _, check := range tailscaleReport.Checks {
+		if check.Name == "localapi" || check.Name == "tailnet_ip" || check.Name == "whois_self" {
+			checks = append(checks, check)
+		}
+	}
+	for _, runnerName := range reg.Names() {
+		rcfg := cfg.Runners[runnerName]
+		if len(rcfg.Command) == 0 {
+			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".command", OK: false, Err: "runner command is empty"})
+			continue
+		}
+		exe := rcfg.Command[0]
+		resolved, err := exec.LookPath(exe)
+		if err != nil {
+			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".executable", OK: false, Err: err.Error()})
+		} else {
+			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".executable", OK: true, Detail: resolved})
+		}
+		checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+		checks = append(checks, runnerSmokeCheck(ctx, reg, runnerName, 60*time.Second))
+	}
+	return checks
+}
+
+func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration) []doctor.Check {
+	var checks []doctor.Check
+	rcfg, ok := cfg.Runners[runnerName]
+	checks = append(checks, doctor.Check{Name: "runner configured", OK: ok, Detail: runnerName})
+	if !ok {
+		checks[len(checks)-1].Err = "runner is not configured"
+		checks[len(checks)-1].Detail = ""
+		return checks
+	}
+	if len(rcfg.Command) == 0 {
+		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: false, Err: "runner command is empty"})
+		return checks
+	}
+	exe := rcfg.Command[0]
+	resolved, err := exec.LookPath(exe)
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: false, Err: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: true, Detail: resolved})
+	}
+	checks = append(checks, doctor.Check{
+		Name:   "runner executable absolute",
+		OK:     filepath.IsAbs(exe),
+		Detail: exe,
+	})
+	if !filepath.IsAbs(exe) {
+		checks[len(checks)-1].Err = "configure an absolute runner path for service use"
+		checks[len(checks)-1].Detail = firstNonEmpty(resolved, exe)
+	}
+	if runtime.GOOS == "windows" {
+		checks = append(checks, windowsServiceUserChecks()...)
+	}
+	reg, err := buildRunners(cfg)
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "runner auth works", OK: false, Err: err.Error()})
+		return checks
+	}
+	checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+	if !runSmoke {
+		checks = append(checks,
+			doctor.Check{Name: "prompt via stdin works", OK: true, Detail: "skipped"},
+			doctor.Check{Name: "smoke response verified", OK: true, Detail: "skipped"},
+		)
+		return checks
+	}
+	smoke := runnerSmokeCheck(ctx, reg, runnerName, timeout)
+	checks = append(checks,
+		doctor.Check{Name: "prompt via stdin works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
+		doctor.Check{Name: "smoke response verified", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
+	)
+	return checks
+}
+
+func runnerProfileChecks(cfg *config.Config, reg *runner.Registry, runnerName string) []doctor.Check {
+	run, ok := reg.Get(runnerName)
+	if !ok {
+		return []doctor.Check{{Name: "runner." + runnerName + ".registered", OK: false, Err: "runner not registered"}}
+	}
+	var checks []doctor.Check
+	foundProfile := false
+	for profileName, profile := range cfg.Profiles {
+		if profile.Runner != runnerName {
+			continue
+		}
+		foundProfile = true
+		err := run.Check(profileName)
+		check := doctor.Check{Name: "runner." + runnerName + ".profile." + profileName, OK: err == nil, Detail: "available"}
+		if err != nil {
+			check.Detail = ""
+			check.Err = err.Error()
+		}
+		checks = append(checks, check)
+	}
+	if !foundProfile {
+		err := run.Check("")
+		check := doctor.Check{Name: "runner." + runnerName + ".profile.default", OK: err == nil, Detail: "available"}
+		if err != nil {
+			check.Detail = ""
+			check.Err = err.Error()
+		}
+		checks = append(checks, check)
+	}
+	return checks
+}
+
+func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration) doctor.Check {
+	run, ok := reg.Get(runnerName)
+	if !ok {
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: "runner not registered"}
+	}
+	result, err := run.Run(runner.RunRequest{
+		Context:     ctx,
+		TaskID:      "doctor-runner-smoke",
+		Prompt:      "Reply with exactly: " + smokeExpectedResponse,
+		CWD:         ".",
+		Timeout:     timeout,
+		OutputLimit: runner.DefaultOutputLimit,
+	})
+	if err != nil {
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: err.Error()}
+	}
+	output := commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	detail := oneLine(firstNonEmpty(output, result.WorkerSummaryUntrusted))
+	okSmoke := result.CommandOutput.Command != "" && result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	check := doctor.Check{Name: "runner." + runnerName + ".smoke", OK: okSmoke, Detail: detail}
+	if !okSmoke {
+		check.Detail = ""
+		check.Err = fmt.Sprintf("expected raw command artifact with exit=0 and %q, got exit=%d output=%q", smokeExpectedResponse, result.CommandOutput.ExitCode, output)
+	}
+	return check
+}
+
+func cmdDoctorServiceContext(args []string) error {
+	fs := flag.NewFlagSet("doctor service-context", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	checks := serviceContextChecks(ctx, *configPath)
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks})
+	}
+	fmt.Println("cmesh doctor service-context")
+	fmt.Println()
+	for _, check := range checks {
+		printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+	}
+	if !checksOK(checks) {
+		return errors.New("doctor service-context found problems")
+	}
+	return nil
+}
+
+func serviceContextChecks(ctx context.Context, configPath string) []doctor.Check {
+	var checks []doctor.Check
+	current, err := osuser.Current()
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "user identity", OK: false, Err: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "user identity", OK: true, Detail: firstNonEmpty(current.Username, current.Uid)})
+	}
+	checks = append(checks, windowsServiceUserChecks()...)
+	pathValue := os.Getenv("PATH")
+	checks = append(checks, doctor.Check{Name: "PATH", OK: pathValue != "", Detail: fmt.Sprintf("%d bytes", len(pathValue))})
+	if pathValue == "" {
+		checks[len(checks)-1].Err = "PATH is empty"
+	}
+	home := homeDir()
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		checks = append(checks, doctor.Check{Name: "home directory", OK: false, Detail: home, Err: firstErrDetail("", err)})
+	} else {
+		checks = append(checks, doctor.Check{Name: "home directory", OK: true, Detail: home})
+	}
+	claudeConfig := filepath.Join(home, ".claude")
+	if info, err := os.Stat(claudeConfig); err != nil || !info.IsDir() {
+		checks = append(checks, doctor.Check{Name: "Claude config location", OK: false, Detail: claudeConfig, Err: firstErrDetail("not found", err)})
+	} else {
+		checks = append(checks, doctor.Check{Name: "Claude config location", OK: true, Detail: claudeConfig})
+	}
+	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: config.DefaultMeshPort})
+	for _, check := range tailscaleReport.Checks {
+		if check.Name == "localapi" {
+			checks = append(checks, doctor.Check{Name: "Tailscale LocalAPI access", OK: check.OK, Detail: firstNonEmpty(check.Detail, check.Err), Err: check.Err})
+			break
+		}
+	}
+	if cwd, err := os.Getwd(); err != nil {
+		checks = append(checks, doctor.Check{Name: "cwd access", OK: false, Err: err.Error()})
+	} else if _, err := os.Stat(cwd); err != nil {
+		checks = append(checks, doctor.Check{Name: "cwd access", OK: false, Detail: cwd, Err: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "cwd access", OK: true, Detail: cwd})
+	}
+	if gitPath, err := exec.LookPath("git"); err != nil {
+		checks = append(checks, doctor.Check{Name: "git access", OK: false, Err: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "git access", OK: true, Detail: gitPath})
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "config", OK: false, Err: err.Error()})
+		return checks
+	}
+	checks = append(checks, doctor.Check{Name: "config", OK: true, Detail: configPath})
+	reg, err := buildRunners(cfg)
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "spawn runner", OK: false, Err: err.Error()})
+		return checks
+	}
+	for _, manifest := range reg.Manifests() {
+		run, _ := reg.Get(manifest.Runner)
+		err := run.Check("")
+		check := doctor.Check{Name: "spawn runner." + manifest.Runner, OK: err == nil, Detail: "available"}
+		if err != nil {
+			check.Detail = ""
+			check.Err = err.Error()
+		}
+		checks = append(checks, check)
+	}
+	return checks
+}
+
+func windowsServiceUserChecks() []doctor.Check {
+	if runtime.GOOS != "windows" {
+		return []doctor.Check{{Name: "service user", OK: true, Detail: "not windows"}}
+	}
+	serviceUser, err := windowsServiceStartName()
+	if err != nil {
+		return []doctor.Check{{Name: "service user", OK: false, Err: err.Error()}}
+	}
+	current, currentErr := osuser.Current()
+	if currentErr != nil {
+		return []doctor.Check{
+			{Name: "service user", OK: true, Detail: serviceUser},
+			{Name: "interactive user mismatch", OK: false, Err: currentErr.Error()},
+		}
+	}
+	mismatch := !sameWindowsUser(serviceUser, current.Username)
+	return []doctor.Check{
+		{Name: "service user", OK: true, Detail: serviceUser},
+		{Name: "interactive user mismatch", OK: !mismatch, Detail: yesNo(mismatch)},
+	}
+}
+
+func windowsServiceStartName() (string, error) {
+	out, err := exec.Command("sc.exe", "qc", "cmesh").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("query Windows service cmesh: %s", strings.TrimSpace(string(out)))
+	}
+	return parseWindowsServiceStartName(string(out))
+}
+
+func parseWindowsServiceStartName(out string) (string, error) {
+	for _, line := range strings.Split(out, "\n") {
+		if before, after, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(before) == "SERVICE_START_NAME" {
+			value := strings.TrimSpace(after)
+			if value == "" {
+				return "", errors.New("SERVICE_START_NAME is empty")
+			}
+			return value, nil
+		}
+	}
+	return "", errors.New("SERVICE_START_NAME not found")
+}
+
+func sameWindowsUser(a, b string) bool {
+	a = normalizeWindowsUserName(a)
+	b = normalizeWindowsUserName(b)
+	return a != "" && b != "" && a == b
+}
+
+func normalizeWindowsUserName(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	value = strings.TrimPrefix(value, `.\`)
+	if i := strings.LastIndex(value, `\`); i >= 0 {
+		value = value[i+1:]
+	}
+	return value
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
+}
+
+func checksOK(checks []doctor.Check) bool {
+	for _, check := range checks {
+		if !check.OK {
+			return false
+		}
+	}
+	return true
 }
 
 func cmdService(args []string) error {
@@ -883,7 +1261,51 @@ func smokeResultMatches(result *task.ResultEnvelope) bool {
 	if result == nil {
 		return false
 	}
+	if result.CommandOutput.Command != "" {
+		return result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	}
 	return strings.Contains(strings.TrimSpace(result.WorkerSummaryUntrusted), smokeExpectedResponse)
+}
+
+func rawOutputContainsSmoke(stdout, stderr string) bool {
+	for _, value := range []string{stdout, stderr, commandOutputText(stdout, stderr)} {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if strings.Contains(value, smokeExpectedResponse) {
+			return true
+		}
+		var raw map[string]any
+		if json.Unmarshal([]byte(value), &raw) == nil {
+			if strings.Contains(jsonStringField(raw, "result", "summary", "output", "message", "content", "final_answer"), smokeExpectedResponse) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func commandOutputText(stdout, stderr string) string {
+	return strings.TrimSpace(strings.TrimSpace(stdout) + "\n" + strings.TrimSpace(stderr))
+}
+
+func jsonStringField(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := raw[key]; ok {
+			switch v := value.(type) {
+			case string:
+				return strings.TrimSpace(v)
+			case []any:
+				parts := make([]string, 0, len(v))
+				for _, item := range v {
+					parts = append(parts, fmt.Sprint(item))
+				}
+				return strings.TrimSpace(strings.Join(parts, "\n"))
+			}
+		}
+	}
+	return ""
 }
 
 func oneLine(value string) string {

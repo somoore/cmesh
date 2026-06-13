@@ -215,8 +215,7 @@ func checkBareCredentials(profile ProfileConfig, env map[string]string) error {
 }
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
-	_ = req
-	return runner.ResultFromProcess(Name, proc, argv)
+	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
 }
 
 func defaultProfiles() map[string]ProfileConfig {

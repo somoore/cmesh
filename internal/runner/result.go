@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string) Result {
+func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string, prompt string) Result {
 	summary, usage, extra := parseStructuredOutput(proc.Stdout)
 	if summary == "" {
 		summary = strings.TrimSpace(proc.Combined)
@@ -27,12 +27,22 @@ func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string) 
 	extra["exit_code"] = proc.ExitCode
 	extra["stdout_path"] = filepath.ToSlash(proc.StdoutPath)
 	extra["stderr_path"] = filepath.ToSlash(proc.StderrPath)
+	command := RedactedCommand(argv, prompt)
 	return Result{
 		Status: "done",
 		Tests: TestClaims{
 			ClaimedPassed: false,
-			Commands:      []string{RedactedCommand(argv)},
+			Commands:      []string{command},
 			LogsRef:       proc.TranscriptRef,
+		},
+		CommandOutput: CommandOutput{
+			Command:   command,
+			ExitCode:  proc.ExitCode,
+			Stdout:    proc.Stdout,
+			Stderr:    proc.Stderr,
+			StdoutRef: logRef(proc.StdoutPath),
+			StderrRef: logRef(proc.StderrPath),
+			DurationS: int64(proc.Duration / time.Second),
 		},
 		WorkerSummaryUntrusted: summary,
 		Usage:                  usage,
@@ -44,6 +54,13 @@ func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string) 
 		RunnerExtra:   extra,
 		TranscriptRef: proc.TranscriptRef,
 	}
+}
+
+func logRef(path string) string {
+	if path == "" {
+		return ""
+	}
+	return "log:" + filepath.ToSlash(path)
 }
 
 func parseStructuredOutput(stdout string) (string, Usage, map[string]any) {
@@ -146,11 +163,18 @@ func floatFromAny(value any) float64 {
 	}
 }
 
-func RedactedCommand(argv []string) string {
+func RedactedCommand(argv []string, prompt string) string {
 	if len(argv) == 0 {
 		return ""
 	}
 	copyArgv := append([]string(nil), argv...)
-	copyArgv[len(copyArgv)-1] = "<prompt>"
+	prompt = strings.TrimSpace(prompt)
+	if prompt != "" {
+		for i, arg := range copyArgv {
+			if strings.TrimSpace(arg) == prompt {
+				copyArgv[i] = "<prompt>"
+			}
+		}
+	}
 	return strings.Join(copyArgv, " ")
 }

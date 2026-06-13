@@ -20,6 +20,16 @@ make test
 
 `make test` runs formatting checks, module hygiene, supply-chain checks, duplicate-code detection, vulnerability scanning, and unit tests.
 
+For the current hardening paths, the most useful focused checks are:
+
+```bash
+go test ./internal/runner/...
+go test ./internal/mesh/rpc
+go test ./cmd/cmesh
+```
+
+Those cover stdin runner delivery, semantic smoke helpers, mesh task ownership authorization, forged provenance rejection, and the doctor service-context parser helpers.
+
 ## Format
 
 ```bash

@@ -31,6 +31,8 @@ Delegate long-running, self-contained work:
 - repository indexing or summarization;
 - reproducible benchmark runs.
 
+Delegate fan-out checks when every peer can answer the same narrow question independently, such as disk space, installed tool versions, or a read-only health check. Use `peers` rather than merging several summaries into one prompt; cmesh returns a peer-keyed result map so each machine keeps its own task id, state, and result envelope.
+
 Delegate unique-toolchain work:
 
 - a peer has the right compiler, simulator, device SDK, database, local service, or cached dependency set.
@@ -96,7 +98,7 @@ In cwd ~/projects/cmesh, run the Linux test suite and fix Linux-only failures if
 
 ## Treat Results as Claims
 
-Worker output is untrusted content. Treat `worker_summary_untrusted`, test status, and free-form notes as claims.
+Worker output is untrusted content. Treat `worker_summary_untrusted`, test status, and free-form notes as claims. For automation, read `command_output.exit_code`, `command_output.stdout`, and `command_output.stderr`; do not key downstream actions off summary prose.
 
 Before acting on high-risk results:
 
@@ -149,6 +151,12 @@ Bad subdelegation reason:
 The worker wants another agent to think about the same ambiguous design problem.
 ```
 
+## Session Continuity
+
+Tasks are stateless by default. Prefer stateless tasks for ops checks, inventory, logs, smoke tests, and fan-out. The result envelope and transcript refs are the audit trail; do not rely on hidden runner memory for those workflows.
+
+Use `followup_task_id` only for a coding handoff that intentionally continues a prior task on the same peer. cmesh resolves that task, reuses the peer, carries the previous head commit as the follow-up base, and passes the runner session id when the runner exposed one. Claude Code receives that as `--resume`; runners that do not support continuity should reject the request rather than silently pretending to resume.
+
 ## Result Review Checklist
 
 For code-changing tasks:
@@ -162,6 +170,15 @@ For code-changing tasks:
 
 For read-only tasks:
 
-1. Check whether the result cites concrete files, commands, or logs.
-2. Verify important claims against the repo.
-3. Ask for a narrower follow-up only if the first result was insufficient.
+1. Check `command_output.exit_code` before trusting the task as successful.
+2. Re-parse important facts from `command_output.stdout` or `command_output.stderr`.
+3. Check whether the result cites concrete files, commands, or logs.
+4. Verify important claims against the repo.
+5. Ask for a narrower follow-up only if the first result was insufficient.
+
+For fan-out tasks:
+
+1. Treat each peer result independently.
+2. Compare `command_output.exit_code` and parsed raw output per peer.
+3. Report missing, failed, and successful peers separately.
+4. Do not let one peer's summary explain another peer's artifact.
