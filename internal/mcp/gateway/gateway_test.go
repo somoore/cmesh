@@ -94,6 +94,33 @@ func TestStatusFallsBackToMirroredPeerTask(t *testing.T) {
 	}
 }
 
+func TestResultTranscriptAndCancelReportUnreachablePeer(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	if err := g.Store.UpsertPeerTask(ctx, store.PeerTask{
+		TaskID:          "task-1",
+		PeerNodeID:      "missing-peer",
+		RemoteTaskID:    "remote-1",
+		OriginSessionID: "session-1",
+		State:           task.StateRunning,
+	}); err != nil {
+		t.Fatalf("UpsertPeerTask: %v", err)
+	}
+	for name, call := range map[string]func() (ToolResponse, error){
+		"result":     func() (ToolResponse, error) { return g.resultCall(ctx, "task-1") },
+		"transcript": func() (ToolResponse, error) { return g.transcriptCall(ctx, "task-1") },
+		"cancel":     func() (ToolResponse, error) { return g.cancelCall(ctx, "task-1", "network test") },
+	} {
+		resp, err := call()
+		if err == nil || resp.OK {
+			t.Fatalf("%s expected unreachable error, resp=%+v err=%v", name, resp, err)
+		}
+		if resp.Error == nil || resp.Error.Code != task.ErrorPeerUnreachable {
+			t.Fatalf("%s error = %+v, want peer_unreachable", name, resp.Error)
+		}
+	}
+}
+
 func TestListTasksIncludesDelegatedMirror(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
