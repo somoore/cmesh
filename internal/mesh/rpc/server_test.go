@@ -17,6 +17,7 @@ import (
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
 	tsid "cmesh/internal/identity/tailscale"
+	"cmesh/internal/mesh/schema"
 	"cmesh/internal/policy"
 	"cmesh/internal/runner"
 	"cmesh/internal/store"
@@ -181,6 +182,98 @@ func TestCreateTaskRejectsCyclicDelegationChain(t *testing.T) {
 	}
 }
 
+func TestCreateTaskDeniesDisallowedCWDWithoutRunner(t *testing.T) {
+	root := t.TempDir()
+	run := &countingRunner{}
+	server := newTestServer(t, root, run)
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
+	disallowed := filepath.Join(t.TempDir(), "outside")
+	if err := os.MkdirAll(disallowed, 0o755); err != nil {
+		t.Fatalf("MkdirAll disallowed: %v", err)
+	}
+
+	createBody := `{
+		"task_id":"task-denied-cwd",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(disallowed) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusForbidden {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	var denied schema.CreateTaskResponse
+	if err := json.Unmarshal(createRes.Body.Bytes(), &denied); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if denied.State != task.StateDenied || denied.Error == nil || denied.Error.Code != task.ErrorCWDDenied {
+		t.Fatalf("denied response = %+v", denied)
+	}
+	if run.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", run.calls)
+	}
+	rec, err := server.Store.GetTask(context.Background(), "task-denied-cwd")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.State != task.StateDenied || rec.TerminalErrorCode != task.ErrorCWDDenied {
+		t.Fatalf("stored state/code = %s/%s", rec.State, rec.TerminalErrorCode)
+	}
+	assertAuditContains(t, auditPath, `"policy_decision":"cwd_denied"`, `"error_code":"cwd_denied"`)
+}
+
+func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
+	root := t.TempDir()
+	run := &countingRunner{}
+	server := newTestServer(t, root, run)
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
+
+	createBody := `{
+		"task_id":"task-denied-profile",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"restart-test",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusForbidden {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	var denied schema.CreateTaskResponse
+	if err := json.Unmarshal(createRes.Body.Bytes(), &denied); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if denied.State != task.StateDenied || denied.Error == nil || denied.Error.Code != task.ErrorProfileUnavailable {
+		t.Fatalf("denied response = %+v", denied)
+	}
+	if run.calls != 0 {
+		t.Fatalf("runner calls = %d, want 0", run.calls)
+	}
+	rec, err := server.Store.GetTask(context.Background(), "task-denied-profile")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.State != task.StateDenied || rec.TerminalErrorCode != task.ErrorProfileUnavailable {
+		t.Fatalf("stored state/code = %s/%s", rec.State, rec.TerminalErrorCode)
+	}
+	assertAuditContains(t, auditPath, `"policy_decision":"profile_unavailable"`, `"error_code":"profile_unavailable"`)
+}
+
 func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t, root, immediateRunner{})
@@ -279,6 +372,34 @@ func waitForTerminalTask(t *testing.T, server *Server, taskID string) {
 		t.Fatalf("GetTask: %v", err)
 	}
 	t.Fatalf("task %s did not reach terminal state, got %s", taskID, rec.State)
+}
+
+func assertAuditContains(t *testing.T, path string, values ...string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var text string
+	for time.Now().Before(deadline) {
+		body, err := os.ReadFile(path)
+		if err == nil {
+			text = string(body)
+			allFound := true
+			for _, want := range values {
+				if !strings.Contains(text, want) {
+					allFound = false
+					break
+				}
+			}
+			if allFound {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, want := range values {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audit log missing %s:\n%s", want, text)
+		}
+	}
 }
 
 func TestSubdelegationDirectRequesterCanAccessDownstreamTask(t *testing.T) {
@@ -572,6 +693,33 @@ func (immediateRunner) Check(profile string) error {
 }
 
 func (immediateRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
+}
+
+type countingRunner struct {
+	calls int
+}
+
+func (r *countingRunner) Name() string {
+	return "fake"
+}
+
+func (r *countingRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{
+		SchemaVersion: "runner_manifest.v1",
+		Runner:        "fake",
+		Profiles: map[string]runner.ProfileManifest{
+			"dev": {Claims: []string{"read_files", "edit_repo"}, EnforcementConfidence: "high"},
+		},
+	}
+}
+
+func (r *countingRunner) Check(profile string) error {
+	return nil
+}
+
+func (r *countingRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	r.calls++
 	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
 }
 

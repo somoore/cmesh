@@ -256,7 +256,7 @@ func TestDelegateFanoutReturnsPeerKeyedResults(t *testing.T) {
 	failMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"code":"peer_unauthorized","detail":"blocked by worker"}`))
+		_, _ = w.Write([]byte(`{"task_id":"remote-denied","state":"denied","error":{"code":"peer_unauthorized","detail":"blocked by worker"}}`))
 	})
 	failSrv := httptest.NewServer(failMux)
 	defer failSrv.Close()

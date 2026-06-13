@@ -140,9 +140,11 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var apiErr schema.Error
-		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return &Error{StatusCode: resp.StatusCode, Code: apiErr.Code, Detail: apiErr.Detail}
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			if rpcErr := errorFromBody(resp.StatusCode, body); rpcErr != nil {
+				return rpcErr
+			}
 		}
 		return fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
@@ -175,11 +177,27 @@ func (c *Client) doBytes(ctx context.Context, method, path string, in any) ([]by
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		var apiErr schema.Error
-		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return nil, &Error{StatusCode: resp.StatusCode, Code: apiErr.Code, Detail: apiErr.Detail}
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			if rpcErr := errorFromBody(resp.StatusCode, body); rpcErr != nil {
+				return nil, rpcErr
+			}
 		}
 		return nil, fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func errorFromBody(status int, body []byte) *Error {
+	var apiErr schema.Error
+	if err := json.Unmarshal(body, &apiErr); err == nil && apiErr.Code != "" {
+		return &Error{StatusCode: status, Code: apiErr.Code, Detail: apiErr.Detail}
+	}
+	var wrapped struct {
+		Error *schema.Error `json:"error"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.Error != nil && wrapped.Error.Code != "" {
+		return &Error{StatusCode: status, Code: wrapped.Error.Code, Detail: wrapped.Error.Detail}
+	}
+	return nil
 }
