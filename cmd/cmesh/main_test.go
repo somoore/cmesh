@@ -45,6 +45,15 @@ func TestFailedCheckSummaryIncludesCheckDetails(t *testing.T) {
 	}
 }
 
+func TestCodexSandboxForProfileUsesServiceSafeWindowsMode(t *testing.T) {
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "danger-full-access" {
+		t.Fatalf("windows codex sandbox = %q, want danger-full-access", got)
+	}
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "linux"); got != "workspace-write" {
+		t.Fatalf("linux codex sandbox = %q, want workspace-write", got)
+	}
+}
+
 func TestCleanupTaskArtifactsRemovesRegisteredWorktreeBeforeBranch(t *testing.T) {
 	ctx := context.Background()
 	testutil.EnsureGitOnPath(t)

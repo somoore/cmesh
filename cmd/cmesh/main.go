@@ -1970,7 +1970,7 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Network {
 					network = "enabled_by_profile"
 				}
-				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: "workspace-write", Approval: "never", Network: network}
+				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS), Approval: "never", Network: network}
 			}
 			run := codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
 			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
@@ -1985,6 +1985,13 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 		}
 	}
 	return reg, nil
+}
+
+func codexSandboxForProfile(_ config.ProfileConfig, goos string) string {
+	if goos == "windows" {
+		return "danger-full-access"
+	}
+	return "workspace-write"
 }
 
 type manifestOverrideRunner struct {
