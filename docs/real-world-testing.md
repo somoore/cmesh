@@ -144,7 +144,28 @@ task completed           ok  done
 smoke response verified  ok  cmesh smoke ok
 ```
 
-Mac-to-Windows real task for C: drive space:
+Mac-to-Windows real task for C: drive space.
+
+The following Python request was a low-level validation probe from the original test. It intentionally called the worker mesh RPC endpoint directly to isolate transport and worker behavior. It is not the canonical product flow for agents or users. Normal delegation should go through the local MCP gateway so origin-side outbound policy, provenance, task-token handling, idempotency, and local task mirrors are applied before the worker sees the request.
+
+Canonical gateway shape for the same task:
+
+```json
+{
+  "tool": "delegate",
+  "arguments": {
+    "peer": "win11-desktop",
+    "prompt": "On this Windows machine, run a local command to report C: drive disk space. Return only: total GB, free GB, used GB, and percent free. Include the exact command names used and do not edit files.",
+    "cwd": "C:\\Users\\scott\\code\\cmesh",
+    "profile": "readonly",
+    "timeout_s": 60,
+    "wait": true,
+    "idempotency_key": "disk-check-win11-c"
+  }
+}
+```
+
+Low-level direct RPC probe used during the initial validation:
 
 ```bash
 python3 - <<'PY'
