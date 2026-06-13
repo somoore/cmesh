@@ -51,6 +51,14 @@ For a headless worker:
 ./cmesh init --worker --allow-peer mac-studio --allow-cwd ~/code/** --yes
 ```
 
+Defaults expose only `readonly` and `dev`. To expose an interactive or network-capable profile on a trusted worker, make it explicit and scope it to the trusted peer:
+
+```bash
+./cmesh init --worker --allow-peer mac-studio --allow-cwd ~/code/** --profile readonly --profile dev --profile interactive --yes
+```
+
+The generated `interactive` profile includes profile-level `allowed_peers = ["mac-studio"]`. The origin still has high-risk profiles in `policy.outbound.denied_profiles` by default; remove a profile from that list only on an origin that should be able to request it.
+
 For an origin machine:
 
 ```bash

@@ -198,7 +198,7 @@ func cmdInit(args []string) error {
 	fs.Var(&allowPeer, "allow-peer", "peer node/name allowed to delegate here; repeatable")
 	fs.Var(&allowCWD, "allow-cwd", "directory glob workers may use here; repeatable")
 	fs.Var(&peer, "peer", "peer to configure for outbound delegation; repeatable")
-	fs.Var(&profile, "profile", "profile to expose: readonly, dev, network, git_push; repeatable")
+	fs.Var(&profile, "profile", "profile to expose: readonly, dev, network, interactive, git_push; repeatable")
 	runnerName := fs.String("runner", "auto", "runner to use: auto, claude-code, or codex")
 	yes := fs.Bool("yes", false, "accept safe defaults without prompting")
 	force := fs.Bool("force", false, "overwrite an existing config")
@@ -872,7 +872,7 @@ func serviceInstall(opts serviceInstallOptions) error {
 			return err
 		}
 		plistPath := launchdPlistPath()
-		body := fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>dev.cmesh</string><key>ProgramArguments</key><array><string>%s</string><string>up</string><string>--config</string><string>%s</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", exe, configPath)
+		body := launchdPlistBody(exe, configPath, launchdPATH())
 		if err := os.WriteFile(plistPath, []byte(body), 0o644); err != nil {
 			return err
 		}
@@ -908,6 +908,38 @@ func serviceInstall(opts serviceInstallOptions) error {
 
 func serviceCommandLine(exe, configPath string) string {
 	return fmt.Sprintf(`"%s" _service --config "%s"`, exe, configPath)
+}
+
+func launchdPlistBody(exe, configPath, pathValue string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>Label</key><string>dev.cmesh</string><key>ProgramArguments</key><array><string>%s</string><string>up</string><string>--config</string><string>%s</string></array><key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>
+`, xmlPlistString(exe), xmlPlistString(configPath), xmlPlistString(pathValue))
+}
+
+func launchdPATH() string {
+	parts := []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	for _, part := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+		part = strings.TrimSpace(part)
+		if part != "" && !containsString(parts, part) {
+			parts = append(parts, part)
+		}
+	}
+	return strings.Join(parts, string(os.PathListSeparator))
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func xmlPlistString(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
+	return replacer.Replace(value)
 }
 
 func resolveWindowsServicePassword(opts serviceInstallOptions) (string, error) {
@@ -1006,6 +1038,9 @@ func serviceRestart() error {
 	case "linux":
 		return runServiceCommand("systemctl", "--user", "restart", "cmesh.service")
 	case "darwin":
+		if err := serviceStop(); err != nil {
+			fmt.Fprintf(os.Stderr, "stop warning: %v\n", err)
+		}
 		return serviceStart()
 	case "windows":
 		if err := serviceStop(); err != nil {
@@ -1696,6 +1731,7 @@ func promptInit(opts *onboard.InitOptions, peers []onboard.PeerCandidate) error 
 		fmt.Println("[x] readonly")
 		fmt.Println("[x] dev")
 		fmt.Println("[ ] network")
+		fmt.Println("[ ] interactive")
 		fmt.Println("[ ] git_push")
 		value, err := prompt(reader, "Extra profiles, comma-separated (empty for readonly,dev): ")
 		if err != nil {

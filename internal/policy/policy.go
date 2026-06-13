@@ -84,6 +84,7 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 
 func (e *Engine) checkProfile(intent TaskIntent) Decision {
 	requested := intent.Profile
+	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
 		if intent.Runner != "" {
 			for name, profile := range e.cfg.Profiles {
@@ -114,6 +115,12 @@ func (e *Engine) checkProfile(intent TaskIntent) Decision {
 		}
 		effective = ceiling
 		profile = e.cfg.Profiles[effective]
+	}
+	if len(profile.AllowedPeers) > 0 && !matchesAny(identityCandidates(intent), profile.AllowedPeers) {
+		return denied("profile_denied", fmt.Sprintf("profile %q is not allowed for this peer", effective), requested, effective)
+	}
+	if profile.RequireExplicit && !explicit {
+		return denied("profile_denied", fmt.Sprintf("profile %q requires an explicit profile request", effective), requested, effective)
 	}
 	return Decision{
 		Allowed:          true,

@@ -120,6 +120,96 @@ func TestInboundRejectsUnavailableProfile(t *testing.T) {
 	}
 }
 
+func TestInboundProfileAllowedPeersRestrictsInteractiveProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Policy.AllowedPeers = []string{"mac-studio", "other-laptop"}
+	cfg.Profiles["interactive"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Claims:       []string{"read_files", "execute_repo_commands", "network", "desktop_interaction"},
+		AllowedPeers: []string{"mac-studio"},
+		Network:      true,
+	}
+	allowed := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          root,
+		Profile:      "interactive",
+		OriginNodeID: "mac-studio",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("expected trusted peer to use interactive profile: %+v", allowed)
+	}
+	denied := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "other-laptop",
+		CWD:          root,
+		Profile:      "interactive",
+		OriginNodeID: "other-laptop",
+	})
+	if denied.Allowed || denied.Code != "profile_denied" {
+		t.Fatalf("expected profile_denied for non-profile peer, got %+v", denied)
+	}
+}
+
+func TestInboundProfileRequireExplicitRejectsImplicitDefault(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Runners["claude-code"] = config.RunnerConfig{Command: []string{"claude", "-p"}, DefaultProfile: "interactive"}
+	cfg.Profiles["interactive"] = config.ProfileConfig{
+		Runner:          "claude-code",
+		Claims:          []string{"read_files", "execute_repo_commands", "network", "desktop_interaction"},
+		AllowedPeers:    []string{"mac-studio"},
+		RequireExplicit: true,
+		Network:         true,
+	}
+	denied := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          root,
+		Runner:       "claude-code",
+		OriginNodeID: "mac-studio",
+	})
+	if denied.Allowed || denied.Code != "profile_denied" {
+		t.Fatalf("expected profile_denied for implicit interactive default, got %+v", denied)
+	}
+	allowed := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          root,
+		Runner:       "claude-code",
+		Profile:      "interactive",
+		OriginNodeID: "mac-studio",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("expected explicit interactive request to pass: %+v", allowed)
+	}
+}
+
+func TestOutboundProfileAllowedPeersRestrictsInteractiveProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Policy.Outbound.AllowedPeers = []string{"win11-desktop", "linux-worker"}
+	cfg.Profiles["interactive"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Claims:       []string{"read_files", "execute_repo_commands", "network", "desktop_interaction"},
+		AllowedPeers: []string{"win11-desktop"},
+		Network:      true,
+	}
+	allowed := New(cfg).CheckOutbound(TaskIntent{
+		PeerName: "win11-desktop",
+		CWD:      root,
+		Profile:  "interactive",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("expected trusted peer to use interactive profile outbound: %+v", allowed)
+	}
+	denied := New(cfg).CheckOutbound(TaskIntent{
+		PeerName: "linux-worker",
+		CWD:      root,
+		Profile:  "interactive",
+	})
+	if denied.Allowed || denied.Code != "profile_denied" {
+		t.Fatalf("expected profile_denied for non-profile outbound peer, got %+v", denied)
+	}
+}
+
 func TestInboundRejectsCycle(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)

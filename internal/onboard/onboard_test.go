@@ -41,6 +41,76 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	if cfg.Profiles["readonly"].Bare {
 		t.Fatal("readonly profile should use the configured runner credentials by default")
 	}
+	if _, ok := cfg.Profiles["interactive"]; ok {
+		t.Fatal("interactive profile should not be enabled by default")
+	}
+}
+
+func TestGenerateConfigInteractiveProfileIsExplicitAndPeerScoped(t *testing.T) {
+	body, err := GenerateConfig(InitOptions{
+		Role:         "worker",
+		AllowedPeers: []string{"mac-studio"},
+		AllowedCWDs:  []string{"~/code/**"},
+		Runner:       "codex",
+		Profiles:     []string{"readonly", "dev", "interactive"},
+	}, Machine{Name: "win11-desktop", NodeID: "win11-desktop"}, []RunnerStatus{
+		{Name: "codex", Command: []string{"codex"}, Found: true},
+	}, nil)
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+	if !strings.Contains(body, `[profiles.interactive]`) {
+		t.Fatalf("expected explicit interactive profile:\n%s", body)
+	}
+	if !strings.Contains(body, `denied_profiles = ["network", "interactive", "git_push"]`) {
+		t.Fatalf("expected high-risk profiles to stay outbound-denied by default:\n%s", body)
+	}
+	path := t.TempDir() + "/config.toml"
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+	interactive := cfg.Profiles["interactive"]
+	if !interactive.Network {
+		t.Fatal("interactive profile should explicitly grant network")
+	}
+	if !interactive.RequireExplicit {
+		t.Fatal("interactive profile should require an explicit request")
+	}
+	if got := strings.Join(interactive.AllowedPeers, ","); got != "mac-studio" {
+		t.Fatalf("interactive allowed_peers = %q", got)
+	}
+}
+
+func TestGenerateConfigOriginScopesInteractiveProfileToOutboundPeers(t *testing.T) {
+	body, err := GenerateConfig(InitOptions{
+		Role:        "origin",
+		AllowedCWDs: []string{"~/code/**"},
+		PeerNames:   []string{"win11-desktop"},
+		Runner:      "codex",
+		Profiles:    []string{"readonly", "dev", "interactive"},
+	}, Machine{Name: "mac-studio", NodeID: "mac-studio"}, []RunnerStatus{
+		{Name: "codex", Command: []string{"codex"}, Found: true},
+	}, []PeerCandidate{
+		{Name: "win11-desktop", NodeID: "win-node", Address: "100.64.10.20", CmeshCapable: true},
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+	path := t.TempDir() + "/config.toml"
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+	if got := strings.Join(cfg.Profiles["interactive"].AllowedPeers, ","); got != "win11-desktop" {
+		t.Fatalf("interactive allowed_peers = %q", got)
+	}
 }
 
 func TestGenerateConfigSelectsCmeshCapablePeers(t *testing.T) {

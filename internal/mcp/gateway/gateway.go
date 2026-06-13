@@ -1305,7 +1305,7 @@ func mcpTools() []map[string]any {
 				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
 				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
 				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
-				"profiles":      arraySchema(stringSchema("Profiles to expose: readonly, dev, network, git_push.")),
+				"profiles":      arraySchema(stringSchema("Profiles to expose: readonly, dev, network, interactive, git_push.")),
 			}, nil),
 		},
 		{

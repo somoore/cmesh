@@ -211,6 +211,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	if len(allowedPeers) == 0 {
 		allowedPeers = []string{firstNonEmpty(machine.NodeID, machine.Name, "self")}
 	}
+	profileAllowedPeers := profilePeerScope(role, allowedPeers, peerNames(selectedPeers))
 	profiles := opts.Profiles
 	if len(profiles) == 0 {
 		profiles = []string{"readonly", "dev"}
@@ -241,18 +242,20 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	} else {
 		writeArray(&b, "allowed_peers", peerNames(selectedPeers))
 	}
-	writeArray(&b, "denied_profiles", []string{"network", "git_push"})
+	writeArray(&b, "denied_profiles", []string{"network", "interactive", "git_push"})
 	writeBool(&b, "allow_subdelegation", false)
 	for _, profile := range profiles {
 		switch profile {
 		case "readonly":
-			writeProfile(&b, "readonly", runnerName, []string{"read_files"}, false, false, false, "30m")
+			writeProfile(&b, "readonly", runnerName, []string{"read_files"}, nil, false, false, false, false, "30m")
 		case "dev":
-			writeProfile(&b, "dev", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands"}, false, false, false, "2h")
+			writeProfile(&b, "dev", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands"}, nil, false, false, false, false, "2h")
 		case "network":
-			writeProfile(&b, "network", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "network"}, false, true, false, "2h")
+			writeProfile(&b, "network", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "network"}, profileAllowedPeers, true, false, true, false, "2h")
+		case "interactive":
+			writeProfile(&b, "interactive", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "network", "launch_processes", "desktop_interaction"}, profileAllowedPeers, true, false, true, false, "30m")
 		case "git_push":
-			writeProfile(&b, "git_push", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "git_push"}, false, false, true, "2h")
+			writeProfile(&b, "git_push", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "git_push"}, profileAllowedPeers, true, false, false, true, "2h")
 		}
 	}
 	writeSection(&b, "runners."+runnerName)
@@ -384,6 +387,31 @@ func peerNames(peers []PeerCandidate) []string {
 	return names
 }
 
+func profilePeerScope(role string, allowedPeers, outboundPeers []string) []string {
+	switch role {
+	case "origin":
+		return uniqueNonEmpty(outboundPeers)
+	case "worker":
+		return uniqueNonEmpty(allowedPeers)
+	default:
+		return uniqueNonEmpty(append(append([]string(nil), allowedPeers...), outboundPeers...))
+	}
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
+
 func probeMesh(ctx context.Context, address string, port int) (bool, string) {
 	if port == 0 {
 		port = config.DefaultMeshPort
@@ -413,10 +441,16 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
-func writeProfile(b *strings.Builder, name, runner string, claims []string, bare, network, gitPush bool, maxRuntime string) {
+func writeProfile(b *strings.Builder, name, runner string, claims, allowedPeers []string, requireExplicit, bare, network, gitPush bool, maxRuntime string) {
 	writeSection(b, "profiles."+name)
 	writeKV(b, "runner", runner)
 	writeArray(b, "claims", claims)
+	if len(allowedPeers) > 0 {
+		writeArray(b, "allowed_peers", allowedPeers)
+	}
+	if requireExplicit {
+		writeBool(b, "require_explicit", true)
+	}
 	writeBool(b, "bare", bare)
 	writeBool(b, "network", network)
 	writeBool(b, "git_push", gitPush)

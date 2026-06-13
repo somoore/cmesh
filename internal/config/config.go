@@ -58,12 +58,14 @@ type OutboundPolicy struct {
 }
 
 type ProfileConfig struct {
-	Runner     string   `toml:"runner"`
-	Claims     []string `toml:"claims"`
-	Bare       bool     `toml:"bare"`
-	Network    bool     `toml:"network"`
-	GitPush    bool     `toml:"git_push"`
-	MaxRuntime Duration `toml:"max_runtime"`
+	Runner          string   `toml:"runner"`
+	Claims          []string `toml:"claims"`
+	AllowedPeers    []string `toml:"allowed_peers"`
+	RequireExplicit bool     `toml:"require_explicit"`
+	Bare            bool     `toml:"bare"`
+	Network         bool     `toml:"network"`
+	GitPush         bool     `toml:"git_push"`
+	MaxRuntime      Duration `toml:"max_runtime"`
 }
 
 type RunnerConfig struct {

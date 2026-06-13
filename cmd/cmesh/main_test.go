@@ -116,6 +116,34 @@ func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
 	}
 }
 
+func TestLaunchdPlistIncludesPathEnvironment(t *testing.T) {
+	got := launchdPlistBody(`/Applications/cmesh&tools/cmesh`, `/Users/scott/config<cmesh>.toml`, `/opt/homebrew/bin:/usr/bin`)
+	for _, want := range []string{
+		"<key>EnvironmentVariables</key>",
+		"<key>PATH</key>",
+		"<string>/opt/homebrew/bin:/usr/bin</string>",
+		"/Applications/cmesh&amp;tools/cmesh",
+		"/Users/scott/config&lt;cmesh&gt;.toml",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("launchd plist missing %q in %s", want, got)
+		}
+	}
+}
+
+func TestLaunchdPATHAddsHomebrewAheadOfLaunchdDefaults(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	got := launchdPATH()
+	for _, want := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("launchd PATH missing %q in %q", want, got)
+		}
+	}
+	if !strings.HasPrefix(got, "/opt/homebrew/bin:") {
+		t.Fatalf("launchd PATH = %q, want Homebrew first", got)
+	}
+}
+
 func TestWindowsServiceSCArgsWithUser(t *testing.T) {
 	got := strings.Join(windowsServiceSCArgs("config", `C:\Tools\cmesh.exe _service`, `.\scott`, "secret"), "\x00")
 	for _, want := range []string{"config", "cmesh", "binPath=", `C:\Tools\cmesh.exe _service`, "start=", "auto", "obj=", `.\scott`, "password=", "secret"} {

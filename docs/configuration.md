@@ -94,9 +94,11 @@ The mesh server refuses wildcard bind addresses.
 ```toml
 [policy.outbound]
 allowed_peers = ["homelab-vm"]
-denied_profiles = ["yolo"]
+denied_profiles = ["network", "interactive", "git_push"]
 allow_subdelegation = false
 ```
+
+`denied_profiles` is an origin-side brake. Generated configs keep high-risk profiles in this list, even if those profiles are defined locally, so they cannot be requested accidentally. Remove a profile from this list only on an origin machine that is intentionally allowed to request it.
 
 ## Profiles
 
@@ -113,6 +115,22 @@ max_runtime = "30m"
 ```
 
 Runner manifests declare what those claims mean for a specific harness.
+
+Defaults expose only `readonly` and `dev`. High-risk profiles such as `network`, `interactive`, and `git_push` must be added explicitly and requested by name. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
+
+```toml
+[profiles.interactive]
+runner = "codex"
+claims = ["read_files", "edit_repo", "execute_repo_commands", "network", "launch_processes", "desktop_interaction"]
+allowed_peers = ["scotts-macbook-pro"]
+require_explicit = true
+bare = false
+network = true
+git_push = false
+max_runtime = "30m"
+```
+
+Profile-level `allowed_peers` is checked in addition to `[policy].allowed_peers` and `[policy.outbound].allowed_peers`. Use it for interactive or network-capable profiles so a generally trusted peer cannot automatically use a more powerful profile. `require_explicit = true` prevents a high-risk profile from being selected through an empty profile request, even if someone accidentally makes it the runner default.
 
 ## Runners
 
