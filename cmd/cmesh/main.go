@@ -919,13 +919,13 @@ func launchdPlistBody(exe, configPath, pathValue string) string {
 
 func launchdPATH() string {
 	parts := []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
-	for _, part := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+	for _, part := range strings.Split(os.Getenv("PATH"), ":") {
 		part = strings.TrimSpace(part)
 		if part != "" && !containsString(parts, part) {
 			parts = append(parts, part)
 		}
 	}
-	return strings.Join(parts, string(os.PathListSeparator))
+	return strings.Join(parts, ":")
 }
 
 func containsString(values []string, needle string) bool {

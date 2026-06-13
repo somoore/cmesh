@@ -145,16 +145,13 @@ func (r *Runner) profile(name string) (ProfileConfig, error) {
 }
 
 func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
-	if len(r.cfg.Command) > 0 {
-		argv := append([]string(nil), r.cfg.Command...)
-		argv = append(argv, profile.ExtraArgs...)
-		return argv
-	}
-	argv := []string{r.cfg.Binary}
+	argv := r.commandPrefix()
 	if profile.Approval != "" {
-		argv = append(argv, "--ask-for-approval", profile.Approval)
+		argv = insertBeforeExec(argv, "--ask-for-approval", profile.Approval)
 	}
-	argv = append(argv, "exec")
+	if !commandIncludesExec(argv) {
+		argv = append(argv, "exec")
+	}
 	if profile.Sandbox != "" {
 		argv = append(argv, "--sandbox", profile.Sandbox)
 	}
@@ -173,7 +170,40 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 		argv = append(argv, "-C", req.CWD)
 	}
 	argv = append(argv, profile.ExtraArgs...)
+	argv = append(argv, "-")
 	return argv
+}
+
+func insertBeforeExec(argv []string, values ...string) []string {
+	index := execIndex(argv)
+	if index < 0 {
+		return append(argv, values...)
+	}
+	out := make([]string, 0, len(argv)+len(values))
+	out = append(out, argv[:index]...)
+	out = append(out, values...)
+	out = append(out, argv[index:]...)
+	return out
+}
+
+func (r *Runner) commandPrefix() []string {
+	if len(r.cfg.Command) > 0 {
+		return append([]string(nil), r.cfg.Command...)
+	}
+	return []string{r.cfg.Binary}
+}
+
+func commandIncludesExec(argv []string) bool {
+	return execIndex(argv) >= 0
+}
+
+func execIndex(argv []string) int {
+	for i, arg := range argv[1:] {
+		if arg == "exec" {
+			return i + 1
+		}
+	}
+	return -1
 }
 
 func (r *Runner) binaryForLookup() string {
