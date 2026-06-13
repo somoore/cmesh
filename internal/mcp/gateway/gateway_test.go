@@ -14,6 +14,7 @@ import (
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
+	"cmesh/internal/mesh/schema"
 	"cmesh/internal/policy"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
@@ -180,6 +181,77 @@ func TestDelegateRejectsUnknownPeer(t *testing.T) {
 	}
 }
 
+func TestDelegateFanoutReturnsPeerKeyedResults(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	var okPrompt string
+	okMux := http.NewServeMux()
+	okMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var raw struct {
+			Prompt string `json:"prompt"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			t.Fatalf("decode ok task request: %v", err)
+		}
+		okPrompt = raw.Prompt
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"remote-ok","state":"queued"}`))
+	})
+	okSrv := httptest.NewServer(okMux)
+	defer okSrv.Close()
+	failMux := http.NewServeMux()
+	failMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":"peer_unauthorized","detail":"blocked by worker"}`))
+	})
+	failSrv := httptest.NewServer(failMux)
+	defer failSrv.Close()
+
+	okHost, okPort := splitTestServerAddr(t, okSrv.URL)
+	failHost, failPort := splitTestServerAddr(t, failSrv.URL)
+	g.Config.Peers = map[string]config.PeerConfig{
+		"ok":   {Name: "ok", NodeID: "ok-node", Address: okHost, Port: okPort},
+		"fail": {Name: "fail", NodeID: "fail-node", Address: failHost, Port: failPort},
+	}
+
+	resp, err := g.delegateCall(ctx, DelegateRequest{
+		Peers:  []string{"ok", "fail"},
+		Prompt: "check disk space",
+		CWD:    t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("delegateCall returned error: %v", err)
+	}
+	if resp.OK {
+		t.Fatalf("fan-out should report partial failure: %+v", resp)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v", resp.Result)
+	}
+	peers, ok := result["peers"].(map[string]ToolResponse)
+	if !ok {
+		t.Fatalf("peers result = %#v", result["peers"])
+	}
+	if !peers["ok"].OK {
+		t.Fatalf("ok peer response = %+v", peers["ok"])
+	}
+	if peers["fail"].OK || peers["fail"].Error == nil || peers["fail"].Error.Code != task.ErrorPeerUnauthorized {
+		t.Fatalf("fail peer response = %+v", peers["fail"])
+	}
+	if okPrompt != "check disk space" {
+		t.Fatalf("ok peer prompt = %q", okPrompt)
+	}
+	mirror, err := g.Store.GetPeerTask(ctx, peers["ok"].Result.(schema.CreateTaskResponse).TaskID)
+	if err != nil {
+		t.Fatalf("GetPeerTask for ok peer: %v", err)
+	}
+	if mirror.PeerNodeID != "ok-node" || mirror.RemoteTaskID != "remote-ok" {
+		t.Fatalf("ok peer mirror = %+v", mirror)
+	}
+}
+
 func TestPeerSmokeRunsTaskAndVerifiesResult(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
@@ -231,6 +303,19 @@ func TestPeerSmokeRunsTaskAndVerifiesResult(t *testing.T) {
 			t.Fatalf("check %s = false in %+v", name, checks)
 		}
 	}
+}
+
+func splitTestServerAddr(t *testing.T, rawURL string) (string, int) {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(rawURL, "http://"))
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+	return host, port
 }
 
 func TestGatewaySmokeRequiresCommandOutput(t *testing.T) {

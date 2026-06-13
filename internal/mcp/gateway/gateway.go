@@ -304,7 +304,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		}
 		info, err := client.Hello(ctx)
 		if err != nil {
-			return toolFailure(task.ErrorPeerUnreachable, err.Error())
+			return rpcFailure(task.ErrorPeerUnreachable, err)
 		}
 		return ToolResponse{OK: true, Result: info}, nil
 	case "test_peer":
@@ -531,6 +531,8 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		if result, err := client.TaskResult(ctx, followupPeerTask.RemoteTaskID); err == nil && result.Result != nil {
 			resumeSessionID = stringValue(result.Result.RunnerExtra, "session_id")
 			followupBaseCommit = result.Result.HeadCommit
+		} else if err != nil {
+			return rpcFailure(task.ErrorWorkerFailed, err)
 		} else {
 			return toolFailure(task.ErrorWorkerFailed, "followup task result is not available; cannot resume session")
 		}
@@ -559,7 +561,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		},
 	})
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	remoteTaskID := resp.TaskID
 	localResp := resp
@@ -629,7 +631,7 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 	}
 	info, err := client.Hello(ctx)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	delegated, err := g.delegateCall(ctx, DelegateRequest{
 		Peer:           peer,
@@ -814,7 +816,7 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 	}
 	resp, err := client.TaskResult(ctx, peerTask.RemoteTaskID)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -830,7 +832,7 @@ func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolRespon
 	}
 	resp, err := client.TaskTranscript(ctx, peerTask.RemoteTaskID)
 	if err != nil {
-		return toolFailure(task.ErrorTranscriptUnavailable, err.Error())
+		return rpcFailure(task.ErrorTranscriptUnavailable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -852,7 +854,7 @@ func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolRe
 	}
 	body, err := client.TaskArtifact(ctx, peerTask.RemoteTaskID, kind)
 	if err != nil {
-		return toolFailure(task.ErrorWorkerFailed, err.Error())
+		return rpcFailure(task.ErrorWorkerFailed, err)
 	}
 	dir := filepath.Join(g.Config.Node.DataDir, "artifacts", "from-peers")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -876,7 +878,7 @@ func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolRe
 	}
 	resp, err := client.Cancel(ctx, peerTask.RemoteTaskID, reason)
 	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
@@ -1146,6 +1148,14 @@ func writeRPC(w http.ResponseWriter, value any) {
 func toolFailure(code task.ErrorCode, detail string) (ToolResponse, error) {
 	resp := ToolResponse{OK: false, Error: &ToolError{Code: code, Detail: detail}}
 	return resp, fmt.Errorf("%s: %s", code, detail)
+}
+
+func rpcFailure(fallback task.ErrorCode, err error) (ToolResponse, error) {
+	code := rpc.CodeOf(err)
+	if code == "" {
+		code = fallback
+	}
+	return toolFailure(code, err.Error())
 }
 
 func mcpTools() []map[string]any {

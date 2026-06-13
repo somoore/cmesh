@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,11 +14,36 @@ import (
 	"time"
 
 	"cmesh/internal/mesh/schema"
+	"cmesh/internal/task"
 )
 
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+}
+
+type Error struct {
+	StatusCode int
+	Code       task.ErrorCode
+	Detail     string
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Detail == "" {
+		return string(e.Code)
+	}
+	return fmt.Sprintf("%s: %s", e.Code, e.Detail)
+}
+
+func CodeOf(err error) task.ErrorCode {
+	var rpcErr *Error
+	if errors.As(err, &rpcErr) {
+		return rpcErr.Code
+	}
+	return ""
 }
 
 func NewClient(baseURL string) *Client {
@@ -116,7 +142,7 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var apiErr schema.Error
 		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return fmt.Errorf("%s: %s", apiErr.Code, apiErr.Detail)
+			return &Error{StatusCode: resp.StatusCode, Code: apiErr.Code, Detail: apiErr.Detail}
 		}
 		return fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
@@ -151,7 +177,7 @@ func (c *Client) doBytes(ctx context.Context, method, path string, in any) ([]by
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var apiErr schema.Error
 		if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code != "" {
-			return nil, fmt.Errorf("%s: %s", apiErr.Code, apiErr.Detail)
+			return nil, &Error{StatusCode: resp.StatusCode, Code: apiErr.Code, Detail: apiErr.Detail}
 		}
 		return nil, fmt.Errorf("mesh rpc %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
