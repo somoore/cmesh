@@ -2,6 +2,8 @@
 
 cmesh lets the coding agent on this machine ask the coding agent on another machine to do work.
 
+> Experimental: cmesh can cause real changes on real machines. Do not use it on anything you love: machines, repos, credentials, or data you cannot afford to lose. Start on trusted private networks with narrow peer allowlists, narrow cwd allowlists, and `readonly` profiles.
+
 You install cmesh on each machine. cmesh uses Tailscale to reach peers, verifies who is calling, checks your policy, runs the local agent there, and gives your current agent the result.
 
 ## 1. Prerequisites

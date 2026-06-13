@@ -1,5 +1,7 @@
 # Release Process
 
+> Experimental project: releases should not be presented as enterprise-hardened remote management software. Keep release notes explicit about trusted private networks, narrow policies, and known security gaps.
+
 cmesh releases are source-built by GitHub Actions from signed version tags.
 
 ## Local checks

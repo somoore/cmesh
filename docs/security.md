@@ -1,5 +1,7 @@
 # Security
 
+> Experimental: cmesh is not enterprise remote management software. It is an experimental agent delegation mesh for trusted private networks. Treat every worker profile as real authority on that machine.
+
 cmesh is designed to be safe for personal and small-team tailnets when it is configured correctly. It does not rely on "the network can reach me" as permission to run code. Network reachability is only the first gate.
 
 Short version:
@@ -8,6 +10,7 @@ Short version:
 - Tailscale provides encrypted transport and authenticated peer identity.
 - cmesh decides whether that peer may run this task, in this directory, with this profile.
 - Worker output is treated as untrusted claims, not truth.
+- Do not use cmesh on anything you love: machines, repos, credentials, or data you cannot afford to lose.
 
 cmesh is not a sandbox by itself. It is a policy and delegation layer around local agent runners. The selected runner and operating system still matter.
 

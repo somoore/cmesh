@@ -1,6 +1,8 @@
 # cmesh Product Requirements
 
 > Historical product baseline. For the current onboarding and CLI surface, use [Quickstart](quickstart.md), [Configuration](configuration.md), and the root README.
+>
+> Current caution: cmesh is experimental remote task delegation for trusted private networks. Do not use it on anything you love: machines, repos, credentials, or data you cannot afford to lose.
 
 Status: Draft v1
 Date: 2026-06-12

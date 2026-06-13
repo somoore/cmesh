@@ -1,5 +1,7 @@
 # Real-world testing: Mac in Texas to Windows in Kansas
 
+> Experimental evidence, not a safety guarantee. These tests prove cmesh can make real cross-machine changes; they are also why you should not use it on anything you love: machines, repos, credentials, or data you cannot afford to lose.
+
 This document records an end-to-end cmesh test between two physically separate machines:
 
 - Mac laptop in Kyle, Texas

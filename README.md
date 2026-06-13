@@ -2,6 +2,20 @@
 
 **Ask a machine you control to do bounded work through its local agent, without leaving your current agent session.**
 
+## Experimental
+
+cmesh is experimental remote task delegation for local AI agents.
+
+It can cause real changes on real machines. In testing, cmesh has created files, run commands, opened desktop apps, and changed a Windows wallpaper from a Mac over a private tailnet.
+
+Please do not use this on anything you love: machines, repos, credentials, or data you cannot afford to lose.
+
+If you are down for testing early local-first agent infrastructure on trusted machines, welcome. Start with narrow peer allowlists, narrow cwd allowlists, and `readonly` profiles.
+
+> This is not enterprise remote management software.
+> This is an experimental agent delegation mesh for trusted private networks.
+> Treat every worker profile as real authority on that machine.
+
 cmesh lets Claude Code, Codex, or another local coding agent on your current machine delegate a scoped task to a different machine you control.
 
 For example: you are on your Mac with Claude Code open, but you need to inspect a service, run a Linux build, or check logs on a bare-metal server in a datacenter. If both machines are on your Tailscale tailnet and the server has a supported runner installed, cmesh gives your local agent a tool for sending that task to the server and getting the result back.

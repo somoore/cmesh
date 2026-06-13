@@ -1,5 +1,7 @@
 # cmesh Delegation Guidance
 
+> Experimental: cmesh can perform real work on real machines. Delegate only to trusted peers, use the narrowest useful profile, and do not delegate tasks against anything you love: machines, repos, credentials, or data you cannot afford to lose.
+
 This document is the canonical model-facing guidance for cmesh. Harness-specific generators can transform it into a Claude Code skill, an AGENTS.md fragment, or another local instruction format without changing the rules.
 
 ## Operating Rule

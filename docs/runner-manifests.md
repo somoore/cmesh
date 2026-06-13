@@ -1,5 +1,7 @@
 # Runner Manifests
 
+> Experimental: runner manifests are evidence, not magic. They describe what a local runner appears to enforce; they do not make cmesh an OS sandbox or enterprise remote-management system.
+
 Runner manifests are evidence-backed capability declarations. They prevent cmesh from overclaiming what a harness profile enforces.
 
 The schema is `schemas/runner_manifest.v1.json`.

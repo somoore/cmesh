@@ -1,5 +1,7 @@
 # Architecture
 
+> Experimental: this architecture describes an early agent delegation mesh for trusted private networks. It is not a claim of enterprise hardening, and every worker profile should be treated as real authority on that machine.
+
 cmesh is a local-first delegation plane for coding agents. It separates the model-facing tool surface from the daemon-to-daemon transport so remote machines can execute work without exposing MCP over the network.
 
 There are two MCP surfaces:

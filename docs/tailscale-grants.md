@@ -1,5 +1,7 @@
 # Tailscale Grants for cmesh
 
+> Experimental: Tailscale grants are defense in depth for trusted private networks. They do not make broad worker profiles safe, and they do not replace narrow cmesh policy.
+
 cmesh uses Tailscale for encrypted peer connectivity and authenticated node identity. Tailscale grants are defense in depth. The cmesh daemon still performs task authorization for every request.
 
 ## Required Network Shape

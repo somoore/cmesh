@@ -1,5 +1,7 @@
 # Development
 
+> Experimental project: local development and testing can exercise real remote task execution. Use disposable or trusted machines, narrow policies, and assume worker profiles grant real authority.
+
 ## Build
 
 ```bash

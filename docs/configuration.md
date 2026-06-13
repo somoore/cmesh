@@ -1,5 +1,7 @@
 # Configuration
 
+> Experimental: cmesh can cause real changes on real machines. Keep configs narrow, assume worker profiles grant real authority, and do not use this on anything you love: machines, repos, credentials, or data you cannot afford to lose.
+
 cmesh uses a TOML config file, but most users should start with:
 
 ```bash
