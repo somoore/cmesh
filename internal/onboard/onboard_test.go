@@ -1,6 +1,8 @@
 package onboard
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,6 +38,9 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	if cfg.Profiles["dev"].Runner != "codex" {
 		t.Fatalf("dev runner = %q", cfg.Profiles["dev"].Runner)
 	}
+	if cfg.Profiles["readonly"].Bare {
+		t.Fatal("readonly profile should use the configured runner credentials by default")
+	}
 }
 
 func TestGenerateConfigSelectsCmeshCapablePeers(t *testing.T) {
@@ -57,5 +62,40 @@ func TestGenerateConfigSelectsCmeshCapablePeers(t *testing.T) {
 	}
 	if strings.Contains(body, `[peers.printer]`) {
 		t.Fatalf("unexpected non-cmesh peer in config:\n%s", body)
+	}
+}
+
+func TestGenerateConfigSanitizesPeerTableNames(t *testing.T) {
+	body, err := GenerateConfig(InitOptions{
+		Role:        "origin",
+		Runner:      "claude-code",
+		AllowedCWDs: []string{"~/code/**"},
+	}, Machine{Name: "win11-desktop"}, []RunnerStatus{
+		{Name: "claude-code", Command: []string{"C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"}, Found: true},
+	}, []PeerCandidate{
+		{Name: "Scott’s MacBook Pro", NodeID: "node-1", Address: "100.120.229.49", CmeshCapable: true},
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+	if !strings.Contains(body, `[peers.scott-s-macbook-pro]`) {
+		t.Fatalf("expected sanitized peer table name:\n%s", body)
+	}
+	path := t.TempDir() + "/config.toml"
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	if _, err := config.Load(path); err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+}
+
+func TestDetectRunnerResolvesCommandBinary(t *testing.T) {
+	status := detectRunner(context.Background(), "go-runner", []string{"go", "version"}, "go", "version")
+	if !status.Found {
+		t.Skip("go not found on PATH")
+	}
+	if !filepath.IsAbs(status.Command[0]) {
+		t.Fatalf("command[0] = %q, want absolute path", status.Command[0])
 	}
 }

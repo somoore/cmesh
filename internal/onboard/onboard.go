@@ -246,7 +246,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	for _, profile := range profiles {
 		switch profile {
 		case "readonly":
-			writeProfile(&b, "readonly", runnerName, []string{"read_files"}, true, false, false, "30m")
+			writeProfile(&b, "readonly", runnerName, []string{"read_files"}, false, false, false, "30m")
 		case "dev":
 			writeProfile(&b, "dev", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands"}, false, false, false, "2h")
 		case "network":
@@ -306,7 +306,7 @@ type tailnetPeer struct {
 }
 
 func detectRunner(ctx context.Context, name string, command []string, binary string, versionArgs ...string) RunnerStatus {
-	status := RunnerStatus{Name: name, Command: command}
+	status := RunnerStatus{Name: name, Command: append([]string(nil), command...)}
 	path, err := exec.LookPath(binary)
 	if err != nil {
 		status.Detail = "not found on PATH"
@@ -314,6 +314,9 @@ func detectRunner(ctx context.Context, name string, command []string, binary str
 	}
 	status.Found = true
 	status.Detail = path
+	if len(status.Command) > 0 {
+		status.Command[0] = path
+	}
 	if len(versionArgs) > 0 {
 		ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
@@ -472,8 +475,24 @@ func cleanName(name string) string {
 	if name == "" {
 		return "cmesh-node"
 	}
-	replacer := strings.NewReplacer(" ", "-", "_", "-")
-	return replacer.Replace(name)
+	var b strings.Builder
+	lastDash := false
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	cleaned := strings.Trim(b.String(), "-")
+	if cleaned == "" {
+		return "cmesh-node"
+	}
+	return cleaned
 }
 
 func firstLabel(name string) string {

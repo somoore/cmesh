@@ -90,16 +90,17 @@ func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	stdio := fs.Bool("stdio", false, "run the setup MCP server over stdio")
 	install := fs.Bool("install", false, "install the setup MCP server into a detected AI coding agent")
+	agent := fs.String("agent", "", "agent to install into with --install: claude-code, codex, or all")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *install || (!*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout)) {
-		return cmdMCPInstall()
+		return cmdMCPInstall(*agent)
 	}
 	return (&setupstdio.Server{}).Serve(context.Background())
 }
 
-func cmdMCPInstall() error {
+func cmdMCPInstall(agentChoice string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -127,27 +128,9 @@ func cmdMCPInstall() error {
 	if len(found) > 1 {
 		fmt.Printf("[%d] all detected agents\n", allChoice)
 	}
-	reader := bufio.NewReader(os.Stdin)
-	defaultChoice := "1"
-	if len(found) > 1 {
-		defaultChoice = fmt.Sprint(allChoice)
-	}
-	answer, err := prompt(reader, fmt.Sprintf("Install cmesh MCP into which agent? [%s]: ", defaultChoice))
+	selected, err := selectMCPInstallAgents(agentChoice, found, allChoice)
 	if err != nil {
 		return err
-	}
-	if answer == "" {
-		answer = defaultChoice
-	}
-	var selected []setupinstall.Agent
-	var choice int
-	_, _ = fmt.Sscanf(answer, "%d", &choice)
-	if choice == allChoice && len(found) > 1 {
-		selected = found
-	} else if choice >= 1 && choice <= len(found) {
-		selected = []setupinstall.Agent{found[choice-1]}
-	} else {
-		return fmt.Errorf("invalid selection %q", answer)
 	}
 	fmt.Println()
 	for _, agent := range selected {
@@ -163,6 +146,42 @@ func cmdMCPInstall() error {
 	fmt.Println()
 	fmt.Println("Done. Restart or reload the selected agent so it discovers cmesh.")
 	return nil
+}
+
+func selectMCPInstallAgents(agentChoice string, found []setupinstall.Agent, allChoice int) ([]setupinstall.Agent, error) {
+	agentChoice = strings.TrimSpace(agentChoice)
+	if agentChoice != "" {
+		if agentChoice == "all" {
+			return found, nil
+		}
+		for _, agent := range found {
+			if agent.ID == agentChoice {
+				return []setupinstall.Agent{agent}, nil
+			}
+		}
+		return nil, fmt.Errorf("agent %q is not detected; choose claude-code, codex, or all", agentChoice)
+	}
+	reader := bufio.NewReader(os.Stdin)
+	defaultChoice := "1"
+	if len(found) > 1 {
+		defaultChoice = fmt.Sprint(allChoice)
+	}
+	answer, err := prompt(reader, fmt.Sprintf("Install cmesh MCP into which agent? [%s]: ", defaultChoice))
+	if err != nil {
+		return nil, err
+	}
+	if answer == "" {
+		answer = defaultChoice
+	}
+	var choice int
+	_, _ = fmt.Sscanf(answer, "%d", &choice)
+	if choice == allChoice && len(found) > 1 {
+		return found, nil
+	}
+	if choice >= 1 && choice <= len(found) {
+		return []setupinstall.Agent{found[choice-1]}, nil
+	}
+	return nil, fmt.Errorf("invalid selection %q", answer)
 }
 
 func cmdInit(args []string) error {
@@ -698,6 +717,9 @@ func windowsServiceUserChecks() []doctor.Check {
 	}
 	serviceUser, err := windowsServiceStartName()
 	if err != nil {
+		if isWindowsServiceNotInstalledError(err) {
+			return []doctor.Check{{Name: "service user", OK: true, Detail: "not installed"}}
+		}
 		return []doctor.Check{{Name: "service user", OK: false, Err: err.Error()}}
 	}
 	current, currentErr := osuser.Current()
@@ -720,6 +742,14 @@ func windowsServiceStartName() (string, error) {
 		return "", fmt.Errorf("query Windows service cmesh: %s", strings.TrimSpace(string(out)))
 	}
 	return parseWindowsServiceStartName(string(out))
+}
+
+func isWindowsServiceNotInstalledError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "FAILED 1060") || strings.Contains(text, "does not exist as an installed service")
 }
 
 func parseWindowsServiceStartName(out string) (string, error) {

@@ -30,6 +30,30 @@ func TestServeInitializeOverStdioFrame(t *testing.T) {
 	}
 }
 
+func TestServeInitializeOverNewlineFrame(t *testing.T) {
+	req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`
+	in := strings.NewReader(req + "\n")
+	var out bytes.Buffer
+	srv := &Server{In: in, Out: &out}
+	if err := srv.Serve(context.Background()); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	got := out.String()
+	if strings.Contains(got, "Content-Length:") {
+		t.Fatalf("newline request got content-length response: %q", got)
+	}
+	var resp rpcResponse
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("response JSON: %v\n%s", err, got)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	if !strings.Contains(got, `"name":"cmesh-setup"`) {
+		t.Fatalf("missing server info: %s", got)
+	}
+}
+
 func TestWriteConfigRequiresConfirmation(t *testing.T) {
 	resp := (&Server{}).CallTool(context.Background(), "write_config", []byte(`{"role":"worker"}`))
 	if !resp.OK {

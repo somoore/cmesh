@@ -21,8 +21,16 @@ type Server struct {
 	In  io.Reader
 	Out io.Writer
 
-	mu sync.Mutex
+	mu        sync.Mutex
+	frameMode stdioFrameMode
 }
+
+type stdioFrameMode int
+
+const (
+	stdioFrameContentLength stdioFrameMode = iota
+	stdioFrameNewline
+)
 
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -63,13 +71,14 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	reader := bufio.NewReader(s.In)
 	for {
-		body, err := readFrame(reader)
+		body, mode, err := readFrame(reader)
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
+		s.setFrameMode(mode)
 		var req rpcRequest
 		if err := json.Unmarshal(body, &req); err != nil {
 			_ = s.write(ctx, rpcResponse{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "parse error: " + err.Error()}})
@@ -286,14 +295,17 @@ func pathForValidation(path, tomlBody string) (string, func(), error) {
 	return tmp.Name(), func() { _ = os.Remove(tmp.Name()) }, nil
 }
 
-func readFrame(reader *bufio.Reader) ([]byte, error) {
+func readFrame(reader *bufio.Reader) ([]byte, stdioFrameMode, error) {
 	contentLength := -1
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
-			return nil, err
+			return nil, stdioFrameContentLength, err
 		}
 		line = strings.TrimRight(line, "\r\n")
+		if strings.HasPrefix(strings.TrimSpace(line), "{") {
+			return []byte(strings.TrimSpace(line)), stdioFrameNewline, nil
+		}
 		if line == "" {
 			break
 		}
@@ -304,17 +316,17 @@ func readFrame(reader *bufio.Reader) ([]byte, error) {
 		if strings.EqualFold(strings.TrimSpace(name), "Content-Length") {
 			parsed, err := strconv.Atoi(strings.TrimSpace(value))
 			if err != nil {
-				return nil, fmt.Errorf("invalid Content-Length: %w", err)
+				return nil, stdioFrameContentLength, fmt.Errorf("invalid Content-Length: %w", err)
 			}
 			contentLength = parsed
 		}
 	}
 	if contentLength < 0 {
-		return nil, errors.New("missing Content-Length")
+		return nil, stdioFrameContentLength, errors.New("missing Content-Length")
 	}
 	body := make([]byte, contentLength)
 	_, err := io.ReadFull(reader, body)
-	return body, err
+	return body, stdioFrameContentLength, err
 }
 
 func (s *Server) write(ctx context.Context, value any) error {
@@ -329,11 +341,21 @@ func (s *Server) write(ctx context.Context, value any) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.frameMode == stdioFrameNewline {
+		_, err = s.Out.Write(append(body, '\n'))
+		return err
+	}
 	if _, err := fmt.Fprintf(s.Out, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
 		return err
 	}
 	_, err = s.Out.Write(body)
 	return err
+}
+
+func (s *Server) setFrameMode(mode stdioFrameMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.frameMode = mode
 }
 
 func failure(code, detail string) ToolResponse {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
 	"cmesh/internal/gitx"
+	"cmesh/internal/mcp/setupinstall"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/testutil"
@@ -78,6 +80,32 @@ func TestParseInterspersedFlagsAllowsQuickstartOrder(t *testing.T) {
 	}
 }
 
+func TestSelectMCPInstallAgentsAll(t *testing.T) {
+	found := []setupinstall.Agent{
+		{ID: "claude-code", Name: "Claude Code", Found: true},
+		{ID: "codex", Name: "Codex", Found: true},
+	}
+	selected, err := selectMCPInstallAgents("all", found, len(found)+1)
+	if err != nil {
+		t.Fatalf("selectMCPInstallAgents: %v", err)
+	}
+	if len(selected) != len(found) {
+		t.Fatalf("selected %d agents, want %d", len(selected), len(found))
+	}
+}
+
+func TestSelectMCPInstallAgentsRequiresDetectedAgent(t *testing.T) {
+	_, err := selectMCPInstallAgents("codex", []setupinstall.Agent{
+		{ID: "claude-code", Name: "Claude Code", Found: true},
+	}, 2)
+	if err == nil {
+		t.Fatal("selectMCPInstallAgents returned nil error")
+	}
+	if !strings.Contains(err.Error(), "not detected") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
 	got := serviceCommandLine(`C:\Tools\cmesh.exe`, `C:\Users\scott\.config\cmesh\config.toml`)
 	if !strings.Contains(got, ` _service --config `) {
@@ -94,6 +122,16 @@ func TestWindowsServiceSCArgsWithUser(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("windowsServiceSCArgs missing %q in %#v", want, got)
 		}
+	}
+}
+
+func TestWindowsServiceNotInstalledError(t *testing.T) {
+	err := errors.New("query Windows service cmesh: [SC] OpenService FAILED 1060:\n\nThe specified service does not exist as an installed service.")
+	if !isWindowsServiceNotInstalledError(err) {
+		t.Fatal("expected service-not-installed error")
+	}
+	if isWindowsServiceNotInstalledError(errors.New("query Windows service cmesh: access denied")) {
+		t.Fatal("access denied should remain a service query failure")
 	}
 }
 
