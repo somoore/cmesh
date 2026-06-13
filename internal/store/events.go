@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 
@@ -21,4 +22,16 @@ func (s *Store) RecordAuditEvent(ctx context.Context, event audit.Event) error {
 		return fmt.Errorf("record audit event: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) HasAuditEvent(ctx context.Context, taskID, eventType string) (bool, error) {
+	var value int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM task_events WHERE task_id = ? AND event_type = ? LIMIT 1`, taskID, eventType).Scan(&value)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, fmt.Errorf("query audit event: %w", err)
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"cmesh/internal/audit"
 	"cmesh/internal/task"
 )
 
@@ -85,6 +86,29 @@ func TestUpdateTaskStateStoresResult(t *testing.T) {
 	}
 	if updated.ResultRef != "transcript:task-1" {
 		t.Fatalf("unexpected result ref %q", updated.ResultRef)
+	}
+}
+
+func TestHasAuditEvent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	event := audit.Event{EventID: "evt-1", Type: "task.dispatch.requested", TaskID: "task-1", NodeID: "node-1", Timestamp: time.Now().UTC()}
+	if err := s.RecordAuditEvent(ctx, event); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+	found, err := s.HasAuditEvent(ctx, "task-1", "task.dispatch.requested")
+	if err != nil {
+		t.Fatalf("HasAuditEvent: %v", err)
+	}
+	if !found {
+		t.Fatal("expected audit event to be found")
+	}
+	found, err = s.HasAuditEvent(ctx, "task-1", "task.completed")
+	if err != nil {
+		t.Fatalf("HasAuditEvent missing type: %v", err)
+	}
+	if found {
+		t.Fatal("unexpected audit event match")
 	}
 }
 

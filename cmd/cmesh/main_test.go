@@ -156,8 +156,8 @@ func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
 	if smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 1, Stdout: "cmesh smoke ok\n"}}) {
 		t.Fatal("non-zero command artifact must not pass smoke validation")
 	}
-	if !smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}) {
-		t.Fatal("expected smoke result to match")
+	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}) {
+		t.Fatal("model summary without command_output must not pass smoke validation")
 	}
 	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "What would you like me to work on?"}) {
 		t.Fatal("generic worker response must not pass smoke validation")

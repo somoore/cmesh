@@ -199,10 +199,23 @@ func TestPeerSmokeRunsTaskAndVerifiesResult(t *testing.T) {
 	}
 	result := resp.Result.(map[string]any)
 	checks := result["checks"].(map[string]bool)
-	for _, name := range []string{"peer_reachable", "policy_allowed", "task_created", "runner_invoked", "prompt_received", "smoke_response_verified", "result_envelope_parsed"} {
+	for _, name := range []string{"peer_reachable", "policy_allowed", "task_created", "runner_invoked", "prompt_received", "smoke_response_verified", "result_envelope_parsed", "audit_event_written"} {
 		if !checks[name] {
 			t.Fatalf("check %s = false in %+v", name, checks)
 		}
+	}
+}
+
+func TestGatewaySmokeRequiresCommandOutput(t *testing.T) {
+	if !gatewaySmokeResultMatches(&task.ResultEnvelope{
+		CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 0, Stdout: gatewaySmokeExpectedResponse + "\n"},
+	}) {
+		t.Fatal("raw command artifact should pass smoke verification")
+	}
+	if gatewaySmokeResultMatches(&task.ResultEnvelope{
+		WorkerSummaryUntrusted: gatewaySmokeExpectedResponse,
+	}) {
+		t.Fatal("summary-only smoke response must not pass verification")
 	}
 }
 

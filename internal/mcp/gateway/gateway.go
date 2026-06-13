@@ -655,6 +655,10 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 	if !ok || taskResult.Result == nil {
 		return toolFailure(task.ErrorTranscriptUnavailable, "smoke task result envelope is not available")
 	}
+	auditEventWritten, err := g.Store.HasAuditEvent(ctx, created.TaskID, "task.dispatch.requested")
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
 	verified := gatewaySmokeResultMatches(taskResult.Result)
 	checks := map[string]bool{
 		"peer_reachable":          true,
@@ -664,6 +668,7 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 		"prompt_received":         verified,
 		"smoke_response_verified": verified,
 		"result_envelope_parsed":  taskResult.Result.Status == task.StateDone,
+		"audit_event_written":     auditEventWritten,
 	}
 	if !verified {
 		return ToolResponse{OK: false, Result: map[string]any{
@@ -674,7 +679,7 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 			"task_id":      created.TaskID,
 			"result":       taskResult,
 			"expected":     gatewaySmokeExpectedResponse,
-			"failure_hint": "runner did not return the expected smoke response in command_output or summary",
+			"failure_hint": "runner did not return the expected smoke response in command_output",
 		}}, fmt.Errorf("smoke task did not return %q", gatewaySmokeExpectedResponse)
 	}
 	return ToolResponse{OK: true, Result: map[string]any{
@@ -693,15 +698,10 @@ func gatewaySmokeResultMatches(result *task.ResultEnvelope) bool {
 	if result == nil {
 		return false
 	}
-	if result.CommandOutput.Command != "" {
-		if result.CommandOutput.ExitCode != 0 {
-			return false
-		}
-		if strings.Contains(result.CommandOutput.Stdout, gatewaySmokeExpectedResponse) || strings.Contains(result.CommandOutput.Stderr, gatewaySmokeExpectedResponse) {
-			return true
-		}
+	if result.CommandOutput.Command == "" || result.CommandOutput.ExitCode != 0 {
+		return false
 	}
-	return strings.Contains(strings.TrimSpace(result.WorkerSummaryUntrusted), gatewaySmokeExpectedResponse)
+	return strings.Contains(result.CommandOutput.Stdout, gatewaySmokeExpectedResponse) || strings.Contains(result.CommandOutput.Stderr, gatewaySmokeExpectedResponse)
 }
 
 func (g *Gateway) taskStatus(w http.ResponseWriter, r *http.Request) {

@@ -148,9 +148,9 @@ If you install without `--user`, the Windows service runs as LocalSystem and wil
 ./cmesh peers test homelab-vm --cwd ~/code/myapp
 ```
 
-The smoke test checks peer reachability, inbound policy, runner availability, and task completion with a readonly prompt. It verifies the returned `command_output` artifact has exit code 0 and contains the expected smoke string, so a runner that exits successfully after saying it did not receive a task does not count as healthy.
+The smoke test checks peer reachability, policy, task creation, runner invocation, prompt receipt, result envelope parsing, audit-event recording, and task completion with a readonly prompt. It verifies the returned `command_output` artifact has exit code 0 and contains the expected smoke string, so a runner that exits successfully after saying it did not receive a task, or only returns model prose without a raw command artifact, does not count as healthy.
 
-From the local MCP gateway, the `test_peer` tool runs the same kind of semantic smoke task. It does not stop at capability discovery; it creates a real remote task, fetches the result envelope, and verifies the expected smoke response.
+From the local MCP gateway, the `test_peer` tool runs the same kind of semantic smoke task. It does not stop at capability discovery; it creates a real remote task, fetches the result envelope, verifies the expected raw smoke response, and confirms the origin audit event was written.
 
 ## 7. Use it from your agent
 

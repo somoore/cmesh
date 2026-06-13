@@ -1210,6 +1210,12 @@ func cmdTest(args []string) error {
 	client := meshrpc.NewClient("http://" + net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port)))
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+15)*time.Second)
 	defer cancel()
+	st, err := store.OpenContext(ctx, cfg.Store.Path)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	auditWriter := audit.NewWriter(cfg.Audit.Path, cfg.Node.ID)
 	fmt.Println("cmesh test")
 	fmt.Println()
 	hello, err := client.Hello(ctx)
@@ -1218,10 +1224,51 @@ func cmdTest(args []string) error {
 		return err
 	}
 	printCheck("peer reachable", true, firstNonEmpty(hello.NodeName, hello.NodeID))
+	chain := []string{cfg.Node.ID}
+	decision := policy.New(cfg).CheckOutbound(policy.TaskIntent{
+		PeerName:     firstNonEmpty(peer.Name, peerName),
+		PeerNodeID:   peer.NodeID,
+		CWD:          *cwd,
+		Profile:      *profile,
+		Chain:        chain,
+		OriginNodeID: cfg.Node.ID,
+	})
+	if !decision.Allowed {
+		printCheck("policy allowed", false, decision.Detail)
+		return fmt.Errorf("%s: %s", decision.Code, decision.Detail)
+	}
+	printCheck("policy allowed", true, decision.EffectiveProfile)
 	resp, err := client.CreateTask(ctx, schemaSmokeRequest(cfg, peerName, *cwd, *profile, *wait, *timeoutSeconds))
 	if err != nil {
 		printCheck("inbound policy / runner", false, err.Error())
 		return err
+	}
+	event, err := auditWriter.Append(audit.Event{
+		Type:           "task.dispatch.requested",
+		TaskID:         resp.TaskID,
+		PeerIdentity:   firstNonEmpty(peer.NodeID, peer.Name, peerName),
+		OriginSession:  "cmesh-cli-smoke",
+		Chain:          chain,
+		Profile:        decision.EffectiveProfile,
+		PolicyDecision: "allowed",
+		Source:         "cmesh_cli",
+	})
+	if err != nil {
+		printCheck("audit event written", false, err.Error())
+		return err
+	}
+	if err := st.RecordAuditEvent(ctx, event); err != nil {
+		printCheck("audit event written", false, err.Error())
+		return err
+	}
+	auditEventWritten, err := st.HasAuditEvent(ctx, resp.TaskID, "task.dispatch.requested")
+	if err != nil {
+		printCheck("audit event written", false, err.Error())
+		return err
+	}
+	printCheck("audit event written", auditEventWritten, "task.dispatch.requested")
+	if !auditEventWritten {
+		return fmt.Errorf("audit event was not recorded for %s", resp.TaskID)
 	}
 	printCheck("inbound policy allowed", true, string(resp.State))
 	printCheck("task id", resp.TaskID != "", resp.TaskID)
@@ -1237,14 +1284,26 @@ func cmdTest(args []string) error {
 				printCheck("smoke response verified", false, err.Error())
 				return err
 			}
-			if !smokeResultMatches(result.Result) {
+			resultEnvelopeParsed := result.Result != nil && task.State(result.Result.Status) == task.StateDone
+			printCheck("result envelope parsed", resultEnvelopeParsed, string(task.StateDone))
+			if !resultEnvelopeParsed {
+				return fmt.Errorf("smoke task result envelope is not done")
+			}
+			runnerInvoked := result.Result.CommandOutput.Command != ""
+			printCheck("runner invoked", runnerInvoked, result.Result.CommandOutput.Command)
+			if !runnerInvoked {
+				return fmt.Errorf("smoke task did not return a command_output command")
+			}
+			promptReceived := smokeResultMatches(result.Result)
+			if !promptReceived {
 				detail := "missing expected smoke response"
 				if result.Result != nil && strings.TrimSpace(result.Result.WorkerSummaryUntrusted) != "" {
 					detail = oneLine(result.Result.WorkerSummaryUntrusted)
 				}
-				printCheck("smoke response verified", false, detail)
+				printCheck("prompt received", false, detail)
 				return fmt.Errorf("smoke task did not return %q", smokeExpectedResponse)
 			}
+			printCheck("prompt received", true, smokeExpectedResponse)
 			printCheck("smoke response verified", true, smokeExpectedResponse)
 		} else {
 			printCheck("task queued", true, resp.TaskID)
@@ -1261,10 +1320,10 @@ func smokeResultMatches(result *task.ResultEnvelope) bool {
 	if result == nil {
 		return false
 	}
-	if result.CommandOutput.Command != "" {
-		return result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	if result.CommandOutput.Command == "" {
+		return false
 	}
-	return strings.Contains(strings.TrimSpace(result.WorkerSummaryUntrusted), smokeExpectedResponse)
+	return result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
 }
 
 func rawOutputContainsSmoke(stdout, stderr string) bool {
