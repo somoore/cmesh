@@ -522,6 +522,7 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
 	if !runSmoke {
 		checks = append(checks,
+			doctor.Check{Name: "runner auth works", OK: true, Detail: "skipped"},
 			doctor.Check{Name: "prompt via stdin works", OK: true, Detail: "skipped"},
 			doctor.Check{Name: "smoke response verified", OK: true, Detail: "skipped"},
 		)
@@ -529,6 +530,7 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	}
 	smoke := runnerSmokeCheck(ctx, reg, runnerName, timeout)
 	checks = append(checks,
+		doctor.Check{Name: "runner auth works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 		doctor.Check{Name: "prompt via stdin works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 		doctor.Check{Name: "smoke response verified", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 	)
@@ -586,6 +588,9 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 	output := commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
 	detail := oneLine(firstNonEmpty(output, result.WorkerSummaryUntrusted))
 	okSmoke := result.CommandOutput.Command != "" && result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	if okSmoke {
+		detail = smokeExpectedResponse
+	}
 	check := doctor.Check{Name: "runner." + runnerName + ".smoke", OK: okSmoke, Detail: detail}
 	if !okSmoke {
 		check.Detail = ""
