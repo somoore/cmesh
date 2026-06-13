@@ -80,6 +80,83 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 	}
 }
 
+func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
+	root := t.TempDir()
+	run := &gateRunner{started: make(chan string, 2)}
+	server := newTestServer(t, root, run)
+	server.Config.Profiles["dev"] = config.ProfileConfig{Runner: "fake", Claims: []string{"read_files", "edit_repo"}, MaxRuntime: config.Duration{Duration: time.Minute}}
+	server.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 1}
+
+	for _, id := range []string{"task-1", "task-2"} {
+		createBody := `{
+			"task_id":` + strconv.Quote(id) + `,
+			"origin_node_id":"mac-studio",
+			"origin_session_id":"session-1",
+			"prompt":"wait",
+			"cwd":` + strconv.Quote(root) + `,
+			"runner":"fake",
+			"profile":"dev",
+			"timeout_s":60,
+			"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+		}`
+		createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+		createReq.RemoteAddr = "100.64.0.1:12345"
+		createRes := httptest.NewRecorder()
+		server.Handler().ServeHTTP(createRes, createReq)
+		if createRes.Code != http.StatusAccepted {
+			t.Fatalf("create %s status = %d, body = %s", id, createRes.Code, createRes.Body.String())
+		}
+	}
+
+	select {
+	case got := <-run.started:
+		if got != "task-1" {
+			t.Fatalf("first started task = %q, want task-1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first task did not start")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	rec, err := server.Store.GetTask(context.Background(), "task-2")
+	if err != nil {
+		t.Fatalf("GetTask task-2: %v", err)
+	}
+	if rec.State != task.StateQueued {
+		t.Fatalf("task-2 state = %q, want queued while runner concurrency is full", rec.State)
+	}
+	select {
+	case got := <-run.started:
+		t.Fatalf("task %s started before runner slot was available", got)
+	default:
+	}
+
+	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/cancel", nil)
+	cancelReq.RemoteAddr = "100.64.0.1:12345"
+	cancelRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(cancelRes, cancelReq)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, body = %s", cancelRes.Code, cancelRes.Body.String())
+	}
+
+	select {
+	case got := <-run.started:
+		if got != "task-2" {
+			t.Fatalf("second started task = %q, want task-2", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second task did not start after slot was released")
+	}
+
+	cancelReq = httptest.NewRequest(http.MethodPost, "/v1/tasks/task-2/cancel", nil)
+	cancelReq.RemoteAddr = "100.64.0.1:12345"
+	cancelRes = httptest.NewRecorder()
+	server.Handler().ServeHTTP(cancelRes, cancelReq)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel task-2 status = %d, body = %s", cancelRes.Code, cancelRes.Body.String())
+	}
+}
+
 func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t, root, immediateRunner{})
@@ -440,16 +517,7 @@ func TestCreateTaskRecordsAuditEvents(t *testing.T) {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
 	waitForTerminalTask(t, server, "task-audit")
-	body, err := os.ReadFile(auditPath)
-	if err != nil {
-		t.Fatalf("ReadFile audit: %v", err)
-	}
-	text := string(body)
-	for _, want := range []string{`"type":"task.dispatch.accepted"`, `"type":"task.completed"`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("audit log missing %s:\n%s", want, text)
-		}
-	}
+	assertAuditContains(t, auditPath, `"type":"task.dispatch.accepted"`, `"type":"task.completed"`)
 }
 
 func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
@@ -669,6 +737,34 @@ func (r *blockingRunner) Run(req runner.RunRequest) (runner.Result, error) {
 	r.started <- req.Timeout
 	<-req.Context.Done()
 	close(r.cancelled)
+	return runner.Result{WorkerSummaryUntrusted: "cancelled"}, runner.E(runner.ErrCancelled, "fake runner", req.Context.Err())
+}
+
+type gateRunner struct {
+	started chan string
+}
+
+func (r *gateRunner) Name() string {
+	return "fake"
+}
+
+func (r *gateRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{
+		SchemaVersion: "runner_manifest.v1",
+		Runner:        "fake",
+		Profiles: map[string]runner.ProfileManifest{
+			"dev": {Claims: []string{"read_files", "edit_repo"}, EnforcementConfidence: "high"},
+		},
+	}
+}
+
+func (r *gateRunner) Check(profile string) error {
+	return nil
+}
+
+func (r *gateRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	r.started <- req.TaskID
+	<-req.Context.Done()
 	return runner.Result{WorkerSummaryUntrusted: "cancelled"}, runner.E(runner.ErrCancelled, "fake runner", req.Context.Err())
 }
 

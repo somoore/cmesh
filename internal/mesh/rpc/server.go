@@ -262,14 +262,9 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.CreateTaskRequest) {
-	updated, err := s.Store.UpdateTaskState(ctx, rec.ID, store.StateUpdate{State: task.StateRunning})
-	if err != nil {
-		return
-	}
-	rec = updated
-	s.record(ctx, audit.Event{Type: "task.started", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
-	if ctx.Err() != nil {
-		s.cancelTaskFromWorker(ctx, rec, runner.Result{}, ctx.Err().Error())
+	timeout := s.effectiveRuntimeLimit(rec.ProfileEffective, req.TimeoutSeconds)
+	if err := ctx.Err(); err != nil {
+		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
 		return
 	}
 	run, ok := s.Runners.Get(rec.Runner)
@@ -281,8 +276,8 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		s.failTask(ctx, rec, task.ErrorCode(runner.CodeOf(err)), err.Error())
 		return
 	}
-	if ctx.Err() != nil {
-		s.cancelTaskFromWorker(ctx, rec, runner.Result{}, ctx.Err().Error())
+	if err := ctx.Err(); err != nil {
+		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
 		return
 	}
 	workDirOverride, err := s.followupWorkDir(ctx, req.FollowupTaskID)
@@ -302,7 +297,6 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		s.failTask(ctx, rec, gitErrorCode(err), err.Error())
 		return
 	}
-	timeout := s.effectiveRuntimeLimit(rec.ProfileEffective, req.TimeoutSeconds)
 	logDir := filepath.Join(s.Config.Node.DataDir, "logs", rec.ID)
 	metadata := runner.TaskMetadata{
 		TaskID:          rec.ID,
@@ -333,9 +327,30 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		return
 	}
 	metadata.MCPConfigFile = mcpConfigPath
-	release, err := s.acquireRunner(ctx, rec.Runner)
+	acquireCtx := ctx
+	cancelAcquire := func() {}
+	if req.TimeoutSeconds > 0 {
+		acquireCtx, cancelAcquire = context.WithTimeout(ctx, time.Duration(req.TimeoutSeconds)*time.Second)
+	}
+	defer cancelAcquire()
+	release, err := s.acquireRunner(acquireCtx, rec.Runner)
 	if err != nil {
-		s.cancelTaskFromWorker(ctx, rec, runner.Result{}, err.Error())
+		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
+		return
+	}
+	defer release()
+	if err := ctx.Err(); err != nil {
+		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
+		return
+	}
+	updated, err := s.Store.UpdateTaskState(context.Background(), rec.ID, store.StateUpdate{State: task.StateRunning})
+	if err != nil {
+		return
+	}
+	rec = updated
+	s.record(context.Background(), audit.Event{Type: "task.started", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
+	if err := ctx.Err(); err != nil {
+		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
 		return
 	}
 	result, err := run.Run(runner.RunRequest{
@@ -350,7 +365,6 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		Metadata:    metadata,
 		OutputLimit: runner.DefaultOutputLimit,
 	})
-	release()
 	if ctx.Err() != nil && err == nil {
 		err = runner.E(runner.ErrCancelled, "run command", ctx.Err())
 	}
