@@ -52,6 +52,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "init":
 		return cmdInit(args[1:])
+	case "_service":
+		return cmdServiceRun(args[1:])
 	case "up":
 		return cmdUp(args[1:])
 	case "doctor":
@@ -243,12 +245,16 @@ func cmdUp(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := config.Load(*configPath)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runDaemon(ctx, *configPath)
+}
+
+func runDaemon(ctx context.Context, configPath string) error {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	st, err := store.OpenContext(ctx, cfg.Store.Path)
 	if err != nil {
 		return err
@@ -282,6 +288,15 @@ func cmdUp(args []string) error {
 		}
 		return nil
 	}
+}
+
+func cmdServiceRun(args []string) error {
+	fs := flag.NewFlagSet("_service", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runServiceDaemon(*configPath)
 }
 
 func cmdDoctor(args []string) error {
@@ -421,7 +436,7 @@ func serviceInstall(configPath string) error {
 		}
 		fmt.Printf("Installed launchd agent: %s\n", plistPath)
 	case "windows":
-		cmdLine := fmt.Sprintf(`"%s" up --config "%s"`, exe, configPath)
+		cmdLine := serviceCommandLine(exe, configPath)
 		if err := runServiceCommand("sc.exe", "create", "cmesh", "binPath=", cmdLine, "start=", "auto"); err != nil {
 			return err
 		}
@@ -430,6 +445,10 @@ func serviceInstall(configPath string) error {
 		return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
 	}
 	return nil
+}
+
+func serviceCommandLine(exe, configPath string) string {
+	return fmt.Sprintf(`"%s" _service --config "%s"`, exe, configPath)
 }
 
 func serviceStart() error {

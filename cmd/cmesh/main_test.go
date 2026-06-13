@@ -74,6 +74,16 @@ func TestParseInterspersedFlagsAllowsQuickstartOrder(t *testing.T) {
 	}
 }
 
+func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
+	got := serviceCommandLine(`C:\Tools\cmesh.exe`, `C:\Users\scott\.config\cmesh\config.toml`)
+	if !strings.Contains(got, ` _service --config `) {
+		t.Fatalf("service command line = %q, want _service entrypoint", got)
+	}
+	if strings.Contains(got, ` up --config `) {
+		t.Fatalf("service command line = %q, must not use foreground up command", got)
+	}
+}
+
 func ensureGitOnPath(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err == nil {
