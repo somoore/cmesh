@@ -407,21 +407,21 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 			code = task.ErrorCode(rc)
 		}
 		if code == task.ErrorCancelled {
-			s.cancelTaskFromWorker(ctx, rec, result, err.Error())
+			s.cancelTaskFromWorker(context.Background(), rec, result, err.Error())
 			return
 		}
 		result.Status = string(task.StateFailed)
 		ref := result.TranscriptRef
-		_, _ = s.Store.UpdateTaskState(ctx, rec.ID, store.StateUpdate{State: task.StateFailed, TerminalErrorCode: code, Result: resultAsTask(result), ResultRef: ref})
+		_, _ = s.Store.UpdateTaskState(context.Background(), rec.ID, store.StateUpdate{State: task.StateFailed, TerminalErrorCode: code, Result: resultAsTask(result), ResultRef: ref})
 		_ = removeTaskSecrets(s.Config.Node.DataDir, rec.ID)
-		s.record(ctx, audit.Event{Type: "task.failed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker", ErrorCode: string(code), ErrorDetail: err.Error()})
+		s.record(context.Background(), audit.Event{Type: "task.failed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker", ErrorCode: string(code), ErrorDetail: err.Error()})
 		return
 	}
 	result.Status = string(task.StateDone)
 	ref := result.TranscriptRef
-	_, _ = s.Store.UpdateTaskState(ctx, rec.ID, store.StateUpdate{State: task.StateDone, Result: resultAsTask(result), ResultRef: ref})
+	_, _ = s.Store.UpdateTaskState(context.Background(), rec.ID, store.StateUpdate{State: task.StateDone, Result: resultAsTask(result), ResultRef: ref})
 	_ = removeTaskSecrets(s.Config.Node.DataDir, rec.ID)
-	s.record(ctx, audit.Event{Type: "task.completed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
+	s.record(context.Background(), audit.Event{Type: "task.completed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {

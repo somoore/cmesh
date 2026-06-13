@@ -82,12 +82,14 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 
 func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 	root := t.TempDir()
-	run := &gateRunner{started: make(chan string, 2)}
+	release := make(chan struct{})
+	run := &gateRunner{started: make(chan string, 2), release: release}
 	server := newTestServer(t, root, run)
 	server.Config.Profiles["dev"] = config.ProfileConfig{Runner: "fake", Claims: []string{"read_files", "edit_repo"}, MaxRuntime: config.Duration{Duration: time.Minute}}
 	server.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 1}
 
-	for _, id := range []string{"task-1", "task-2"} {
+	createTask := func(id string) {
+		t.Helper()
 		createBody := `{
 			"task_id":` + strconv.Quote(id) + `,
 			"origin_node_id":"mac-studio",
@@ -108,6 +110,7 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 		}
 	}
 
+	createTask("task-1")
 	select {
 	case got := <-run.started:
 		if got != "task-1" {
@@ -117,6 +120,7 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 		t.Fatal("first task did not start")
 	}
 
+	createTask("task-2")
 	time.Sleep(50 * time.Millisecond)
 	rec, err := server.Store.GetTask(context.Background(), "task-2")
 	if err != nil {
@@ -131,13 +135,7 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 	default:
 	}
 
-	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/cancel", nil)
-	cancelReq.RemoteAddr = "100.64.0.1:12345"
-	cancelRes := httptest.NewRecorder()
-	server.Handler().ServeHTTP(cancelRes, cancelReq)
-	if cancelRes.Code != http.StatusOK {
-		t.Fatalf("cancel status = %d, body = %s", cancelRes.Code, cancelRes.Body.String())
-	}
+	close(release)
 
 	select {
 	case got := <-run.started:
@@ -147,14 +145,8 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("second task did not start after slot was released")
 	}
-
-	cancelReq = httptest.NewRequest(http.MethodPost, "/v1/tasks/task-2/cancel", nil)
-	cancelReq.RemoteAddr = "100.64.0.1:12345"
-	cancelRes = httptest.NewRecorder()
-	server.Handler().ServeHTTP(cancelRes, cancelReq)
-	if cancelRes.Code != http.StatusOK {
-		t.Fatalf("cancel task-2 status = %d, body = %s", cancelRes.Code, cancelRes.Body.String())
-	}
+	waitForTerminalTask(t, server, "task-1")
+	waitForTerminalTask(t, server, "task-2")
 }
 
 func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
@@ -564,16 +556,7 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 	if resultRes.Code != http.StatusOK {
 		t.Fatalf("result status = %d, body = %s", resultRes.Code, resultRes.Body.String())
 	}
-	body, err := os.ReadFile(auditPath)
-	if err != nil {
-		t.Fatalf("ReadFile audit: %v", err)
-	}
-	text := string(body)
-	for _, want := range []string{`"type":"task.failed"`, `"error_code":"worker_failed"`} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("audit log missing %s:\n%s", want, text)
-		}
-	}
+	assertAuditContains(t, auditPath, `"type":"task.failed"`, `"error_code":"worker_failed"`)
 }
 
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
@@ -742,6 +725,7 @@ func (r *blockingRunner) Run(req runner.RunRequest) (runner.Result, error) {
 
 type gateRunner struct {
 	started chan string
+	release chan struct{}
 }
 
 func (r *gateRunner) Name() string {
@@ -764,8 +748,12 @@ func (r *gateRunner) Check(profile string) error {
 
 func (r *gateRunner) Run(req runner.RunRequest) (runner.Result, error) {
 	r.started <- req.TaskID
-	<-req.Context.Done()
-	return runner.Result{WorkerSummaryUntrusted: "cancelled"}, runner.E(runner.ErrCancelled, "fake runner", req.Context.Err())
+	select {
+	case <-r.release:
+		return runner.Result{WorkerSummaryUntrusted: "done"}, nil
+	case <-req.Context.Done():
+		return runner.Result{WorkerSummaryUntrusted: "cancelled"}, runner.E(runner.ErrCancelled, "fake runner", req.Context.Err())
+	}
 }
 
 type immediateRunner struct{}
