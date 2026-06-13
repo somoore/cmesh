@@ -331,6 +331,62 @@ func TestCreateTaskRecordsAuditEvents(t *testing.T) {
 	}
 }
 
+func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, failingRunner{})
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
+
+	createBody := `{
+		"task_id":"task-runner-fail",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"simulate killed runner",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	waitForTerminalTask(t, server, "task-runner-fail")
+	rec, err := server.Store.GetTask(context.Background(), "task-runner-fail")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.State != task.StateFailed || rec.TerminalErrorCode != task.ErrorWorkerFailed {
+		t.Fatalf("state/code = %s/%s, want failed/%s", rec.State, rec.TerminalErrorCode, task.ErrorWorkerFailed)
+	}
+	if rec.Result == nil || rec.Result.Status != task.StateFailed || rec.Result.CommandOutput.Command != "fake-runner" {
+		t.Fatalf("result envelope = %+v", rec.Result)
+	}
+	if rec.Result.CommandOutput.ExitCode != 137 || rec.Result.CommandOutput.Stderr != "runner killed\n" {
+		t.Fatalf("command output = %+v", rec.Result.CommandOutput)
+	}
+	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-runner-fail/result", nil)
+	resultReq.RemoteAddr = "100.64.0.1:12345"
+	resultRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resultRes, resultReq)
+	if resultRes.Code != http.StatusOK {
+		t.Fatalf("result status = %d, body = %s", resultRes.Code, resultRes.Body.String())
+	}
+	body, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("ReadFile audit: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{`"type":"task.failed"`, `"error_code":"worker_failed"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audit log missing %s:\n%s", want, text)
+		}
+	}
+}
+
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
 	ctx := context.Background()
 	ensureGitOnPath(t)
@@ -517,6 +573,39 @@ func (immediateRunner) Check(profile string) error {
 
 func (immediateRunner) Run(req runner.RunRequest) (runner.Result, error) {
 	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
+}
+
+type failingRunner struct{}
+
+func (failingRunner) Name() string {
+	return "fake"
+}
+
+func (failingRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{
+		SchemaVersion: "runner_manifest.v1",
+		Runner:        "fake",
+		Profiles: map[string]runner.ProfileManifest{
+			"dev": {Claims: []string{"read_files", "edit_repo"}, EnforcementConfidence: "high"},
+		},
+	}
+}
+
+func (failingRunner) Check(profile string) error {
+	return nil
+}
+
+func (failingRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	return runner.Result{
+		WorkerSummaryUntrusted: "runner failed",
+		CommandOutput: runner.CommandOutput{
+			Command:   "fake-runner",
+			ExitCode:  137,
+			Stdout:    "started\n",
+			Stderr:    "runner killed\n",
+			DurationS: 1,
+		},
+	}, runner.E(runner.ErrWorkerFailed, "fake runner", errors.New("runner killed"))
 }
 
 type fakeIdentity struct {
