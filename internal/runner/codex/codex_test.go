@@ -59,7 +59,7 @@ func TestArgvBuildsNonInteractiveExecCommand(t *testing.T) {
 		DefaultProfile: "dev",
 	})
 	got := run.argv(runner.RunRequest{CWD: "/repo", Profile: "dev"}, run.cfg.Profiles["dev"])
-	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write", "--model", "gpt-5.1-codex", "-c", "foo=bar", "-C", "/repo", "--json", "-"}
+	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "--model", "gpt-5.1-codex", "-c", "foo=bar", "-C", "/repo", "--json", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
 	}
@@ -74,7 +74,22 @@ func TestArgvDoesNotDuplicateExecSubcommand(t *testing.T) {
 		DefaultProfile: "readonly",
 	})
 	got := run.argv(runner.RunRequest{Profile: "readonly"}, run.cfg.Profiles["readonly"])
-	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "-"}
+	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvDoesNotDuplicateSkipGitRepoCheck(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex"},
+		Profiles: map[string]ProfileConfig{
+			"readonly": {Sandbox: "read-only", Approval: "never", ExtraArgs: []string{"--skip-git-repo-check"}},
+		},
+		DefaultProfile: "readonly",
+	})
+	got := run.argv(runner.RunRequest{Profile: "readonly"}, run.cfg.Profiles["readonly"])
+	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
 	}

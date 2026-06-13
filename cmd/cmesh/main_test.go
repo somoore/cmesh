@@ -12,12 +12,38 @@ import (
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
+	"cmesh/internal/doctor"
 	"cmesh/internal/gitx"
 	"cmesh/internal/mcp/setupinstall"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/testutil"
 )
+
+func TestActiveRunnerNamesUsesProfileReferencesOnly(t *testing.T) {
+	cfg := &config.Config{Profiles: map[string]config.ProfileConfig{
+		"dev":      {Runner: "codex"},
+		"readonly": {Runner: "codex"},
+		"network":  {Runner: "claude-code"},
+		"empty":    {},
+	}}
+	got := strings.Join(activeRunnerNames(cfg), ",")
+	if got != "claude-code,codex" {
+		t.Fatalf("activeRunnerNames = %q, want claude-code,codex", got)
+	}
+}
+
+func TestFailedCheckSummaryIncludesCheckDetails(t *testing.T) {
+	got := failedCheckSummary([]doctor.Check{
+		{Name: "ok", OK: true, Detail: "fine"},
+		{Name: "runner.codex.smoke", OK: false, Err: "timeout"},
+		{Name: "tailnet_ip", OK: false, Detail: "missing"},
+	})
+	want := "runner.codex.smoke=timeout; tailnet_ip=missing"
+	if got != want {
+		t.Fatalf("failedCheckSummary = %q, want %q", got, want)
+	}
+}
 
 func TestCleanupTaskArtifactsRemovesRegisteredWorktreeBeforeBranch(t *testing.T) {
 	ctx := context.Background()

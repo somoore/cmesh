@@ -155,6 +155,9 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	if profile.Sandbox != "" {
 		argv = append(argv, "--sandbox", profile.Sandbox)
 	}
+	if !hasArg(argv, "--skip-git-repo-check") && !hasArg(profile.ExtraArgs, "--skip-git-repo-check") {
+		argv = append(argv, "--skip-git-repo-check")
+	}
 	if profile.Model != "" {
 		argv = append(argv, "--model", profile.Model)
 	}
@@ -195,6 +198,15 @@ func (r *Runner) commandPrefix() []string {
 
 func commandIncludesExec(argv []string) bool {
 	return execIndex(argv) >= 0
+}
+
+func hasArg(argv []string, needle string) bool {
+	for _, arg := range argv {
+		if arg == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func execIndex(argv []string) int {

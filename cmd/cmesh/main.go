@@ -14,6 +14,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -298,7 +299,7 @@ func runDaemon(ctx context.Context, configPath string, preflight bool) error {
 		}
 		fmt.Println()
 		if !checksOK(checks) {
-			return errors.New("cmesh preflight failed; fix the checks or use --skip-preflight to start anyway")
+			return fmt.Errorf("cmesh preflight failed: %s", failedCheckSummary(checks))
 		}
 	}
 	if err := failClosedRestart(ctx, cfg.Node.DataDir, st, auditWriter); err != nil {
@@ -482,7 +483,7 @@ func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.
 			checks = append(checks, check)
 		}
 	}
-	for _, runnerName := range reg.Names() {
+	for _, runnerName := range activeRunnerNames(cfg) {
 		rcfg := cfg.Runners[runnerName]
 		if len(rcfg.Command) == 0 {
 			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".command", OK: false, Err: "runner command is empty"})
@@ -496,9 +497,43 @@ func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.
 			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".executable", OK: true, Detail: resolved})
 		}
 		checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
-		checks = append(checks, runnerSmokeCheck(ctx, reg, runnerName, 60*time.Second))
+		checks = append(checks, runnerSmokeCheck(ctx, reg, runnerName, 60*time.Second, filepath.Join(cfg.Node.DataDir, "preflight")))
 	}
 	return checks
+}
+
+func activeRunnerNames(cfg *config.Config) []string {
+	active := map[string]struct{}{}
+	for _, profile := range cfg.Profiles {
+		if strings.TrimSpace(profile.Runner) != "" {
+			active[profile.Runner] = struct{}{}
+		}
+	}
+	names := make([]string, 0, len(active))
+	for name := range active {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func failedCheckSummary(checks []doctor.Check) string {
+	var failed []string
+	for _, check := range checks {
+		if check.OK {
+			continue
+		}
+		detail := firstNonEmpty(check.Err, check.Detail)
+		if detail == "" {
+			failed = append(failed, check.Name)
+		} else {
+			failed = append(failed, check.Name+"="+detail)
+		}
+	}
+	if len(failed) == 0 {
+		return "unknown failed check"
+	}
+	return strings.Join(failed, "; ")
 }
 
 func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration) []doctor.Check {
@@ -547,7 +582,7 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 		)
 		return checks
 	}
-	smoke := runnerSmokeCheck(ctx, reg, runnerName, timeout)
+	smoke := runnerSmokeCheck(ctx, reg, runnerName, timeout, "")
 	checks = append(checks,
 		doctor.Check{Name: "runner auth works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 		doctor.Check{Name: "prompt via stdin works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
@@ -588,7 +623,7 @@ func runnerProfileChecks(cfg *config.Config, reg *runner.Registry, runnerName st
 	return checks
 }
 
-func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration) doctor.Check {
+func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration, logDir string) doctor.Check {
 	run, ok := reg.Get(runnerName)
 	if !ok {
 		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: "runner not registered"}
@@ -600,9 +635,18 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 		CWD:         ".",
 		Timeout:     timeout,
 		OutputLimit: runner.DefaultOutputLimit,
+		LogDir:      logDir,
 	})
 	if err != nil {
-		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: err.Error()}
+		output := oneLine(commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr))
+		detail := err.Error()
+		if output != "" {
+			detail += ": " + output
+		}
+		if result.CommandOutput.StdoutRef != "" || result.CommandOutput.StderrRef != "" {
+			detail += " (" + strings.TrimSpace(result.CommandOutput.StdoutRef+" "+result.CommandOutput.StderrRef) + ")"
+		}
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: detail}
 	}
 	output := commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
 	detail := oneLine(firstNonEmpty(output, result.WorkerSummaryUntrusted))
