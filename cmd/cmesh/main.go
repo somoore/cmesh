@@ -576,7 +576,7 @@ func cmdConnect(args []string) error {
 	fmt.Printf("Local cmesh gateway: http://127.0.0.1:%d\n", cfg.Node.MCPPort)
 	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Node.MCPPort)
 	if claude, err := exec.LookPath("claude"); err == nil {
-		cmd := exec.Command(claude, "mcp", "add", "cmesh", gatewayURL)
+		cmd := exec.Command(claude, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -585,7 +585,7 @@ func cmdConnect(args []string) error {
 		fmt.Println("Claude Code MCP registration updated.")
 	} else {
 		fmt.Println("Claude Code not found on PATH; register manually with:")
-		fmt.Printf("  claude mcp add cmesh %s\n", gatewayURL)
+		fmt.Printf("  claude %s\n", strings.Join(setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL), " "))
 	}
 	fmt.Println("Codex MCP registration varies by installed CLI version; add a local HTTP MCP server named cmesh at:")
 	fmt.Printf("  %s\n", gatewayURL)
@@ -679,7 +679,7 @@ func cmdTest(args []string) error {
 	profile := fs.String("profile", "readonly", "profile to request")
 	wait := fs.Bool("wait", true, "wait for the smoke task to finish")
 	timeoutSeconds := fs.Int("timeout", 60, "smoke task timeout in seconds")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
@@ -738,6 +738,49 @@ func (m *multiFlag) Set(value string) error {
 		}
 	}
 	return nil
+}
+
+func parseInterspersedFlags(fs *flag.FlagSet, args []string) error {
+	var flags []string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		if flagTakesValue(fs, arg) && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return fs.Parse(append(flags, positional...))
+}
+
+func flagTakesValue(fs *flag.FlagSet, arg string) bool {
+	name := strings.TrimLeft(arg, "-")
+	if name == "" {
+		return false
+	}
+	if before, _, ok := strings.Cut(name, "="); ok {
+		name = before
+	}
+	f := fs.Lookup(name)
+	if f == nil || strings.Contains(arg, "=") {
+		return false
+	}
+	type boolFlag interface {
+		IsBoolFlag() bool
+	}
+	if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+		return false
+	}
+	return true
 }
 
 func printWelcome(machine onboard.Machine, runners []onboard.RunnerStatus, peers []onboard.PeerCandidate) {

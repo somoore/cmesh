@@ -177,6 +177,27 @@ func TestReadOnlyFollowupDoesNotRequireHeadCommit(t *testing.T) {
 	}
 }
 
+func TestRegisterHarnessAdviceUsesHTTPTransport(t *testing.T) {
+	g := newTestGateway(t)
+	g.Config.Node.MCPPort = 7777
+	resp, err := g.callTool(context.Background(), "register_harness", []byte(`{}`))
+	if err != nil || !resp.OK {
+		t.Fatalf("register_harness returned resp=%+v err=%v", resp, err)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v", resp.Result)
+	}
+	got, ok := result["claude_code_command"].(string)
+	if !ok {
+		t.Fatalf("claude_code_command missing from %#v", result)
+	}
+	want := "claude mcp add --transport http cmesh http://127.0.0.1:7777/mcp"
+	if got != want {
+		t.Fatalf("claude_code_command = %q, want %q", got, want)
+	}
+}
+
 func TestCurrentProvenanceIgnoresDelegateRequestWithoutTaskToken(t *testing.T) {
 	t.Setenv("CMESH_ORIGIN_NODE_ID", "ambient-origin")
 	t.Setenv("CMESH_ORIGIN_SESSION_ID", "ambient-session")

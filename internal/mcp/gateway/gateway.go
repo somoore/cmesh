@@ -18,6 +18,7 @@ import (
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
+	"cmesh/internal/mcp/setupinstall"
 	"cmesh/internal/mesh/rpc"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/onboard"
@@ -259,9 +260,10 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		}
 		gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", g.Config.Node.MCPPort)
 		if !req.Confirmed {
+			claudeCommand := append([]string{"claude"}, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...)
 			return ToolResponse{OK: true, Result: map[string]any{
 				"requires_confirmation": true,
-				"claude_code_command":   "claude mcp add cmesh " + gatewayURL,
+				"claude_code_command":   strings.Join(claudeCommand, " "),
 				"codex_instruction":     "add a local HTTP MCP server named cmesh at " + gatewayURL,
 			}}, nil
 		}
@@ -270,7 +272,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			if err != nil {
 				return toolFailure(task.ErrorRunnerUnavailable, "Claude Code not found on PATH")
 			}
-			if err := exec.Command(claude, "mcp", "add", "cmesh", gatewayURL).Run(); err != nil {
+			if err := exec.Command(claude, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...).Run(); err != nil {
 				return toolFailure(task.ErrorWorkerFailed, err.Error())
 			}
 			return ToolResponse{OK: true, Result: map[string]string{"harness": "claude-code", "url": gatewayURL}}, nil

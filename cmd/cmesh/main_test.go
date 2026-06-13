@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,6 +54,23 @@ func TestCleanupTaskArtifactsRemovesRegisteredWorktreeBeforeBranch(t *testing.T)
 	}
 	if out := runGitOutput(t, root, "worktree", "list", "--porcelain"); strings.Contains(filepath.ToSlash(out), filepath.ToSlash(worktreePath)) {
 		t.Fatalf("worktree registration still exists: %s", out)
+	}
+}
+
+func TestParseInterspersedFlagsAllowsQuickstartOrder(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	cwd := fs.String("cwd", "~", "")
+	timeoutSeconds := fs.Int("timeout", 60, "")
+	wait := fs.Bool("wait", true, "")
+
+	if err := parseInterspersedFlags(fs, []string{"homelab-vm", "--cwd", "/tmp/myapp", "--timeout=20", "--wait=false"}); err != nil {
+		t.Fatalf("parseInterspersedFlags: %v", err)
+	}
+	if fs.NArg() != 1 || fs.Arg(0) != "homelab-vm" {
+		t.Fatalf("args = %q, want homelab-vm", fs.Args())
+	}
+	if *cwd != "/tmp/myapp" || *timeoutSeconds != 20 || *wait {
+		t.Fatalf("parsed cwd=%q timeout=%d wait=%v", *cwd, *timeoutSeconds, *wait)
 	}
 }
 

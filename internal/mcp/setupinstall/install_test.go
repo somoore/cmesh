@@ -3,9 +3,18 @@ package setupinstall
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestClaudeHTTPAddArgsUsesHTTPTransport(t *testing.T) {
+	got := ClaudeHTTPAddArgs(ServerName, "http://127.0.0.1:7777/mcp")
+	want := []string{"mcp", "add", "--transport", "http", "cmesh", "http://127.0.0.1:7777/mcp"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClaudeHTTPAddArgs = %#v, want %#v", got, want)
+	}
+}
 
 func TestUpsertCodexConfigReplacesExistingCmeshOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
