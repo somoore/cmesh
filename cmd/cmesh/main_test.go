@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"cmesh/internal/config"
 	"cmesh/internal/gitx"
 	"cmesh/internal/task"
 )
@@ -81,6 +82,16 @@ func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
 	}
 	if strings.Contains(got, ` up --config `) {
 		t.Fatalf("service command line = %q, must not use foreground up command", got)
+	}
+}
+
+func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
+	req := schemaSmokeRequest(&config.Config{Node: config.NodeConfig{ID: "origin"}}, "peer", "/tmp/repo", "readonly", true, 30)
+	if req.Prompt != "Reply with exactly: cmesh smoke ok" {
+		t.Fatalf("prompt = %q", req.Prompt)
+	}
+	if req.CWD != "/tmp/repo" || req.Profile != "readonly" || req.TimeoutSeconds != 30 || !req.Wait {
+		t.Fatalf("request = %+v", req)
 	}
 }
 

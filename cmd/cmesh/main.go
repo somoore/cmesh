@@ -1041,7 +1041,7 @@ func schemaSmokeRequest(cfg *config.Config, peerName, cwd, profile string, wait 
 	return schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-cli-smoke",
-		Prompt:          "Summarize hostname, OS, cmesh version, runner version, and the current cwd permissions. Do not edit files.",
+		Prompt:          "Reply with exactly: cmesh smoke ok",
 		CWD:             cwd,
 		Profile:         profile,
 		TimeoutSeconds:  timeoutSeconds,
