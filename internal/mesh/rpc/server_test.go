@@ -82,6 +82,8 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t, root, immediateRunner{})
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
 
 	createBody := `{
 		"task_id":"task-1",
@@ -102,6 +104,16 @@ func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	}
 	if _, err := server.Store.GetTask(context.Background(), "task-1"); err == nil {
 		t.Fatal("forged task should not be stored")
+	}
+	body, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("ReadFile audit: %v", err)
+	}
+	text := string(body)
+	for _, want := range []string{`"type":"task.dispatch.denied"`, `"policy_decision":"provenance_mismatch"`, `"error_code":"peer_unauthorized"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("audit log missing %s:\n%s", want, text)
+		}
 	}
 }
 
@@ -200,6 +212,30 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 	server.Handler().ServeHTTP(statusRes, statusReq)
 	if statusRes.Code != http.StatusForbidden {
 		t.Fatalf("status code = %d, body = %s", statusRes.Code, statusRes.Body.String())
+	}
+
+	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/result", nil)
+	resultReq.RemoteAddr = "100.64.0.3:12345"
+	resultRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(resultRes, resultReq)
+	if resultRes.Code != http.StatusForbidden {
+		t.Fatalf("result code = %d, body = %s", resultRes.Code, resultRes.Body.String())
+	}
+
+	transcriptReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/transcript", nil)
+	transcriptReq.RemoteAddr = "100.64.0.3:12345"
+	transcriptRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(transcriptRes, transcriptReq)
+	if transcriptRes.Code != http.StatusForbidden {
+		t.Fatalf("transcript code = %d, body = %s", transcriptRes.Code, transcriptRes.Body.String())
+	}
+
+	artifactReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/artifacts/git-bundle", nil)
+	artifactReq.RemoteAddr = "100.64.0.3:12345"
+	artifactRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(artifactRes, artifactReq)
+	if artifactRes.Code != http.StatusForbidden {
+		t.Fatalf("artifact code = %d, body = %s", artifactRes.Code, artifactRes.Body.String())
 	}
 
 	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/cancel", nil)
