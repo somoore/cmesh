@@ -30,7 +30,8 @@ cmesh successfully handled two-way delegation:
 
 - Windows to Mac: Windows service delegated a smoke task to the Mac endpoint and verified the Mac runner received the prompt.
 - Mac to Windows: Mac delegated a smoke task to the Windows service and verified the Windows runner received the prompt.
-- Mac to Windows real task: Mac asked Windows for C: drive disk space and received a structured result.
+- Mac to Windows real task: Mac asked Windows for C: drive disk space and received a structured result with a raw `command_output` artifact.
+- Mac to Windows restart task: Mac delegated a long-running Windows task, the Windows service restarted mid-task, and cmesh marked the task failed with `worker_daemon_restarted` instead of silently losing it.
 
 The important part is not just that the task returned `done`. We fixed the smoke test so it verifies that the remote runner actually received and answered the prompt. A remote task is only considered healthy when the worker response contains the expected smoke value:
 
@@ -74,7 +75,7 @@ flowchart LR
   Whois --> WinPolicy
   WinPolicy --> WinRunner
   WinRunner -->|"local command reads disk info"| WinDisk
-  WinRunner -->|"worker_summary_untrusted"| WinDaemon
+  WinRunner -->|"command_output + summary"| WinDaemon
   WinDaemon -->|"task result"| MeshRPC
   MeshRPC --> MacGateway
   MacGateway --> MacAgent
@@ -352,15 +353,38 @@ The important product boundary is still clear:
 
 That makes the primitive feel larger than "agent-to-agent coding handoff." It is remote machine collaboration with agent-native ergonomics.
 
+## Restart semantics evidence
+
+The real Mac-to-Windows topology also exercised worker daemon restart behavior. A deterministic long-running Windows task was started from the Mac and the Windows service was restarted while the task was running.
+
+Observed task:
+
+```text
+task_id: tsk_rjmfzb7rgg7jok6pxpk2e2omk3dzswe7
+state: failed
+terminal_error_code: worker_daemon_restarted
+```
+
+The Windows audit log recorded:
+
+```text
+type: task.failed
+policy_decision: fail_closed_restart
+error_code: worker_daemon_restarted
+```
+
+No result envelope was available afterward, which is expected for a worker process interrupted before result production. The important guarantee was preserved: the task became terminal and auditable rather than disappearing or being reported as successful.
+
 ## Final state
 
 At the end of this test:
 
-- Mac-to-Windows smoke test passed with prompt verification.
-- Windows-to-Mac smoke test passed with prompt verification.
+- Mac-to-Windows smoke test passed with prompt verification from raw `command_output`.
+- Windows-to-Mac smoke test passed with prompt verification from raw `command_output`.
 - Windows service ran as `.\scott`.
 - Windows service used the absolute `claude.cmd` runner path.
 - Windows service was reachable on `100.107.159.54:7778`.
 - Mac service was reachable on `100.120.229.49:7778`.
 - The Windows C: drive disk-space task completed through cmesh only.
-- The repo branch was clean on `mcp-registration-peering` at `5d0c212`.
+- Worker daemon restart marked the interrupted Windows task `failed` with `worker_daemon_restarted`.
+- The repo branch was clean on `mcp-registration-peering` after the strict-smoke verification.

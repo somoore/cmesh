@@ -763,7 +763,7 @@ func checksOK(checks []doctor.Check) bool {
 
 func cmdService(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cmesh up service <install|start|status|logs>")
+		return fmt.Errorf("usage: cmesh up service <install|start|stop|restart|status|logs>")
 	}
 	switch args[0] {
 	case "install":
@@ -785,12 +785,16 @@ func cmdService(args []string) error {
 		})
 	case "start":
 		return serviceStart()
+	case "stop":
+		return serviceStop()
+	case "restart":
+		return serviceRestart()
 	case "status":
 		return serviceStatus()
 	case "logs":
 		return serviceLogs()
 	default:
-		return fmt.Errorf("usage: cmesh up service <install|start|status|logs>")
+		return fmt.Errorf("usage: cmesh up service <install|start|stop|restart|status|logs>")
 	}
 }
 
@@ -946,6 +950,36 @@ func serviceStart() error {
 		return runServiceCommand("sc.exe", "start", "cmesh")
 	default:
 		return fmt.Errorf("service start is not supported on %s", runtime.GOOS)
+	}
+}
+
+func serviceStop() error {
+	switch runtime.GOOS {
+	case "linux":
+		return runServiceCommand("systemctl", "--user", "stop", "cmesh.service")
+	case "darwin":
+		return runServiceCommand("launchctl", "bootout", launchdDomain()+"/dev.cmesh")
+	case "windows":
+		return runServiceCommand("sc.exe", "stop", "cmesh")
+	default:
+		return fmt.Errorf("service stop is not supported on %s", runtime.GOOS)
+	}
+}
+
+func serviceRestart() error {
+	switch runtime.GOOS {
+	case "linux":
+		return runServiceCommand("systemctl", "--user", "restart", "cmesh.service")
+	case "darwin":
+		return serviceStart()
+	case "windows":
+		if err := serviceStop(); err != nil {
+			return err
+		}
+		time.Sleep(5 * time.Second)
+		return serviceStart()
+	default:
+		return fmt.Errorf("service restart is not supported on %s", runtime.GOOS)
 	}
 }
 

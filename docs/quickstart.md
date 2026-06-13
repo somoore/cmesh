@@ -120,6 +120,7 @@ For a service:
 ```bash
 ./cmesh up service install
 ./cmesh up service start
+./cmesh up service restart
 ./cmesh up service status
 ```
 
