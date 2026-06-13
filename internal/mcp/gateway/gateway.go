@@ -561,10 +561,13 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
+	remoteTaskID := resp.TaskID
+	localResp := resp
+	localResp.TaskID = taskID
 	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{
 		TaskID:          taskID,
 		PeerNodeID:      firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
-		RemoteTaskID:    resp.TaskID,
+		RemoteTaskID:    remoteTaskID,
 		OriginSessionID: sessionID,
 		State:           resp.State,
 	})
@@ -579,7 +582,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		PolicyDecision: "allowed",
 		Source:         "local_gateway",
 	})
-	return ToolResponse{OK: true, Result: resp}, nil
+	return ToolResponse{OK: true, Result: localResp}, nil
 }
 
 func (g *Gateway) delegateManyCall(ctx context.Context, req DelegateRequest) (ToolResponse, error) {

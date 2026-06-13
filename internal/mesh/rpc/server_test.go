@@ -131,6 +131,7 @@ func TestCreateTaskDerivesHopCountFromVerifiedChain(t *testing.T) {
 	if createRes.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
+	waitForTerminalTask(t, server, "task-hop")
 	rec, err := server.Store.GetTask(context.Background(), "task-hop")
 	if err != nil {
 		t.Fatalf("stored task: %v", err)

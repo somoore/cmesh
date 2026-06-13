@@ -150,6 +150,8 @@ If you install without `--user`, the Windows service runs as LocalSystem and wil
 
 The smoke test checks peer reachability, inbound policy, runner availability, and task completion with a readonly prompt. It verifies the returned `command_output` artifact has exit code 0 and contains the expected smoke string, so a runner that exits successfully after saying it did not receive a task does not count as healthy.
 
+From the local MCP gateway, the `test_peer` tool runs the same kind of semantic smoke task. It does not stop at capability discovery; it creates a real remote task, fetches the result envelope, and verifies the expected smoke response.
+
 ## 7. Use it from your agent
 
 Try:

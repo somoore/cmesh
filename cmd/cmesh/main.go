@@ -414,7 +414,7 @@ func cmdDoctorRunner(args []string) error {
 	jsonOut := fs.Bool("json", false, "print JSON")
 	skipSmoke := fs.Bool("skip-smoke", false, "skip invoking the runner smoke prompt")
 	timeoutSeconds := fs.Int("timeout", 60, "runner smoke timeout in seconds")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
