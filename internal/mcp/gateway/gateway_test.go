@@ -95,6 +95,59 @@ func TestStatusFallsBackToMirroredPeerTask(t *testing.T) {
 	}
 }
 
+func TestDelegatedTaskLookupSurvivesOriginRestart(t *testing.T) {
+	ctx := context.Background()
+	storePath := filepath.Join(t.TempDir(), "cmesh.db")
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("GET /v1/tasks/remote-1", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"remote-1","state":"done"}`))
+	})
+	workerMux.HandleFunc("GET /v1/tasks/remote-1/result", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"task_id":"remote-1","result":{"status":"done","command_output":{"command":"fake","exit_code":0,"stdout":"ok\n","stderr":"","duration_s":1},"worker_summary_untrusted":"ok","usage":{},"verification_required":true}}`))
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+
+	first := newTestGatewayWithStore(t, storePath)
+	first.Config.Peers = map[string]config.PeerConfig{
+		"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port},
+	}
+	if err := first.Store.UpsertPeerTask(ctx, store.PeerTask{
+		TaskID:          "task-1",
+		PeerNodeID:      "worker-node",
+		RemoteTaskID:    "remote-1",
+		OriginSessionID: "session-1",
+		State:           task.StateRunning,
+	}); err != nil {
+		t.Fatalf("UpsertPeerTask: %v", err)
+	}
+	if err := first.Store.Close(); err != nil {
+		t.Fatalf("Close first store: %v", err)
+	}
+
+	restarted := newTestGatewayWithStore(t, storePath)
+	restarted.Config.Peers = first.Config.Peers
+	statusResp, err := restarted.statusCall(ctx, "task-1", false, 0)
+	if err != nil || !statusResp.OK {
+		t.Fatalf("status after restart resp=%+v err=%v", statusResp, err)
+	}
+	status := statusResp.Result.(schema.TaskStatusResponse)
+	if status.State != task.StateDone {
+		t.Fatalf("status after restart = %s, want done", status.State)
+	}
+	resultResp, err := restarted.resultCall(ctx, "task-1")
+	if err != nil || !resultResp.OK {
+		t.Fatalf("result after restart resp=%+v err=%v", resultResp, err)
+	}
+	result := resultResp.Result.(schema.TaskResultResponse)
+	if result.Result == nil || result.Result.CommandOutput.Command != "fake" {
+		t.Fatalf("result after restart = %+v", result.Result)
+	}
+}
+
 func TestResultTranscriptAndCancelReportUnreachablePeer(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
@@ -439,14 +492,17 @@ func TestCurrentProvenanceUsesTaskTokenContext(t *testing.T) {
 
 func newTestGateway(t *testing.T) *Gateway {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "cmesh.db"))
+	return newTestGatewayWithStore(t, filepath.Join(t.TempDir(), "cmesh.db"))
+}
+
+func newTestGatewayWithStore(t *testing.T, storePath string) *Gateway {
+	t.Helper()
+	st, err := store.Open(storePath)
 	if err != nil {
 		t.Fatalf("Open store: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := st.Close(); err != nil {
-			t.Fatalf("Close store: %v", err)
-		}
+		_ = st.Close()
 	})
 	cfg := &config.Config{
 		Node: config.NodeConfig{ID: "origin", Name: "origin", DataDir: t.TempDir()},
