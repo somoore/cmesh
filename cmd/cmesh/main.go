@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +23,11 @@ import (
 	"cmesh/internal/gitx"
 	tsid "cmesh/internal/identity/tailscale"
 	"cmesh/internal/mcp/gateway"
+	"cmesh/internal/mcp/setupinstall"
+	"cmesh/internal/mcp/setupstdio"
 	meshrpc "cmesh/internal/mesh/rpc"
+	"cmesh/internal/mesh/schema"
+	"cmesh/internal/onboard"
 	"cmesh/internal/policy"
 	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
@@ -42,27 +50,194 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "init":
+		return cmdInit(args[1:])
 	case "up":
 		return cmdUp(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "peers":
+		return cmdPeers(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
+	case "test":
+		return cmdTest(args[1:])
+	case "connect":
+		return cmdConnect(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
 	case "log":
 		return cmdLog(args[1:])
-	case "connect":
-		return cmdConnect(args[1:])
 	case "hello":
 		return cmdHello(args[1:])
 	case "version":
 		return cmdVersion(args[1:])
+	case "help", "-h", "--help":
+		usage()
+		return nil
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
 
+func cmdMCP(args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
+	stdio := fs.Bool("stdio", false, "run the setup MCP server over stdio")
+	install := fs.Bool("install", false, "install the setup MCP server into a detected AI coding agent")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *install || (!*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout)) {
+		return cmdMCPInstall()
+	}
+	return (&setupstdio.Server{}).Serve(context.Background())
+}
+
+func cmdMCPInstall() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	agents := setupinstall.DetectAgents()
+	var found []setupinstall.Agent
+	for _, agent := range agents {
+		if agent.Found {
+			found = append(found, agent)
+		}
+	}
+	fmt.Println("cmesh MCP installer")
+	fmt.Println()
+	fmt.Println("Detected AI coding agents:")
+	if len(found) == 0 {
+		for _, agent := range agents {
+			fmt.Printf("  - %s: %s\n", agent.Name, agent.Detail)
+		}
+		return errors.New("no supported AI coding agents found")
+	}
+	for i, agent := range found {
+		fmt.Printf("[%d] %s  %s\n", i+1, agent.Name, agent.Detail)
+	}
+	allChoice := len(found) + 1
+	if len(found) > 1 {
+		fmt.Printf("[%d] all detected agents\n", allChoice)
+	}
+	reader := bufio.NewReader(os.Stdin)
+	defaultChoice := "1"
+	if len(found) > 1 {
+		defaultChoice = fmt.Sprint(allChoice)
+	}
+	answer, err := prompt(reader, fmt.Sprintf("Install cmesh MCP into which agent? [%s]: ", defaultChoice))
+	if err != nil {
+		return err
+	}
+	if answer == "" {
+		answer = defaultChoice
+	}
+	var selected []setupinstall.Agent
+	var choice int
+	_, _ = fmt.Sscanf(answer, "%d", &choice)
+	if choice == allChoice && len(found) > 1 {
+		selected = found
+	} else if choice >= 1 && choice <= len(found) {
+		selected = []setupinstall.Agent{found[choice-1]}
+	} else {
+		return fmt.Errorf("invalid selection %q", answer)
+	}
+	fmt.Println()
+	for _, agent := range selected {
+		result := setupinstall.Install(agent, exe)
+		printCheck(agent.Name, result.OK, result.Detail)
+		if !result.OK {
+			err = errors.New("one or more MCP installs failed")
+		}
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Println("Done. Restart or reload the selected agent so it discovers cmesh.")
+	return nil
+}
+
+func cmdInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	role := fs.String("role", "", "machine role: origin, worker, or both")
+	origin := fs.Bool("origin", false, "configure as an origin")
+	worker := fs.Bool("worker", false, "configure as a worker")
+	both := fs.Bool("both", false, "configure as both origin and worker")
+	allowPeer := multiFlag{}
+	allowCWD := multiFlag{}
+	peer := multiFlag{}
+	profile := multiFlag{}
+	fs.Var(&allowPeer, "allow-peer", "peer node/name allowed to delegate here; repeatable")
+	fs.Var(&allowCWD, "allow-cwd", "directory glob workers may use here; repeatable")
+	fs.Var(&peer, "peer", "peer to configure for outbound delegation; repeatable")
+	fs.Var(&profile, "profile", "profile to expose: readonly, dev, network, git_push; repeatable")
+	runnerName := fs.String("runner", "auto", "runner to use: auto, claude-code, or codex")
+	yes := fs.Bool("yes", false, "accept safe defaults without prompting")
+	force := fs.Bool("force", false, "overwrite an existing config")
+	connect := fs.Bool("connect", true, "register the local MCP gateway after writing config")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *origin {
+		*role = "origin"
+	}
+	if *worker {
+		*role = "worker"
+	}
+	if *both {
+		*role = "both"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	machine := onboard.DetectMachine(ctx)
+	runners := onboard.DetectRunners(ctx)
+	peers, _ := onboard.TailnetPeers(ctx, config.DefaultMeshPort, true)
+	printWelcome(machine, runners, peers)
+	opts := onboard.InitOptions{
+		Role:         *role,
+		ConfigPath:   *configPath,
+		Yes:          *yes,
+		Connect:      *connect,
+		AllowedPeers: []string(allowPeer),
+		AllowedCWDs:  []string(allowCWD),
+		PeerNames:    []string(peer),
+		Runner:       *runnerName,
+		Profiles:     []string(profile),
+	}
+	if !*yes {
+		if err := promptInit(&opts, peers); err != nil {
+			return err
+		}
+	}
+	body, err := onboard.GenerateConfig(opts, machine, runners, peers)
+	if err != nil {
+		return err
+	}
+	if err := onboard.WriteConfig(*configPath, body, *force); err != nil {
+		return err
+	}
+	if err := onboard.ValidateConfig(*configPath); err != nil {
+		return err
+	}
+	fmt.Printf("\ncmesh is ready.\n\nConfig:\n  %s\n\nLocal MCP gateway:\n  http://127.0.0.1:%d/mcp\n\n", *configPath, config.DefaultMCPPort)
+	if *connect {
+		if err := cmdConnect([]string{"--config", *configPath}); err != nil {
+			fmt.Fprintf(os.Stderr, "connect warning: %v\n", err)
+		}
+	}
+	fmt.Println("Try this in your agent:")
+	fmt.Println(`  "Use cmesh to ask a configured peer to summarize ~/code/myapp."`)
+	return nil
+}
+
 func cmdUp(args []string) error {
+	if len(args) > 0 && args[0] == "service" {
+		return cmdService(args[1:])
+	}
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
 	if err := fs.Parse(args); err != nil {
@@ -110,20 +285,213 @@ func cmdUp(args []string) error {
 }
 
 func cmdDoctor(args []string) error {
-	if len(args) == 0 || args[0] != "tailscale" {
-		return fmt.Errorf("usage: cmesh doctor tailscale [-mesh-port 7778]")
+	if len(args) > 0 && args[0] == "tailscale" {
+		fs := flag.NewFlagSet("doctor tailscale", flag.ExitOnError)
+		port := fs.Int("mesh-port", config.DefaultMeshPort, "mesh RPC port")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		report := doctor.Tailscale(context.Background(), doctor.TailscaleOptions{MeshPort: *port})
+		fmt.Print(report.Text())
+		if !report.OK() {
+			return errors.New("tailscale doctor failed")
+		}
+		return nil
 	}
-	fs := flag.NewFlagSet("doctor tailscale", flag.ExitOnError)
-	port := fs.Int("mesh-port", config.DefaultMeshPort, "mesh RPC port")
-	if err := fs.Parse(args[1:]); err != nil {
+	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	report := doctor.Tailscale(context.Background(), doctor.TailscaleOptions{MeshPort: *port})
-	fmt.Print(report.Text())
-	if !report.OK() {
-		return errors.New("tailscale doctor failed")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	status := onboard.Detect(ctx, *configPath, false)
+	cfg, cfgErr := config.Load(*configPath)
+	var runnerChecks []doctor.Check
+	if cfgErr == nil {
+		reg, err := buildRunners(cfg)
+		if err != nil {
+			runnerChecks = append(runnerChecks, doctor.Check{Name: "runners", OK: false, Err: err.Error()})
+		} else {
+			for _, manifest := range reg.Manifests() {
+				run, _ := reg.Get(manifest.Runner)
+				err := run.Check("")
+				check := doctor.Check{Name: "runner." + manifest.Runner, OK: err == nil}
+				if err != nil {
+					check.Err = err.Error()
+				} else {
+					check.Detail = "available"
+				}
+				runnerChecks = append(runnerChecks, check)
+			}
+		}
+	}
+	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: config.DefaultMeshPort})
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"status":    status,
+			"tailscale": tailscaleReport.Checks,
+			"runners":   runnerChecks,
+		})
+	}
+	ok := true
+	fmt.Println("cmesh doctor")
+	fmt.Println()
+	printCheck("config", cfgErr == nil, firstErrDetail("valid", cfgErr))
+	if cfgErr != nil {
+		ok = false
+	}
+	for _, check := range tailscaleReport.Checks {
+		printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+		if !check.OK {
+			ok = false
+		}
+	}
+	for _, runner := range status.Runners {
+		printCheck("detect."+runner.Name, runner.Found, runner.Detail)
+	}
+	for _, check := range runnerChecks {
+		printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+		if !check.OK {
+			ok = false
+		}
+	}
+	if cfg != nil {
+		printCheck("mcp", cfg.Node.MCPPort > 0, fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Node.MCPPort))
+	}
+	if !ok {
+		return errors.New("doctor found problems")
 	}
 	return nil
+}
+
+func cmdService(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cmesh up service <install|start|status|logs>")
+	}
+	configPath := config.DefaultPath()
+	if len(args) > 2 && args[1] == "--config" {
+		configPath = args[2]
+	}
+	switch args[0] {
+	case "install":
+		return serviceInstall(configPath)
+	case "start":
+		return serviceStart()
+	case "status":
+		return serviceStatus()
+	case "logs":
+		return serviceLogs()
+	default:
+		return fmt.Errorf("usage: cmesh up service <install|start|status|logs>")
+	}
+}
+
+func serviceInstall(configPath string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	switch runtime.GOOS {
+	case "linux":
+		unitDir := filepath.Join(userConfigDir(), "systemd", "user")
+		if err := os.MkdirAll(unitDir, 0o755); err != nil {
+			return err
+		}
+		unitPath := filepath.Join(unitDir, "cmesh.service")
+		body := fmt.Sprintf("[Unit]\nDescription=cmesh agent mesh daemon\nAfter=network-online.target\n\n[Service]\nExecStart=%s up --config %s\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n", exe, configPath)
+		if err := os.WriteFile(unitPath, []byte(body), 0o644); err != nil {
+			return err
+		}
+		_ = runServiceCommand("systemctl", "--user", "daemon-reload")
+		if err := runServiceCommand("systemctl", "--user", "enable", "cmesh.service"); err != nil {
+			return err
+		}
+		fmt.Printf("Installed user systemd service: %s\n", unitPath)
+	case "darwin":
+		launchDir := filepath.Join(homeDir(), "Library", "LaunchAgents")
+		if err := os.MkdirAll(launchDir, 0o755); err != nil {
+			return err
+		}
+		plistPath := filepath.Join(launchDir, "dev.cmesh.plist")
+		body := fmt.Sprintf("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>dev.cmesh</string><key>ProgramArguments</key><array><string>%s</string><string>up</string><string>--config</string><string>%s</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>\n", exe, configPath)
+		if err := os.WriteFile(plistPath, []byte(body), 0o644); err != nil {
+			return err
+		}
+		fmt.Printf("Installed launchd agent: %s\n", plistPath)
+	case "windows":
+		cmdLine := fmt.Sprintf(`"%s" up --config "%s"`, exe, configPath)
+		if err := runServiceCommand("sc.exe", "create", "cmesh", "binPath=", cmdLine, "start=", "auto"); err != nil {
+			return err
+		}
+		fmt.Println("Installed Windows service: cmesh")
+	default:
+		return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
+	}
+	return nil
+}
+
+func serviceStart() error {
+	switch runtime.GOOS {
+	case "linux":
+		return runServiceCommand("systemctl", "--user", "start", "cmesh.service")
+	case "darwin":
+		return runServiceCommand("launchctl", "kickstart", "-k", "gui/"+fmt.Sprint(os.Getuid())+"/dev.cmesh")
+	case "windows":
+		return runServiceCommand("sc.exe", "start", "cmesh")
+	default:
+		return fmt.Errorf("service start is not supported on %s", runtime.GOOS)
+	}
+}
+
+func serviceStatus() error {
+	switch runtime.GOOS {
+	case "linux":
+		return runServiceCommand("systemctl", "--user", "status", "cmesh.service", "--no-pager")
+	case "darwin":
+		return runServiceCommand("launchctl", "print", "gui/"+fmt.Sprint(os.Getuid())+"/dev.cmesh")
+	case "windows":
+		return runServiceCommand("sc.exe", "query", "cmesh")
+	default:
+		return fmt.Errorf("service status is not supported on %s", runtime.GOOS)
+	}
+}
+
+func serviceLogs() error {
+	switch runtime.GOOS {
+	case "linux":
+		return runServiceCommand("journalctl", "--user", "-u", "cmesh.service", "-n", "100", "--no-pager")
+	case "darwin":
+		return runServiceCommand("log", "show", "--predicate", `process == "cmesh"`, "--last", "1h")
+	case "windows":
+		return runServiceCommand("powershell", "-NoProfile", "-Command", `Get-EventLog -LogName Application -Source cmesh -Newest 100`)
+	default:
+		return fmt.Errorf("service logs are not supported on %s", runtime.GOOS)
+	}
+}
+
+func runServiceCommand(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "."
+	}
+	return home
+}
+
+func userConfigDir() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return filepath.Join(homeDir(), ".config")
+	}
+	return dir
 }
 
 func cmdStatus(args []string) error {
@@ -222,6 +590,416 @@ func cmdConnect(args []string) error {
 	fmt.Println("Codex MCP registration varies by installed CLI version; add a local HTTP MCP server named cmesh at:")
 	fmt.Printf("  %s\n", gatewayURL)
 	return nil
+}
+
+func cmdBootstrap(args []string) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: cmesh peers bootstrap <ssh|tailscale> <target>")
+	}
+	mode := args[0]
+	target := args[1]
+	cfg, _ := config.Load(config.DefaultPath())
+	origin := "this-machine"
+	if cfg != nil {
+		origin = firstNonEmpty(cfg.Node.Name, cfg.Node.ID, origin)
+	}
+	remote := fmt.Sprintf("curl -fsSL https://get.cmesh.dev | sh && cmesh init --worker --allow-peer %s --yes && cmesh up service install && cmesh up service start", shellQuote(origin))
+	var cmd *exec.Cmd
+	switch mode {
+	case "ssh":
+		cmd = exec.Command("ssh", target, remote)
+	case "tailscale":
+		cmd = exec.Command("tailscale", "ssh", target, remote)
+	default:
+		return fmt.Errorf("usage: cmesh peers bootstrap <ssh|tailscale> <target>")
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	return cmd.Run()
+}
+
+func cmdPeers(args []string) error {
+	if len(args) > 0 {
+		switch args[0] {
+		case "test":
+			return cmdTest(args[1:])
+		case "bootstrap":
+			return cmdBootstrap(args[1:])
+		}
+	}
+	fs := flag.NewFlagSet("peers", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	discover := fs.Bool("discover", true, "also show tailnet peer candidates")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, cfgErr := config.Load(*configPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	var discovered []onboard.PeerCandidate
+	if *discover {
+		discovered, _ = onboard.TailnetPeers(ctx, config.DefaultMeshPort, true)
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"configured": configuredPeers(cfg), "discovered": discovered})
+	}
+	if cfgErr == nil && len(cfg.Peers) > 0 {
+		fmt.Println("Configured peers:")
+		for name, peer := range cfg.Peers {
+			fmt.Printf("  - %s  %s:%d\n", firstNonEmpty(peer.Name, name), peer.Address, firstNonZero(peer.Port, config.DefaultMeshPort))
+		}
+	} else if cfgErr != nil {
+		fmt.Printf("Configured peers: unavailable (%v)\n", cfgErr)
+	} else {
+		fmt.Println("Configured peers: none")
+	}
+	if *discover {
+		fmt.Println()
+		fmt.Println("Discovered tailnet peers:")
+		if len(discovered) == 0 {
+			fmt.Println("  none found")
+		}
+		for _, peer := range discovered {
+			capable := ""
+			if peer.CmeshCapable {
+				capable = " cmesh"
+			}
+			fmt.Printf("  - %s  %s%s\n", peer.Name, firstNonEmpty(peer.Address, "no tailnet ip"), capable)
+		}
+	}
+	return nil
+}
+
+func cmdTest(args []string) error {
+	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	cwd := fs.String("cwd", "~", "worker cwd for the smoke task")
+	profile := fs.String("profile", "readonly", "profile to request")
+	wait := fs.Bool("wait", true, "wait for the smoke task to finish")
+	timeoutSeconds := fs.Int("timeout", 60, "smoke task timeout in seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: cmesh test <peer> [--cwd ~/code/myapp]")
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	peerName := fs.Arg(0)
+	peer, ok := cfg.Peers[peerName]
+	if !ok {
+		return fmt.Errorf("unknown peer %q", peerName)
+	}
+	port := firstNonZero(peer.Port, config.DefaultMeshPort)
+	client := meshrpc.NewClient("http://" + net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port)))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+15)*time.Second)
+	defer cancel()
+	fmt.Println("cmesh test")
+	fmt.Println()
+	hello, err := client.Hello(ctx)
+	if err != nil {
+		printCheck("peer reachable", false, err.Error())
+		return err
+	}
+	printCheck("peer reachable", true, firstNonEmpty(hello.NodeName, hello.NodeID))
+	resp, err := client.CreateTask(ctx, schemaSmokeRequest(cfg, peerName, *cwd, *profile, *wait, *timeoutSeconds))
+	if err != nil {
+		printCheck("inbound policy / runner", false, err.Error())
+		return err
+	}
+	printCheck("inbound policy allowed", true, string(resp.State))
+	if *wait {
+		if resp.State.Terminal() {
+			printCheck("task completed", resp.State == task.StateDone, string(resp.State))
+		} else {
+			printCheck("task queued", true, resp.TaskID)
+		}
+	} else {
+		printCheck("task queued", true, resp.TaskID)
+	}
+	return nil
+}
+
+type multiFlag []string
+
+func (m *multiFlag) String() string {
+	return strings.Join(*m, ",")
+}
+
+func (m *multiFlag) Set(value string) error {
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			*m = append(*m, part)
+		}
+	}
+	return nil
+}
+
+func printWelcome(machine onboard.Machine, runners []onboard.RunnerStatus, peers []onboard.PeerCandidate) {
+	fmt.Println("Welcome to cmesh.")
+	fmt.Println()
+	fmt.Println("This machine:")
+	fmt.Printf("  Name: %s\n", machine.Name)
+	if machine.TailscaleOK {
+		fmt.Printf("  Tailscale: connected as %s\n", firstNonEmpty(machine.DNSName, machine.NodeID, machine.Name))
+	} else {
+		fmt.Printf("  Tailscale: not ready (%s)\n", firstNonEmpty(machine.Detail, "not connected"))
+	}
+	fmt.Printf("  Tailnet IP: %s\n", firstNonEmpty(strings.Join(machine.TailnetIPs, ", "), "not found"))
+	for _, runner := range runners {
+		state := "not found"
+		if runner.Found {
+			state = "found"
+		}
+		fmt.Printf("  %s: %s\n", displayRunner(runner.Name), state)
+	}
+	if len(peers) > 0 {
+		fmt.Println()
+		fmt.Println("Found cmesh-capable peers:")
+		found := false
+		for _, peer := range peers {
+			if peer.CmeshCapable {
+				fmt.Printf("  - %s\n", peer.Name)
+				found = true
+			}
+		}
+		if !found {
+			fmt.Println("  none yet")
+		}
+	}
+}
+
+func promptInit(opts *onboard.InitOptions, peers []onboard.PeerCandidate) error {
+	reader := bufio.NewReader(os.Stdin)
+	if opts.Role == "" {
+		fmt.Println()
+		fmt.Println("What should this machine do?")
+		fmt.Println("[1] Origin only: my local agents can delegate from here")
+		fmt.Println("[2] Worker only: other machines can delegate work here")
+		fmt.Println("[3] Both: delegate from here and accept work here")
+		answer, err := prompt(reader, "Choose 1-3 [3]: ")
+		if err != nil {
+			return err
+		}
+		switch strings.TrimSpace(answer) {
+		case "1":
+			opts.Role = "origin"
+		case "2":
+			opts.Role = "worker"
+		default:
+			opts.Role = "both"
+		}
+	}
+	if len(opts.AllowedCWDs) == 0 && opts.Role != "origin" {
+		suggested := onboard.SuggestedCWDs()
+		fmt.Println()
+		fmt.Println("Which directories may workers use on this machine?")
+		for i, cwd := range suggested {
+			fmt.Printf("[%d] %s\n", i+1, cwd)
+		}
+		fmt.Printf("[%d] choose directories\n", len(suggested)+1)
+		answer, err := prompt(reader, "Choose [1]: ")
+		if err != nil {
+			return err
+		}
+		choice := strings.TrimSpace(answer)
+		if choice == fmt.Sprintf("%d", len(suggested)+1) {
+			value, err := prompt(reader, "Directory globs, comma-separated: ")
+			if err != nil {
+				return err
+			}
+			opts.AllowedCWDs = splitCSV(value)
+		} else {
+			index := 0
+			if choice != "" {
+				_, _ = fmt.Sscanf(choice, "%d", &index)
+				index--
+			}
+			if index < 0 || index >= len(suggested) {
+				index = 0
+			}
+			opts.AllowedCWDs = []string{suggested[index]}
+		}
+	}
+	if len(opts.PeerNames) == 0 && opts.Role != "worker" {
+		fmt.Println()
+		fmt.Println("Which peers may this machine delegate to?")
+		capable := cmeshCapablePeers(peers)
+		if len(capable) == 0 {
+			value, err := prompt(reader, "Peer names, comma-separated (empty for later): ")
+			if err != nil {
+				return err
+			}
+			opts.PeerNames = splitCSV(value)
+		} else {
+			for i, peer := range capable {
+				fmt.Printf("[%d] %s\n", i+1, peer.Name)
+			}
+			fmt.Printf("[%d] all cmesh-capable peers\n", len(capable)+1)
+			answer, err := prompt(reader, fmt.Sprintf("Choose [%d]: ", len(capable)+1))
+			if err != nil {
+				return err
+			}
+			answer = strings.TrimSpace(answer)
+			if answer == "" || answer == fmt.Sprintf("%d", len(capable)+1) {
+				for _, peer := range capable {
+					opts.PeerNames = append(opts.PeerNames, peer.Name)
+				}
+			} else {
+				var index int
+				_, _ = fmt.Sscanf(answer, "%d", &index)
+				if index >= 1 && index <= len(capable) {
+					opts.PeerNames = []string{capable[index-1].Name}
+				}
+			}
+		}
+	}
+	if len(opts.AllowedPeers) == 0 && opts.Role != "origin" {
+		value, err := prompt(reader, "Which peers may delegate to this machine? [selected peers or this machine]: ")
+		if err != nil {
+			return err
+		}
+		opts.AllowedPeers = splitCSV(value)
+	}
+	if len(opts.Profiles) == 0 {
+		fmt.Println()
+		fmt.Println("Profiles to expose:")
+		fmt.Println("[x] readonly")
+		fmt.Println("[x] dev")
+		fmt.Println("[ ] network")
+		fmt.Println("[ ] git_push")
+		value, err := prompt(reader, "Extra profiles, comma-separated (empty for readonly,dev): ")
+		if err != nil {
+			return err
+		}
+		opts.Profiles = append([]string{"readonly", "dev"}, splitCSV(value)...)
+	}
+	return nil
+}
+
+func prompt(reader *bufio.Reader, label string) (string, error) {
+	fmt.Print(label)
+	text, err := reader.ReadString('\n')
+	if err != nil && len(text) == 0 {
+		return "", err
+	}
+	return strings.TrimSpace(text), nil
+}
+
+func splitCSV(value string) []string {
+	var out []string
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func cmeshCapablePeers(peers []onboard.PeerCandidate) []onboard.PeerCandidate {
+	var out []onboard.PeerCandidate
+	for _, peer := range peers {
+		if peer.CmeshCapable {
+			out = append(out, peer)
+		}
+	}
+	return out
+}
+
+func displayRunner(name string) string {
+	switch name {
+	case claudecode.Name:
+		return "Claude Code"
+	case codex.Name:
+		return "Codex"
+	default:
+		return name
+	}
+}
+
+func printCheck(name string, ok bool, detail string) {
+	mark := "x"
+	if ok {
+		mark = "ok"
+	}
+	if detail == "" {
+		fmt.Printf("%-24s %s\n", name, mark)
+		return
+	}
+	fmt.Printf("%-24s %s  %s\n", name, mark, detail)
+}
+
+func firstErrDetail(ok string, err error) string {
+	if err != nil {
+		return err.Error()
+	}
+	return ok
+}
+
+func configuredPeers(cfg *config.Config) []map[string]any {
+	if cfg == nil {
+		return nil
+	}
+	var out []map[string]any
+	for name, peer := range cfg.Peers {
+		out = append(out, map[string]any{
+			"name":    firstNonEmpty(peer.Name, name),
+			"node_id": peer.NodeID,
+			"address": peer.Address,
+			"port":    firstNonZero(peer.Port, config.DefaultMeshPort),
+		})
+	}
+	return out
+}
+
+func schemaSmokeRequest(cfg *config.Config, peerName, cwd, profile string, wait bool, timeoutSeconds int) schema.CreateTaskRequest {
+	_ = peerName
+	return schema.CreateTaskRequest{
+		OriginNodeID:    cfg.Node.ID,
+		OriginSessionID: "cmesh-cli-smoke",
+		Prompt:          "Summarize hostname, OS, cmesh version, runner version, and the current cwd permissions. Do not edit files.",
+		CWD:             cwd,
+		Profile:         profile,
+		TimeoutSeconds:  timeoutSeconds,
+		Wait:            wait,
+		Provenance: schema.Provenance{
+			OriginNodeID:    cfg.Node.ID,
+			OriginSessionID: "cmesh-cli-smoke",
+			DelegationChain: []string{cfg.Node.ID},
+			HopCount:        0,
+		},
+	}
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func firstNonZero(value, fallback int) int {
+	if value != 0 {
+		return value
+	}
+	return fallback
+}
+
+func isTerminal(file *os.File) bool {
+	if file == nil {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func cmdHello(args []string) error {
@@ -478,6 +1256,22 @@ func stringValue(values map[string]any, key string) string {
 	return ""
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func usage() {
-	fmt.Println("usage: cmesh <up|doctor|status|log|connect|hello|version>")
+	fmt.Println("usage: cmesh <init|doctor|up|peers>")
+	fmt.Println()
+	fmt.Println("common:")
+	fmt.Println("  cmesh init")
+	fmt.Println("  cmesh doctor")
+	fmt.Println("  cmesh up")
+	fmt.Println("  cmesh peers")
 }

@@ -2,12 +2,18 @@
 
 cmesh is a local-first delegation plane for coding agents. It separates the model-facing tool surface from the daemon-to-daemon transport so remote machines can execute work without exposing MCP over the network.
 
+There are two MCP surfaces:
+
+- `cmesh mcp --stdio`: setup MCP launched directly by an AI coding agent before the daemon exists. It discovers Tailscale/runners/peers, suggests config, validates config, and writes config only after explicit confirmation.
+- `http://127.0.0.1:7777/mcp`: local HTTP gateway served by `cmesh up` after setup. This is the delegation surface agents use for tasks.
+
 ## End-to-end diagram
 
 ```mermaid
 flowchart LR
   subgraph Origin["Origin machine: mac-studio"]
     Agent["Agent harness<br/>Claude Code / Codex / other"]
+    SetupMCP["setup MCP<br/>cmesh mcp --stdio<br/>pre-daemon onboarding"]
     MCP["cmesh local MCP gateway<br/>127.0.0.1:7777/mcp"]
     OP["Outbound policy<br/>peer/profile/hop checks"]
     OStore["SQLite task mirror<br/>peer_tasks, events"]
@@ -32,6 +38,8 @@ flowchart LR
     Result["Canonical result envelope<br/>worker_summary_untrusted<br/>diffstat, files, tests,<br/>verification_required"]
   end
 
+  Agent -. "first-run setup" .-> SetupMCP
+  SetupMCP -. "writes config after confirmation" .-> MCP
   Agent -->|"tools/list, tools/call"| MCP
   MCP --> OP
   OP -->|"task.dispatch.requested"| OAudit
@@ -60,6 +68,10 @@ flowchart LR
 ```
 
 ## Request lifecycle
+
+Before the daemon exists, `cmesh mcp` can install a setup MCP entry into Claude Code or Codex. That setup server runs over stdio and can guide onboarding without exposing any network listener.
+
+Once `cmesh up` is running:
 
 1. The agent calls the local MCP tool, usually `delegate`.
 2. The loopback gateway validates local HTTP hardening rules:
@@ -200,4 +212,3 @@ Worker daemon restart is fail-closed in v1:
 - silent task loss is forbidden.
 
 Origin restart reloads mirrored peer tasks from SQLite and continues polling the worker.
-

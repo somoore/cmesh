@@ -1,6 +1,12 @@
 # Configuration
 
-cmesh uses a TOML config file. By default, it reads:
+cmesh uses a TOML config file, but most users should start with:
+
+```bash
+cmesh init
+```
+
+`init` detects Tailscale, local runners, and cmesh-capable peers, then writes the config for you. Edit TOML directly when you need an escape hatch or automation. By default, cmesh reads:
 
 ```text
 ~/.config/cmesh/config.toml
@@ -11,6 +17,14 @@ You can pass a specific file with:
 ```bash
 cmesh up --config /path/to/config.toml
 ```
+
+For agent-assisted setup before the daemon exists, run:
+
+```bash
+cmesh mcp
+```
+
+It detects supported AI coding agents and upserts a stdio setup MCP entry that launches `cmesh mcp --stdio`. That setup MCP can generate, validate, and write config after explicit confirmation.
 
 ## Minimal shape
 

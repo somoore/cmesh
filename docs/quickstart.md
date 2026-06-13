@@ -1,25 +1,25 @@
 # Quickstart
 
-This guide gets two machines talking over Tailscale with static peer config.
+cmesh lets the coding agent on this machine ask the coding agent on another machine to do work.
+
+You install cmesh on each machine. cmesh uses Tailscale to reach peers, verifies who is calling, checks your policy, runs the local agent there, and gives your current agent the result.
 
 ## 1. Prerequisites
 
-Install and sign in to Tailscale on each machine:
+On each machine:
 
 ```bash
 tailscale up
 ```
 
-Install at least one supported worker runner on each machine that will execute tasks:
+Install and sign in to at least one supported runner on every machine that should do work:
 
-- Claude Code for the `claude-code` runner
-- Codex CLI for the `codex` runner
+- Claude Code
+- Codex CLI
 
-Make sure the runner works non-interactively for the profile you plan to expose.
+## 2. Install or build cmesh
 
-## 2. Build cmesh
-
-From the repo root:
+From this repo:
 
 ```bash
 go build -o cmesh ./cmd/cmesh
@@ -31,89 +31,124 @@ On Windows PowerShell:
 go build -o cmesh.exe ./cmd/cmesh
 ```
 
-## 3. Create a config
+## 3. Initialize each machine
 
-Start from the examples:
-
-```bash
-mkdir -p ~/.config/cmesh
-cp examples/config/homelab-vm.toml ~/.config/cmesh/config.toml
-```
-
-Edit the config for each machine:
-
-- `[node]` names the current machine.
-- `[policy]` controls who may delegate here and which working directories are allowed.
-- `[profiles.*]` maps model-facing profiles to runner claims.
-- `[runners.*]` defines the local runner command.
-- `[peers.*]` lists static peer addresses and mesh ports.
-
-Use the peer's Tailscale IP for `address`.
-
-## 4. Check Tailscale access
-
-Run this on each node:
+Run:
 
 ```bash
-./cmesh doctor tailscale
+./cmesh init
 ```
 
-Expected shape:
+`init` detects Tailscale, local runners, suggested safe directories, and cmesh-capable tailnet peers. It writes:
 
 ```text
-tailscaled: Running
-localapi: reachable
-tailnet_ip: 100.x.y.z
-whois_self: <node>
-bind_tailnet_ip: ok
+~/.config/cmesh/config.toml
 ```
 
-If this fails under the account that will run the daemon, fix Tailscale LocalAPI access before continuing.
-
-## 5. Start the daemon
-
-Run on each peer:
+For a headless worker:
 
 ```bash
-./cmesh up --config ~/.config/cmesh/config.toml
+./cmesh init --worker --allow-peer mac-studio --allow-cwd ~/code/** --yes
 ```
 
-cmesh starts two listeners:
-
-- mesh RPC on the node's Tailscale IP and configured mesh port;
-- local MCP gateway on `127.0.0.1:<mcp_port>/mcp`.
-
-## 6. Register the local gateway
-
-On the machine where your agent session runs:
+For an origin machine:
 
 ```bash
-./cmesh connect --config ~/.config/cmesh/config.toml
+./cmesh init --origin --peer homelab-vm --yes
 ```
 
-For Claude Code, cmesh attempts:
+TOML is still available as the escape hatch, but it should not be the first step.
 
-```bash
-claude mcp add cmesh http://127.0.0.1:7777/mcp
+## Agent-assisted first run
+
+You can also let cmesh register the binary MCP server before any config exists:
+
+```text
+cmesh mcp
 ```
 
-For other harnesses, register a local HTTP MCP server named `cmesh` at:
+`cmesh mcp` detects installed AI coding agents, asks which one should get cmesh, and upserts a stdio MCP entry that launches:
+
+```text
+cmesh mcp --stdio
+```
+
+That setup MCP exposes read-mostly tools for:
+
+- checking Tailscale and runner readiness;
+- listing cmesh-capable tailnet peers;
+- generating and validating config;
+- writing config only after an explicit confirmation argument.
+
+Once config exists and `cmesh up` is running, use the local HTTP MCP gateway for actual delegation:
 
 ```text
 http://127.0.0.1:7777/mcp
 ```
 
-## 7. Delegate work
+## 4. Check setup
 
-Ask your local agent to delegate a self-contained task:
+Run:
 
-```text
-Use cmesh to delegate the Linux build to homelab-vm from ~/code/myrepo and keep working locally.
+```bash
+./cmesh doctor
 ```
 
-The default flow returns a task id immediately. Later, the agent can call:
+It checks config, Tailscale, LocalAPI, tailnet binding, runner availability, and the local MCP endpoint.
 
-- `task_status(task_id)`
-- `task_result(task_id)`
-- `cancel(task_id)`
+## 5. Start cmesh
 
+For a foreground daemon:
+
+```bash
+./cmesh up
+```
+
+For a service:
+
+```bash
+./cmesh up service install
+./cmesh up service start
+./cmesh up service status
+```
+
+Service management uses launchd on macOS, systemd user services on Linux, and Windows services on Windows.
+
+## 6. Find and test peers
+
+```bash
+./cmesh peers
+./cmesh peers test homelab-vm --cwd ~/code/myapp
+```
+
+The smoke test checks peer reachability, inbound policy, runner availability, and task completion with a readonly prompt.
+
+## 7. Use it from your agent
+
+Try:
+
+```text
+Use cmesh to ask homelab-vm to summarize ~/code/myapp.
+```
+
+The local MCP gateway is:
+
+```text
+http://127.0.0.1:7777/mcp
+```
+
+Use `cmesh mcp` when you want cmesh to install the pre-daemon setup MCP into Claude Code or Codex for you. After `cmesh up` is running, agents should use the local HTTP MCP gateway at the URL above for delegation.
+
+## Optional bootstrap
+
+If SSH is available, an origin machine can install and start cmesh on a worker:
+
+```bash
+./cmesh peers bootstrap ssh user@homelab-vm
+```
+
+If Tailscale SSH is enabled:
+
+```bash
+./cmesh peers bootstrap tailscale homelab-vm
+```

@@ -39,7 +39,7 @@ An illegitimate node can mean several different things. cmesh handles each layer
 
 ### A machine not on your tailnet
 
-It should not be able to reach the mesh port at all. Mesh RPC binds to the node's Tailscale IP, not `0.0.0.0`, and `cmesh doctor tailscale` verifies that bind behavior.
+It should not be able to reach the mesh port at all. Mesh RPC binds to the node's Tailscale IP, not `0.0.0.0`, and `cmesh doctor` verifies that bind behavior as part of the full setup check.
 
 ### A tailnet machine without cmesh permission
 
@@ -96,6 +96,7 @@ It also avoids common footguns:
 
 - no remote MCP surface;
 - no public internet listener;
+- setup MCP uses local stdio only and can write config only after explicit confirmation;
 - no daemon-to-daemon bearer token in Tailscale mode;
 - no trust in forwarded identity headers;
 - no silent task loss on restart;
@@ -141,7 +142,7 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 - Use Tailscale grants or ACLs to limit mesh RPC reachability to cmesh nodes.
 - Prefer tagged devices for daemon nodes.
 - Do not expose mesh RPC through Funnel, Serve, cloudflared, nginx, or a public load balancer.
-- Run `cmesh doctor tailscale` under the same account or service user that runs cmesh.
+- Run `cmesh doctor` under the same account or service user that runs cmesh.
 
 ### cmesh config
 
@@ -155,6 +156,7 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 ### Runner setup
 
 - Confirm the runner works locally before exposing it through cmesh.
+- Use `cmesh mcp` to upsert the setup MCP into Claude Code or Codex before daemon setup when you want agent-assisted onboarding.
 - Use bare or restricted profiles where practical.
 - Do not configure cmesh to pass skip-all-permissions flags.
 - Keep runner credentials local to the machine that uses them.
@@ -171,7 +173,7 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 These are areas that still need hardening before cmesh should be treated as mature security infrastructure:
 
 - No full OS sandbox wrapper yet for macOS Seatbelt, Linux systemd sandboxing, or Windows restricted users/job objects.
-- No dynamic discovery trust UX yet; static peer config is simpler and safer for now.
+- Peer discovery is available for onboarding, but discovered peers are not trusted merely because they are visible. Keep generated policy narrow and review allowed peers.
 - No per-human authorization layer for shared team tailnets.
 - No remote interactive permission prompt forwarding.
 - No signed runner manifest verification.
@@ -184,7 +186,7 @@ These gaps do not make the design pointless. They define the boundary: cmesh is 
 
 Before relying on a node as a worker:
 
-- `cmesh doctor tailscale` passes.
+- `cmesh doctor` passes.
 - Mesh RPC is reachable only on the Tailscale IP.
 - MCP gateway is reachable only on loopback.
 - Tailscale grants restrict `tcp:7778`.

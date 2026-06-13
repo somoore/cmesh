@@ -72,17 +72,18 @@ On every node:
 
 ```bash
 tailscale status
-cmesh doctor tailscale
+cmesh doctor
 ```
 
 Expected cmesh doctor checks:
 
 ```text
-tailscaled: reachable
-localapi: reachable
-tailnet_ip: 100.x.y.z
-whois_self: ok
-bind_tailnet_ip: ok
+config                   ok
+tailscaled               ok
+localapi                 ok
+tailnet_ip               ok
+whois_self               ok
+bind_tailnet_ip          ok
 ```
 
 The service account running cmesh must be able to query Tailscale LocalAPI. Interactive Tailscale success does not prove daemon access.

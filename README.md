@@ -59,19 +59,27 @@ The remote MCP surface is never exposed. The only MCP endpoint is local loopback
 
 cmesh is early, but it is structured as a real daemon and CLI, not a mockup. The first useful target is Mac/Linux peer delegation over Tailscale with static peers.
 
-Implemented surfaces include `cmesh up`, `cmesh connect`, `cmesh status`, `cmesh log <task_id>`, `cmesh doctor tailscale`, a loopback `/mcp` endpoint, and the v1 mesh task API.
+Implemented surfaces center on four top-level commands: `cmesh init`, `cmesh doctor`, `cmesh up`, and `cmesh peers`. Compatibility aliases such as `connect`, `test`, `status`, `log`, and `hello` remain available for scripts, but the intended developer path stays small.
 
 ## Get started
 
 1. Install and sign in to Tailscale on each machine.
 2. Build cmesh with `go build -o cmesh ./cmd/cmesh`.
-3. Copy an example config from [examples/config](examples/config).
-4. Run `./cmesh doctor tailscale` on each node.
-5. Start `./cmesh up --config ~/.config/cmesh/config.toml`.
-6. Register the local MCP gateway with `./cmesh connect`.
+3. Run `./cmesh init` on each node and answer the plain setup questions.
+4. Run `./cmesh doctor` to verify Tailscale, config, runners, and the local MCP gateway.
+5. Start `./cmesh up`, or install it with `./cmesh up service install`.
+6. List and test peers with `./cmesh peers` and `./cmesh peers test <peer> --cwd ~/code/myapp`.
 7. Ask your agent to delegate a self-contained task.
 
 Full setup instructions live in [docs/quickstart.md](docs/quickstart.md).
+
+For agent-assisted first-run setup, run the binary MCP installer:
+
+```text
+cmesh mcp
+```
+
+It detects installed AI coding agents, lets you choose where to install cmesh, and upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before the daemon is running and exposes discovery/config tools. After `cmesh up` is running, agents should use the local HTTP gateway at `http://127.0.0.1:7777/mcp` for delegation.
 
 ## Documentation
 

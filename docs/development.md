@@ -80,7 +80,10 @@ internal/doctor            environment checks
 internal/gitx              git branch, commit, diffstat contract
 internal/identity          Tailscale LocalAPI identity
 internal/mcp/gateway       loopback MCP gateway
+internal/mcp/setupinstall  AI agent MCP installer/upsert helpers
+internal/mcp/setupstdio    pre-daemon stdio setup MCP server
 internal/mesh/rpc          daemon-to-daemon RPC server/client
+internal/onboard           setup discovery and config generation
 internal/policy            inbound/outbound policy engine
 internal/runner            runner abstraction
 internal/runner/claudecode Claude Code runner

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"cmesh/internal/config"
 	"cmesh/internal/mesh/rpc"
 	"cmesh/internal/mesh/schema"
+	"cmesh/internal/onboard"
 	"cmesh/internal/policy"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
@@ -177,6 +179,103 @@ func (g *Gateway) handleRPC(ctx context.Context, req rpcRequest) (rpcResponse, b
 
 func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessage) (ToolResponse, error) {
 	switch name {
+	case "doctor":
+		status := onboard.Detect(ctx, config.DefaultPath(), false)
+		return ToolResponse{OK: status.ConfigOK && status.Machine.TailscaleOK, Result: status}, nil
+	case "init_status":
+		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}, nil
+	case "detect_runners":
+		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
+	case "list_tailnet_peers":
+		peers, err := onboard.TailnetPeers(ctx, g.Config.Node.MeshPort, true)
+		if err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return ToolResponse{OK: true, Result: peers}, nil
+	case "suggest_config":
+		var req struct {
+			Role         string   `json:"role,omitempty"`
+			AllowedPeers []string `json:"allowed_peers,omitempty"`
+			AllowedCWDs  []string `json:"allowed_cwds,omitempty"`
+			PeerNames    []string `json:"peer_names,omitempty"`
+			Runner       string   `json:"runner,omitempty"`
+			Profiles     []string `json:"profiles,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		machine := onboard.DetectMachine(ctx)
+		runners := onboard.DetectRunners(ctx)
+		peers, _ := onboard.TailnetPeers(ctx, g.Config.Node.MeshPort, true)
+		body, err := onboard.GenerateConfig(onboard.InitOptions{
+			Role:         req.Role,
+			AllowedPeers: req.AllowedPeers,
+			AllowedCWDs:  req.AllowedCWDs,
+			PeerNames:    req.PeerNames,
+			Runner:       req.Runner,
+			Profiles:     req.Profiles,
+		}, machine, runners, peers)
+		if err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return ToolResponse{OK: true, Result: map[string]string{"toml": body, "path": config.DefaultPath()}}, nil
+	case "validate_config":
+		var req struct {
+			Path string `json:"path,omitempty"`
+			TOML string `json:"toml,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		path := req.Path
+		if req.TOML != "" {
+			tmp, err := os.CreateTemp("", "cmesh-config-*.toml")
+			if err != nil {
+				return toolFailure(task.ErrorWorkerFailed, err.Error())
+			}
+			path = tmp.Name()
+			if _, err := tmp.WriteString(req.TOML); err != nil {
+				_ = tmp.Close()
+				_ = os.Remove(path)
+				return toolFailure(task.ErrorWorkerFailed, err.Error())
+			}
+			_ = tmp.Close()
+			defer os.Remove(path)
+		}
+		if path == "" {
+			path = config.DefaultPath()
+		}
+		if err := onboard.ValidateConfig(path); err != nil {
+			return ToolResponse{OK: false, Error: &ToolError{Code: task.ErrorWorkerFailed, Detail: err.Error()}}, nil
+		}
+		return ToolResponse{OK: true, Result: map[string]string{"path": path, "status": "valid"}}, nil
+	case "register_harness":
+		var req struct {
+			Confirmed bool   `json:"confirmed,omitempty"`
+			Harness   string `json:"harness,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", g.Config.Node.MCPPort)
+		if !req.Confirmed {
+			return ToolResponse{OK: true, Result: map[string]any{
+				"requires_confirmation": true,
+				"claude_code_command":   "claude mcp add cmesh " + gatewayURL,
+				"codex_instruction":     "add a local HTTP MCP server named cmesh at " + gatewayURL,
+			}}, nil
+		}
+		if req.Harness == "" || req.Harness == "claude-code" {
+			claude, err := exec.LookPath("claude")
+			if err != nil {
+				return toolFailure(task.ErrorRunnerUnavailable, "Claude Code not found on PATH")
+			}
+			if err := exec.Command(claude, "mcp", "add", "cmesh", gatewayURL).Run(); err != nil {
+				return toolFailure(task.ErrorWorkerFailed, err.Error())
+			}
+			return ToolResponse{OK: true, Result: map[string]string{"harness": "claude-code", "url": gatewayURL}}, nil
+		}
+		return ToolResponse{OK: true, Result: map[string]string{"harness": req.Harness, "manual_url": gatewayURL}}, nil
 	case "list_peers":
 		type peer struct {
 			Name    string `json:"name"`
@@ -205,6 +304,28 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorPeerUnreachable, err.Error())
 		}
 		return ToolResponse{OK: true, Result: info}, nil
+	case "test_peer":
+		var req struct {
+			Peer string `json:"peer"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		client, err := g.client(req.Peer)
+		if err != nil {
+			return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		}
+		info, err := client.Hello(ctx)
+		if err != nil {
+			return toolFailure(task.ErrorPeerUnreachable, err.Error())
+		}
+		return ToolResponse{OK: true, Result: map[string]any{
+			"peer_reachable": true,
+			"node_id":        info.NodeID,
+			"node_name":      info.NodeName,
+			"runners":        info.Runners,
+			"capabilities":   info.Capabilities,
+		}}, nil
 	case "delegate":
 		var req DelegateRequest
 		if err := json.Unmarshal(args, &req); err != nil {
@@ -896,6 +1017,54 @@ func toolFailure(code task.ErrorCode, detail string) (ToolResponse, error) {
 func mcpTools() []map[string]any {
 	return []map[string]any{
 		{
+			"name":        "doctor",
+			"description": "Check local cmesh setup readiness: config, Tailscale identity/reachability, runners, and MCP gateway details.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "init_status",
+			"description": "Inspect first-run setup status, detected runners, local Tailscale identity, and cmesh-capable tailnet peers.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "detect_runners",
+			"description": "Detect supported local coding-agent runners such as Claude Code and Codex.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "list_tailnet_peers",
+			"description": "List Tailscale peer candidates and probe which ones appear to expose cmesh.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "suggest_config",
+			"description": "Generate an opinionated cmesh config TOML from human setup intent. Does not write files.",
+			"inputSchema": objectSchema(map[string]any{
+				"role":          stringSchema("Machine role: origin, worker, or both."),
+				"allowed_peers": arraySchema(stringSchema("Peer node/name allowed to delegate to this worker.")),
+				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
+				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
+				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
+				"profiles":      arraySchema(stringSchema("Profiles to expose: readonly, dev, network, git_push.")),
+			}, nil),
+		},
+		{
+			"name":        "validate_config",
+			"description": "Validate a cmesh config file or provided TOML string without starting the daemon.",
+			"inputSchema": objectSchema(map[string]any{
+				"path": stringSchema("Optional config file path. Defaults to the cmesh config path."),
+				"toml": stringSchema("Optional TOML content to validate from a temporary file."),
+			}, nil),
+		},
+		{
+			"name":        "register_harness",
+			"description": "Register the local cmesh MCP gateway with a local harness. Requires confirmed=true before changing anything.",
+			"inputSchema": objectSchema(map[string]any{
+				"confirmed": map[string]any{"type": "boolean"},
+				"harness":   stringSchema("Harness to register, currently claude-code or manual."),
+			}, nil),
+		},
+		{
 			"name":        "list_peers",
 			"description": "List configured cmesh peers and their static mesh addresses.",
 			"inputSchema": objectSchema(nil, nil),
@@ -903,6 +1072,13 @@ func mcpTools() []map[string]any {
 		{
 			"name":        "peer_info",
 			"description": "Fetch /v1/hello from a peer to inspect schema versions, runners, profiles, and capabilities.",
+			"inputSchema": objectSchema(map[string]any{
+				"peer": stringSchema("Configured peer name."),
+			}, []string{"peer"}),
+		},
+		{
+			"name":        "test_peer",
+			"description": "Run a lightweight smoke check against a configured peer by fetching its hello/capability information.",
 			"inputSchema": objectSchema(map[string]any{
 				"peer": stringSchema("Configured peer name."),
 			}, []string{"peer"}),
