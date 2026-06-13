@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -220,6 +221,58 @@ func TestCreateTaskDerivesHopCountFromVerifiedChain(t *testing.T) {
 	}
 	if rec.HopCount != 1 {
 		t.Fatalf("hop count = %d, want derived chain length 1", rec.HopCount)
+	}
+}
+
+func TestPeerSmokeTestsBackToAuthenticatedCaller(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	var sawSmokePrompt bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/hello":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"node_id":"node-mac","node_name":"mac-studio","schema_versions":["v1"],"runners":[{"name":"fake","profiles":["dev"]}],"capabilities":["tasks"]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/tasks":
+			var raw schema.CreateTaskRequest
+			if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+				t.Fatalf("decode task request: %v", err)
+			}
+			sawSmokePrompt = strings.Contains(raw.Prompt, rpcSmokeExpectedResponse)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"task_id":"remote-smoke","state":"done"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/remote-smoke/result":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"task_id":"remote-smoke","result":{"status":"done","command_output":{"command":"fake","exit_code":0,"stdout":"cmesh smoke ok\n","stderr":"","duration_s":1},"worker_summary_untrusted":"cmesh smoke ok","usage":{},"verification_required":true}}`))
+		default:
+			t.Fatalf("unexpected worker request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer worker.Close()
+	host, port := splitHostPort(t, worker.URL)
+	server.Config.Peers = map[string]config.PeerConfig{
+		"mac-studio": {Name: "mac-studio", NodeID: "node-mac", Address: host, Port: port},
+	}
+	server.Policy = policy.New(server.Config)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/peer-smoke", strings.NewReader(`{"cwd":`+strconv.Quote(root)+`,"profile":"dev","timeout_s":5}`))
+	req.RemoteAddr = "100.64.0.1:12345"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var resp schema.PeerSmokeResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal response: %v", err)
+	}
+	if !sawSmokePrompt {
+		t.Fatal("caller peer did not receive smoke prompt")
+	}
+	for _, name := range []string{"peer_reachable", "policy_allowed", "task_created", "result_envelope_parsed", "runner_invoked", "prompt_received", "smoke_response_verified"} {
+		if !resp.Checks[name] {
+			t.Fatalf("check %s = false in %+v", name, resp.Checks)
+		}
 	}
 }
 
@@ -441,6 +494,19 @@ func waitForTerminalTask(t *testing.T, server *Server, taskID string) {
 		t.Fatalf("GetTask: %v", err)
 	}
 	t.Fatalf("task %s did not reach terminal state, got %s", taskID, rec.State)
+}
+
+func splitHostPort(t *testing.T, rawURL string) (string, int) {
+	t.Helper()
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(rawURL, "http://"))
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+	return host, port
 }
 
 func assertAuditContains(t *testing.T, path string, values ...string) {

@@ -111,6 +111,11 @@ func (c *Client) TaskArtifact(ctx context.Context, taskID, kind string) ([]byte,
 	return c.doBytes(ctx, http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/artifacts/"+url.PathEscape(kind), nil)
 }
 
+func (c *Client) PeerSmoke(ctx context.Context, req schema.PeerSmokeRequest) (schema.PeerSmokeResponse, error) {
+	var out schema.PeerSmokeResponse
+	return out, c.do(ctx, http.MethodPost, "/v1/peer-smoke", req, &out)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
 	var body *bytes.Reader
 	if in != nil {

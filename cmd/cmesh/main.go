@@ -1260,11 +1260,16 @@ func cmdTest(args []string) error {
 	profile := fs.String("profile", "readonly", "profile to request")
 	wait := fs.Bool("wait", true, "wait for the smoke task to finish")
 	timeoutSeconds := fs.Int("timeout", 60, "smoke task timeout in seconds")
+	bidirectional := fs.Bool("bidirectional", false, "also ask the peer daemon to run a direct smoke task back to this machine")
+	reverseCWD := fs.String("reverse-cwd", "", "cwd on this machine for the peer's reverse smoke task; defaults to the current directory")
 	if err := parseInterspersedFlags(fs, args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: cmesh test <peer> [--cwd ~/code/myapp]")
+		return fmt.Errorf("usage: cmesh test <peer> [--cwd ~/code/myapp] [--bidirectional]")
+	}
+	if *bidirectional && !*wait {
+		return fmt.Errorf("--bidirectional requires --wait=true")
 	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -1277,7 +1282,11 @@ func cmdTest(args []string) error {
 	}
 	port := firstNonZero(peer.Port, config.DefaultMeshPort)
 	client := meshrpc.NewClient("http://" + net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port)))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+15)*time.Second)
+	ctxSeconds := *timeoutSeconds + 15
+	if *bidirectional {
+		ctxSeconds = *timeoutSeconds*2 + 30
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ctxSeconds)*time.Second)
 	defer cancel()
 	st, err := store.OpenContext(ctx, cfg.Store.Path)
 	if err != nil {
@@ -1380,6 +1389,26 @@ func cmdTest(args []string) error {
 	} else {
 		printCheck("task queued", true, resp.TaskID)
 	}
+	if *bidirectional {
+		cwdBack := strings.TrimSpace(*reverseCWD)
+		if cwdBack == "" {
+			cwdBack, err = os.Getwd()
+			if err != nil {
+				return err
+			}
+		}
+		fmt.Println()
+		fmt.Println("reverse cmesh test")
+		fmt.Println()
+		reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{CWD: cwdBack, Profile: *profile, TimeoutSeconds: *timeoutSeconds})
+		if err != nil {
+			printCheck("reverse smoke requested", false, err.Error())
+			return err
+		}
+		if err := printPeerSmokeResponse(reverse); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1393,6 +1422,38 @@ func smokeResultMatches(result *task.ResultEnvelope) bool {
 		return false
 	}
 	return result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+}
+
+func printPeerSmokeResponse(resp schema.PeerSmokeResponse) error {
+	checks := resp.Checks
+	if checks == nil {
+		checks = map[string]bool{}
+	}
+	printCheck("reverse peer reachable", checks["peer_reachable"], firstNonEmpty(resp.NodeName, resp.NodeID, resp.Peer))
+	printCheck("reverse policy allowed", checks["policy_allowed"], "done")
+	printCheck("reverse task id", resp.TaskID != "", resp.TaskID)
+	printCheck("reverse task completed", resp.State == task.StateDone, string(resp.State))
+	resultParsed := checks["result_envelope_parsed"]
+	printCheck("reverse result envelope parsed", resultParsed, string(task.StateDone))
+	runnerCommand := ""
+	if resp.Result != nil {
+		runnerCommand = resp.Result.CommandOutput.Command
+	}
+	printCheck("reverse runner invoked", checks["runner_invoked"], runnerCommand)
+	verified := checks["prompt_received"] && checks["smoke_response_verified"]
+	detail := smokeExpectedResponse
+	if !verified && resp.Error != nil {
+		detail = resp.Error.Detail
+	}
+	printCheck("reverse prompt received", checks["prompt_received"], detail)
+	printCheck("reverse smoke response verified", checks["smoke_response_verified"], detail)
+	if resp.Error != nil {
+		return fmt.Errorf("%s: %s", resp.Error.Code, resp.Error.Detail)
+	}
+	if !verified {
+		return fmt.Errorf("reverse smoke task did not return %q", smokeExpectedResponse)
+	}
+	return nil
 }
 
 func rawOutputContainsSmoke(stdout, stderr string) bool {
@@ -2030,11 +2091,13 @@ func firstNonEmpty(values ...string) string {
 }
 
 func usage() {
-	fmt.Println("usage: cmesh <init|doctor|up|peers>")
+	fmt.Println("usage: cmesh <init|doctor|up|peers|test|mcp>")
 	fmt.Println()
 	fmt.Println("common:")
 	fmt.Println("  cmesh init")
 	fmt.Println("  cmesh doctor")
 	fmt.Println("  cmesh up")
 	fmt.Println("  cmesh peers")
+	fmt.Println("  cmesh peers test <peer> --cwd <peer-cwd> --bidirectional")
+	fmt.Println("  cmesh mcp")
 }

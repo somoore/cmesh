@@ -103,6 +103,24 @@ type TaskTranscriptResponse struct {
 	Stderr string `json:"stderr,omitempty"`
 }
 
+type PeerSmokeRequest struct {
+	CWD            string `json:"cwd"`
+	Profile        string `json:"profile,omitempty"`
+	TimeoutSeconds int    `json:"timeout_s,omitempty"`
+}
+
+type PeerSmokeResponse struct {
+	Peer           string               `json:"peer"`
+	NodeID         string               `json:"node_id,omitempty"`
+	NodeName       string               `json:"node_name,omitempty"`
+	TaskID         string               `json:"task_id,omitempty"`
+	State          task.State           `json:"state,omitempty"`
+	ElapsedSeconds int64                `json:"elapsed_s,omitempty"`
+	Checks         map[string]bool      `json:"checks,omitempty"`
+	Result         *task.ResultEnvelope `json:"result,omitempty"`
+	Error          *Error               `json:"error,omitempty"`
+}
+
 type CancelTaskRequest struct {
 	Reason string `json:"reason,omitempty"`
 }

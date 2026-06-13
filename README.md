@@ -68,7 +68,7 @@ Implemented surfaces center on four top-level commands: `cmesh init`, `cmesh doc
 3. Run `./cmesh init` on each node and answer the plain setup questions.
 4. Run `./cmesh doctor` to verify Tailscale, config, runners, and the local MCP gateway.
 5. Start `./cmesh up`, or install it with `./cmesh up service install`.
-6. List and test peers with `./cmesh peers` and `./cmesh peers test <peer> --cwd ~/code/myapp`.
+6. List and test peers with `./cmesh peers` and `./cmesh peers test <peer> --cwd ~/code/myapp --bidirectional`.
 7. Ask your agent to delegate a self-contained task.
 
 Full setup instructions live in [docs/quickstart.md](docs/quickstart.md).

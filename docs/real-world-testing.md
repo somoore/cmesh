@@ -116,6 +116,14 @@ From the Mac to test the Windows endpoint:
 ./cmesh peers test win11-desktop --cwd 'C:\Users\scott\code\cmesh' --timeout 45
 ```
 
+For a single direct two-way check, run the same command with `--bidirectional` from either machine:
+
+```bash
+./cmesh peers test win11-desktop --cwd 'C:\Users\scott\code\cmesh' --timeout 45 --bidirectional --reverse-cwd /Users/scottmoore/github/cmesh
+```
+
+The reverse leg is initiated by the peer's cmesh daemon through mesh RPC, not by asking an agent to run a command. Do not use a delegated Claude Code/Codex task as the health-check harness; that measures agent latency and permission behavior in addition to cmesh.
+
 Final passing result:
 
 ```text

@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{task_id}/transcript", s.handleTaskTranscript)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/artifacts/{kind}", s.handleTaskArtifact)
 	mux.HandleFunc("POST /v1/tasks/{task_id}/cancel", s.handleCancel)
+	mux.HandleFunc("POST /v1/peer-smoke", s.handlePeerSmoke)
 	return withSchemaVersion(mux)
 }
 
@@ -118,9 +119,190 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		NodeName:       s.Config.Node.Name,
 		SchemaVersions: []string{schema.Version},
 		Runners:        runners,
-		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status"},
+		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status", "peer_smoke"},
 		ServerTime:     time.Now().UTC(),
 	})
+}
+
+func (s *Server) handlePeerSmoke(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	var req schema.PeerSmokeRequest
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	resp, err := s.runPeerSmokeToCaller(r.Context(), identity, req)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := task.ErrorWorkerFailed
+		if rpcErr, ok := err.(*Error); ok {
+			status = rpcErr.StatusCode
+			code = rpcErr.Code
+		} else if resp.Error != nil {
+			code = resp.Error.Code
+			switch code {
+			case task.ErrorPeerUnauthorized:
+				status = http.StatusForbidden
+			case task.ErrorPeerUnreachable:
+				status = http.StatusBadGateway
+			}
+		}
+		if resp.Error == nil {
+			resp.Error = &schema.Error{Code: code, Detail: err.Error()}
+		}
+		writeJSON(w, status, resp)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identity, req schema.PeerSmokeRequest) (schema.PeerSmokeResponse, error) {
+	peerName, peer, ok := s.peerForIdentity(identity)
+	if !ok {
+		err := fmt.Errorf("authenticated caller is not a configured peer")
+		return schema.PeerSmokeResponse{Error: &schema.Error{Code: task.ErrorPeerUnauthorized, Detail: err.Error()}}, err
+	}
+	cwd := strings.TrimSpace(req.CWD)
+	if cwd == "" {
+		cwd = "~"
+	}
+	profile := strings.TrimSpace(req.Profile)
+	if profile == "" {
+		profile = "readonly"
+	}
+	timeoutSeconds := req.TimeoutSeconds
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 60
+	}
+	checks := map[string]bool{}
+	resp := schema.PeerSmokeResponse{
+		Peer:     peerName,
+		NodeID:   firstNonEmpty(peer.NodeID, identity.NodeID),
+		NodeName: firstNonEmpty(peer.Name, identity.NodeName),
+		Checks:   checks,
+	}
+	port := firstNonZero(peer.Port, config.DefaultMeshPort)
+	client := NewClient("http://" + net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port)))
+	hello, err := client.Hello(ctx)
+	if err != nil {
+		resp.Error = &schema.Error{Code: task.ErrorPeerUnreachable, Detail: err.Error()}
+		return resp, err
+	}
+	resp.NodeID = firstNonEmpty(hello.NodeID, resp.NodeID)
+	resp.NodeName = firstNonEmpty(hello.NodeName, resp.NodeName)
+	checks["peer_reachable"] = true
+	chain := []string{s.Config.Node.ID}
+	decision := s.Policy.CheckOutbound(policy.TaskIntent{
+		PeerName:     firstNonEmpty(peer.Name, peerName),
+		PeerNodeID:   peer.NodeID,
+		CWD:          cwd,
+		Profile:      profile,
+		Chain:        chain,
+		OriginNodeID: s.Config.Node.ID,
+	})
+	checks["policy_allowed"] = decision.Allowed
+	if !decision.Allowed {
+		err := fmt.Errorf("%s: %s", decision.Code, decision.Detail)
+		resp.Error = &schema.Error{Code: task.ErrorCode(decision.Code), Detail: decision.Detail}
+		return resp, err
+	}
+	taskReq := smokeCreateTaskRequest(s.Config, cwd, decision.EffectiveProfile, timeoutSeconds)
+	started := time.Now()
+	created, err := client.CreateTask(ctx, taskReq)
+	if err != nil {
+		resp.Error = &schema.Error{Code: task.ErrorPeerUnreachable, Detail: err.Error()}
+		return resp, err
+	}
+	resp.TaskID = created.TaskID
+	resp.State = created.State
+	resp.ElapsedSeconds = int64(time.Since(started).Round(time.Second).Seconds())
+	checks["task_created"] = created.TaskID != ""
+	if created.State != task.StateDone {
+		if created.Error != nil {
+			resp.Error = created.Error
+			return resp, fmt.Errorf("%s: %s", created.Error.Code, created.Error.Detail)
+		}
+		err := fmt.Errorf("smoke task finished with state %s", created.State)
+		resp.Error = &schema.Error{Code: task.ErrorWorkerFailed, Detail: err.Error()}
+		return resp, err
+	}
+	result, err := client.TaskResult(ctx, created.TaskID)
+	if err != nil {
+		resp.Error = &schema.Error{Code: task.ErrorWorkerFailed, Detail: err.Error()}
+		return resp, err
+	}
+	resp.Result = result.Result
+	checks["result_envelope_parsed"] = result.Result != nil && task.State(result.Result.Status) == task.StateDone
+	checks["runner_invoked"] = result.Result != nil && result.Result.CommandOutput.Command != ""
+	verified := rpcSmokeResultMatches(result.Result)
+	checks["prompt_received"] = verified
+	checks["smoke_response_verified"] = verified
+	if !verified {
+		err := fmt.Errorf("smoke task did not return %q", rpcSmokeExpectedResponse)
+		resp.Error = &schema.Error{Code: task.ErrorWorkerFailed, Detail: err.Error()}
+		return resp, err
+	}
+	return resp, nil
+}
+
+func (s *Server) peerForIdentity(identity tsid.Identity) (string, config.PeerConfig, bool) {
+	for name, peer := range s.Config.Peers {
+		if peer.NodeID != "" && matchesIdentityClaim(peer.NodeID, identity) {
+			return name, peer, true
+		}
+		if peer.Name != "" && matchesIdentityClaim(peer.Name, identity) {
+			return name, peer, true
+		}
+		if name != "" && matchesIdentityClaim(name, identity) {
+			return name, peer, true
+		}
+	}
+	return "", config.PeerConfig{}, false
+}
+
+const rpcSmokeExpectedResponse = "cmesh smoke ok"
+
+func smokeCreateTaskRequest(cfg *config.Config, cwd, profile string, timeoutSeconds int) schema.CreateTaskRequest {
+	return schema.CreateTaskRequest{
+		TaskID:          task.DeterministicID(cfg.Node.ID, "cmesh-rpc-smoke", cwd+"\x00"+profile+"\x00"+strconv.Itoa(timeoutSeconds)+"\x00"+time.Now().UTC().Format(time.RFC3339Nano)),
+		OriginNodeID:    cfg.Node.ID,
+		OriginSessionID: "cmesh-rpc-smoke",
+		Prompt:          "Reply with exactly: " + rpcSmokeExpectedResponse,
+		CWD:             cwd,
+		Profile:         profile,
+		TimeoutSeconds:  timeoutSeconds,
+		Wait:            true,
+		Provenance: schema.Provenance{
+			OriginNodeID:    cfg.Node.ID,
+			OriginSessionID: "cmesh-rpc-smoke",
+			DelegationChain: []string{cfg.Node.ID},
+			HopCount:        0,
+		},
+	}
+}
+
+func rpcSmokeResultMatches(result *task.ResultEnvelope) bool {
+	if result == nil {
+		return false
+	}
+	if result.CommandOutput.Command == "" || result.CommandOutput.ExitCode != 0 {
+		return false
+	}
+	return strings.Contains(result.CommandOutput.Stdout, rpcSmokeExpectedResponse) || strings.Contains(result.CommandOutput.Stderr, rpcSmokeExpectedResponse)
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -1316,4 +1498,11 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonZero(value, fallback int) int {
+	if value != 0 {
+		return value
+	}
+	return fallback
 }

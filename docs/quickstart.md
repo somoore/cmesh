@@ -147,9 +147,12 @@ If you install without `--user`, the Windows service runs as LocalSystem and wil
 ```bash
 ./cmesh peers
 ./cmesh peers test homelab-vm --cwd ~/code/myapp
+./cmesh peers test homelab-vm --cwd ~/code/myapp --bidirectional
 ```
 
 The smoke test checks peer reachability, policy, task creation, runner invocation, prompt receipt, result envelope parsing, audit-event recording, and task completion with a readonly prompt. It verifies the returned `command_output` artifact has exit code 0 and contains the expected smoke string, so a runner that exits successfully after saying it did not receive a task, or only returns model prose without a raw command artifact, does not count as healthy.
+
+Use `--bidirectional` when validating a two-machine setup. The first leg runs a direct smoke task from this machine to the peer. The reverse leg asks the peer's cmesh daemon to run its own direct smoke task back to this machine. This avoids routing health checks through Claude Code, Codex, or another agent prompt, so elapsed time reflects cmesh transport and runner startup rather than agent planning latency. If the reverse machine needs a different local path, pass `--reverse-cwd <path-on-this-machine>`.
 
 From the local MCP gateway, the `test_peer` tool runs the same kind of semantic smoke task. It does not stop at capability discovery; it creates a real remote task, fetches the result envelope, verifies the expected raw smoke response, and confirms the origin audit event was written.
 
