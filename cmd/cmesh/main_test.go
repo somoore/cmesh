@@ -121,6 +121,18 @@ func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
 	}
 }
 
+func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
+	if !smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}) {
+		t.Fatal("expected smoke result to match")
+	}
+	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "What would you like me to work on?"}) {
+		t.Fatal("generic worker response must not pass smoke validation")
+	}
+	if smokeResultMatches(nil) {
+		t.Fatal("nil result must not pass smoke validation")
+	}
+}
+
 func ensureGitOnPath(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err == nil {

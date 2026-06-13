@@ -849,7 +849,25 @@ func cmdTest(args []string) error {
 	printCheck("task id", resp.TaskID != "", resp.TaskID)
 	if *wait {
 		if resp.State.Terminal() {
-			printCheck("task completed", resp.State == task.StateDone, string(resp.State))
+			if resp.State != task.StateDone {
+				printCheck("task completed", false, string(resp.State))
+				return fmt.Errorf("smoke task finished with state %s", resp.State)
+			}
+			printCheck("task completed", true, string(resp.State))
+			result, err := client.TaskResult(ctx, resp.TaskID)
+			if err != nil {
+				printCheck("smoke response verified", false, err.Error())
+				return err
+			}
+			if !smokeResultMatches(result.Result) {
+				detail := "missing expected smoke response"
+				if result.Result != nil && strings.TrimSpace(result.Result.WorkerSummaryUntrusted) != "" {
+					detail = oneLine(result.Result.WorkerSummaryUntrusted)
+				}
+				printCheck("smoke response verified", false, detail)
+				return fmt.Errorf("smoke task did not return %q", smokeExpectedResponse)
+			}
+			printCheck("smoke response verified", true, smokeExpectedResponse)
 		} else {
 			printCheck("task queued", true, resp.TaskID)
 		}
@@ -857,6 +875,23 @@ func cmdTest(args []string) error {
 		printCheck("task queued", true, resp.TaskID)
 	}
 	return nil
+}
+
+const smokeExpectedResponse = "cmesh smoke ok"
+
+func smokeResultMatches(result *task.ResultEnvelope) bool {
+	if result == nil {
+		return false
+	}
+	return strings.Contains(strings.TrimSpace(result.WorkerSummaryUntrusted), smokeExpectedResponse)
+}
+
+func oneLine(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) > 96 {
+		return value[:96] + "..."
+	}
+	return value
 }
 
 type multiFlag []string
@@ -1141,7 +1176,7 @@ func schemaSmokeRequest(cfg *config.Config, peerName, cwd, profile string, wait 
 	return schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-cli-smoke",
-		Prompt:          "Reply with exactly: cmesh smoke ok",
+		Prompt:          "Reply with exactly: " + smokeExpectedResponse,
 		CWD:             cwd,
 		Profile:         profile,
 		TimeoutSeconds:  timeoutSeconds,
