@@ -161,10 +161,10 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 
 - Keep `allowed_peers` explicit.
 - Keep `allowed_cwds` as narrow as practical.
-- Prefer `readonly` for inspection tasks.
+- Prefer `query` for inspection tasks that fit deterministic cmesh probes.
 - Avoid network and git push claims unless a workflow truly needs them.
-- Keep defaults strict: generated configs expose only `readonly` and `dev`.
-- Add `network`, `interactive`, or `git_push` profiles only as explicit opt-ins.
+- Keep defaults strict: generated configs expose `query`; add `repo-dev` only when repo edits are needed.
+- Add `query-network`, `query-shell`, `desktop-control`, `system-change`, `network`, `interactive`, or `git_push` profiles only as explicit opt-ins.
 - Scope high-risk profiles with profile-level `allowed_peers`, usually to a single trusted origin such as your Mac.
 - Require callers to request high-risk profiles by name; do not make them the runner default profile.
 - For desktop control, elevation, browser automation, service changes, and other dangerous actions, prefer a Windows-side human approval loop over silent auto-approval.

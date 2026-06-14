@@ -19,7 +19,9 @@ import (
 	tsid "cmesh/internal/identity/tailscale"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/policy"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/runner"
+	"cmesh/internal/runner/probe"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/testutil"
@@ -148,6 +150,63 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 	}
 	waitForTerminalTask(t, server, "task-1")
 	waitForTerminalTask(t, server, "task-2")
+}
+
+func TestQueryProfilePromptDoesNotExecuteOrWriteTargetFile(t *testing.T) {
+	root := t.TempDir()
+	run := probe.New(map[string]probe.ProfileConfig{
+		profiledefs.Query: {
+			Capabilities:          []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo},
+			MaxOutputBytes:        65536,
+			EnforcementConfidence: "high",
+		},
+	})
+	server := newTestServer(t, root, run)
+	server.Config.Profiles = map[string]config.ProfileConfig{
+		profiledefs.Query: {
+			Runner:                profiledefs.RunnerProbe,
+			Capabilities:          []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo},
+			Claims:                []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo},
+			Writes:                profiledefs.WritesDeny,
+			Shell:                 profiledefs.ShellDeny,
+			EnforcementConfidence: "high",
+			MaxRuntime:            config.Duration{Duration: time.Minute},
+		},
+	}
+	server.Config.Runners = map[string]config.RunnerConfig{
+		profiledefs.RunnerProbe: {Command: []string{"builtin"}, DefaultProfile: profiledefs.Query},
+	}
+	server.Policy = policy.New(server.Config)
+
+	target := filepath.Join(root, "query-should-not-write.txt")
+	createBody := `{
+		"task_id":"query-prompt-no-exec",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":` + strconv.Quote("create "+target) + `,
+		"cwd":` + strconv.Quote(root) + `,
+		"profile":"query",
+		"wait":true,
+		"timeout_s":5,
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("query profile prompt created target file or unexpected stat error: %v", err)
+	}
+	rec, err := server.Store.GetTask(context.Background(), "query-prompt-no-exec")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.State != task.StateFailed {
+		t.Fatalf("state = %q, want failed because probe requires typed QueryKind", rec.State)
+	}
 }
 
 func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {

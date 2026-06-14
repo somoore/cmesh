@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"cmesh/internal/config"
+	"cmesh/internal/profile"
 )
 
 func TestInboundAllowsConfiguredPeerAndCWD(t *testing.T) {
@@ -103,6 +104,125 @@ func TestInboundRejectsDisallowedCWD(t *testing.T) {
 	})
 	if decision.Allowed || decision.Code != "cwd_denied" {
 		t.Fatalf("expected cwd_denied, got %+v", decision)
+	}
+}
+
+func TestQueryTaskRequiresSafeRunnerDenyWriteProfileAndCapability(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["query"] = config.ProfileConfig{
+		Runner:       profile.RunnerProbe,
+		Capabilities: []string{profile.CapDiskInfo},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+	}
+	cfg.Profiles["query-shell"] = config.ProfileConfig{
+		Runner:       profile.RunnerShell,
+		Capabilities: []string{profile.CapShellReadonly, profile.CapServiceStatus},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellAllowlisted,
+	}
+	cfg.Profiles["bad-shell-query"] = config.ProfileConfig{
+		Runner:       profile.RunnerShell,
+		Capabilities: []string{profile.CapShellReadonly},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellAllow,
+	}
+	cfg.Profiles["bad-query"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Capabilities: []string{profile.CapDiskInfo},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+	}
+	cfg.Runners[profile.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: "query"}
+	cfg.Runners[profile.RunnerShell] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: "query-shell"}
+
+	allowed := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		CWD:        root,
+		Profile:    "query",
+		TaskKind:   "query",
+		Capability: profile.CapDiskInfo,
+	})
+	if !allowed.Allowed {
+		t.Fatalf("query disk_info should be allowed: %+v", allowed)
+	}
+
+	deniedCapability := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		CWD:        root,
+		Profile:    "query",
+		TaskKind:   "query",
+		Capability: profile.CapShellReadonly,
+	})
+	if deniedCapability.Allowed || deniedCapability.Code != "profile_denied" {
+		t.Fatalf("query shell_readonly should be denied, got %+v", deniedCapability)
+	}
+
+	allowedShell := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		CWD:        root,
+		Profile:    "query-shell",
+		TaskKind:   "query",
+		Capability: profile.CapServiceStatus,
+	})
+	if !allowedShell.Allowed {
+		t.Fatalf("query-shell service_status should be allowed: %+v", allowedShell)
+	}
+
+	deniedShellMode := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		CWD:        root,
+		Profile:    "bad-shell-query",
+		TaskKind:   "query",
+		Capability: profile.CapShellReadonly,
+	})
+	if deniedShellMode.Allowed || deniedShellMode.Code != "profile_denied" {
+		t.Fatalf("query-shell with shell=allow should be denied, got %+v", deniedShellMode)
+	}
+
+	deniedRunner := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		CWD:        root,
+		Profile:    "bad-query",
+		TaskKind:   "query",
+		Capability: profile.CapDiskInfo,
+	})
+	if deniedRunner.Allowed || deniedRunner.Code != "profile_denied" {
+		t.Fatalf("query on agent runner should be denied, got %+v", deniedRunner)
+	}
+}
+
+func TestRequireLeaseProfileNeedsActiveContextID(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["repo-dev"] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profile.CapReadFiles, profile.CapEditRepo, profile.CapExecuteInRepo},
+		Writes:          profile.WritesRepoOnly,
+		Shell:           profile.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	cfg.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "dev"}
+
+	denied := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "repo-dev",
+	})
+	if denied.Allowed || denied.Code != "profile_denied" {
+		t.Fatalf("repo-dev without lease should be denied, got %+v", denied)
+	}
+
+	allowed := New(cfg).CheckInbound(TaskIntent{
+		PeerName:         "mac-studio",
+		CWD:              root,
+		Profile:          "repo-dev",
+		ProfileContextID: "lease_test",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("repo-dev with lease should be allowed, got %+v", allowed)
 	}
 }
 

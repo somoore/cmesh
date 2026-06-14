@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	profiledefs "cmesh/internal/profile"
+
 	"github.com/BurntSushi/toml"
 )
 
@@ -64,14 +66,38 @@ type OutboundPolicy struct {
 }
 
 type ProfileConfig struct {
-	Runner          string   `toml:"runner"`
-	Claims          []string `toml:"claims"`
-	AllowedPeers    []string `toml:"allowed_peers"`
-	RequireExplicit bool     `toml:"require_explicit"`
-	Bare            bool     `toml:"bare"`
-	Network         bool     `toml:"network"`
-	GitPush         bool     `toml:"git_push"`
-	MaxRuntime      Duration `toml:"max_runtime"`
+	Runner                string            `toml:"runner"`
+	Description           string            `toml:"description"`
+	Intents               []string          `toml:"intents"`
+	Capabilities          []string          `toml:"capabilities"`
+	Claims                []string          `toml:"claims"`
+	AllowedPeers          []string          `toml:"allowed_peers"`
+	RequireExplicit       bool              `toml:"require_explicit"`
+	RequireLease          bool              `toml:"require_lease"`
+	Bare                  bool              `toml:"bare"`
+	Writes                string            `toml:"writes"`
+	Shell                 string            `toml:"shell"`
+	Network               bool              `toml:"network"`
+	GitPush               bool              `toml:"git_push"`
+	MaxRuntime            Duration          `toml:"max_runtime"`
+	MaxOutputBytes        int64             `toml:"max_output_bytes"`
+	AuditLevel            string            `toml:"audit_level"`
+	EnforcementConfidence string            `toml:"enforcement_confidence"`
+	KnownGaps             []string          `toml:"known_gaps"`
+	ShellPolicy           ShellPolicyConfig `toml:"shell_policy"`
+}
+
+type ShellPolicyConfig struct {
+	Mode            string              `toml:"mode"`
+	AllowedCommands map[string][]string `toml:"allowed_commands"`
+	DeniedPatterns  []string            `toml:"denied_patterns"`
+	Windows         ShellOSPolicyConfig `toml:"windows"`
+	Darwin          ShellOSPolicyConfig `toml:"darwin"`
+	Linux           ShellOSPolicyConfig `toml:"linux"`
+}
+
+type ShellOSPolicyConfig struct {
+	AllowedCommands []string `toml:"allowed_commands"`
 }
 
 type RunnerConfig struct {
@@ -206,8 +232,8 @@ func (c *Config) ApplyDefaults(configDir string) error {
 	for name, runner := range c.Runners {
 		if runner.DefaultProfile == "" {
 			// Default to a profile this config actually defines, or Validate (and
-			// later preflight) rejects it. Prefer dev (the historical default), then
-			// readonly, then the lexically-first defined profile for determinism.
+			// later preflight) rejects it. Prefer query, then legacy safe profiles,
+			// then the lexically-first defined profile for determinism.
 			// Empty only when no profiles exist, which Validate reports separately.
 			runner.DefaultProfile = pickDefaultProfile(c.Profiles)
 		}
@@ -216,16 +242,47 @@ func (c *Config) ApplyDefaults(configDir string) error {
 		}
 		c.Runners[name] = runner
 	}
+	for name, prof := range c.Profiles {
+		prof.Capabilities = profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims)
+		if len(prof.Claims) == 0 {
+			prof.Claims = append([]string(nil), prof.Capabilities...)
+		}
+		if prof.Writes == "" {
+			if containsString(prof.Capabilities, profiledefs.CapEditRepo) || containsString(prof.Capabilities, profiledefs.CapExecuteInRepo) {
+				prof.Writes = profiledefs.WritesRepoOnly
+			} else {
+				prof.Writes = profiledefs.WritesDeny
+			}
+		}
+		if prof.Shell == "" {
+			if containsString(prof.Capabilities, profiledefs.CapExecuteInRepo) || containsString(prof.Capabilities, profiledefs.CapExecuteRepoCommands) {
+				prof.Shell = profiledefs.ShellAllow
+			} else {
+				prof.Shell = profiledefs.ShellDeny
+			}
+		}
+		if prof.AuditLevel == "" {
+			prof.AuditLevel = "normal"
+		}
+		if prof.EnforcementConfidence == "" {
+			if prof.Runner == profiledefs.RunnerProbe {
+				prof.EnforcementConfidence = "high"
+			} else {
+				prof.EnforcementConfidence = "medium"
+			}
+		}
+		c.Profiles[name] = prof
+	}
 	return nil
 }
 
 // pickDefaultProfile chooses a runner's default profile from the defined profiles
-// when the config omits default_profile. It prefers the conventional safe defaults
-// (dev, then readonly), then falls back to the lexically-first defined profile so
+// when the config omits default_profile. It prefers query, then legacy safe
+// defaults, then falls back to the lexically-first defined profile so
 // the choice is deterministic regardless of map iteration order. Returns "" only
 // when no profiles are defined, which Validate reports as its own error.
 func pickDefaultProfile(profiles map[string]ProfileConfig) string {
-	for _, preferred := range []string{"dev", "readonly"} {
+	for _, preferred := range []string{"query", "readonly", "dev"} {
 		if _, ok := profiles[preferred]; ok {
 			return preferred
 		}
@@ -274,12 +331,15 @@ func (c *Config) Validate() error {
 	if len(c.Runners) == 0 {
 		return errors.New("at least one runner is required")
 	}
-	for name, profile := range c.Profiles {
-		if profile.Runner == "" {
+	for name, prof := range c.Profiles {
+		if prof.Runner == "" {
 			return fmt.Errorf("profiles.%s.runner is required", name)
 		}
-		if _, ok := c.Runners[profile.Runner]; !ok {
-			return fmt.Errorf("profiles.%s references unknown runner %q", name, profile.Runner)
+		if _, ok := c.Runners[prof.Runner]; !ok {
+			return fmt.Errorf("profiles.%s references unknown runner %q", name, prof.Runner)
+		}
+		if err := profiledefs.ValidateSemantics(name, prof.Runner, prof.Capabilities, prof.Writes, prof.Shell, prof.Network, prof.GitPush, prof.RequireExplicit, prof.EnforcementConfidence); err != nil {
+			return err
 		}
 	}
 	for name, runner := range c.Runners {
@@ -296,6 +356,15 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func ExpandPath(path string) (string, error) {

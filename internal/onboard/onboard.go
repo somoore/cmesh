@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"cmesh/internal/config"
 	tsid "cmesh/internal/identity/tailscale"
 	"cmesh/internal/mesh/schema"
+	profiledefs "cmesh/internal/profile"
 )
 
 type Machine struct {
@@ -220,13 +222,18 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	if role != "origin" && role != "worker" && role != "both" {
 		return "", fmt.Errorf("role must be origin, worker, or both")
 	}
-	runnerName, runnerCommand := chooseRunner(opts.Runner, runners)
-	if runnerName == "" {
-		return "", errors.New("no supported runner found; install Claude Code or Codex, or pass --runner")
-	}
 	cwds := append([]string(nil), opts.AllowedCWDs...)
 	if len(cwds) == 0 {
 		cwds = SuggestedCWDs()
+	}
+	profiles := opts.Profiles
+	if len(profiles) == 0 {
+		profiles = []string{profiledefs.Query}
+	}
+	runnerName, runnerCommand := chooseRunner(opts.Runner, runners)
+	needsAgent := profilesNeedAgent(profiles)
+	if needsAgent && runnerName == "" {
+		return "", errors.New("agent-backed profiles require Claude Code or Codex; install one or choose query-only")
 	}
 	allowedPeers := append([]string(nil), opts.AllowedPeers...)
 	selectedPeers := selectPeers(opts.PeerNames, peers)
@@ -248,10 +255,6 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	}
 	outboundPeers := dropGlobMetachars(peerNames(selectedPeers))
 	profileAllowedPeers := profilePeerScope(role, allowedPeers, outboundPeers)
-	profiles := opts.Profiles
-	if len(profiles) == 0 {
-		profiles = []string{"readonly", "dev"}
-	}
 	nodeName := cleanName(firstNonEmpty(machine.Name, "cmesh-node"))
 	nodeID := firstNonEmpty(machine.NodeID, nodeName)
 	hostToken := strings.TrimSpace(opts.HostToken)
@@ -287,34 +290,54 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	}
 	writeArray(&b, "denied_profiles", []string{"network", "interactive", "git_push"})
 	writeBool(&b, "allow_subdelegation", false)
-	for _, profile := range profiles {
-		switch profile {
-		case "readonly":
-			writeProfile(&b, "readonly", runnerName, []string{"read_files"}, nil, false, false, false, false, "30m")
-		case "dev":
-			writeProfile(&b, "dev", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands"}, nil, false, false, false, false, "2h")
+	runnersToWrite := map[string][]string{}
+	for _, profileName := range profiles {
+		switch profileName {
+		case profiledefs.Query:
+			writeProfile(&b, profiledefs.Query, profiledefs.RunnerProbe, "Deterministic read-only machine queries. No shell, no writes.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapRepoStatus}, nil, false, false, false, "deny", "deny", false, false, "30s", 65536, "normal", "high")
+			runnersToWrite[profiledefs.RunnerProbe] = []string{"builtin"}
+		case profiledefs.QueryNetwork:
+			writeProfile(&b, profiledefs.QueryNetwork, profiledefs.RunnerProbe, "Deterministic read-only queries plus bounded network checks.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapRepoStatus, profiledefs.CapNetworkCheck}, nil, true, false, false, "deny", "deny", true, false, "30s", 65536, "loud", "high")
+			runnersToWrite[profiledefs.RunnerProbe] = []string{"builtin"}
+		case profiledefs.QueryShell:
+			writeProfile(&b, profiledefs.QueryShell, profiledefs.RunnerShell, "Allowlisted read-oriented diagnostics. No writes.", []string{"query"}, []string{profiledefs.CapShellReadonly, profiledefs.CapServiceStatus, profiledefs.CapProcessList, profiledefs.CapLogTail}, nil, true, false, false, "deny", "allowlisted", false, false, "30s", 65536, "loud", "medium")
+			writeShellPolicy(&b, profiledefs.QueryShell)
+			runnersToWrite[profiledefs.RunnerShell] = shellRunnerCommand()
+		case profiledefs.ReadonlyAgent:
+			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
+			runnersToWrite[runnerName] = runnerCommand
+		case profiledefs.LegacyReadonly:
+			writeProfile(&b, profiledefs.LegacyReadonly, runnerName, "Agent-assisted read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
+			runnersToWrite[runnerName] = runnerCommand
+		case profiledefs.RepoDev, profiledefs.LegacyDev:
+			writeProfile(&b, profiledefs.RepoDev, runnerName, "Agent-assisted repo-local edits and test commands inside allowed cwd.", []string{"build", "modify"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo}, profileAllowedPeers, true, true, false, "repo_only", "allow", false, false, "2h", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
+		case profiledefs.DesktopControl:
+			writeProfile(&b, profiledefs.DesktopControl, runnerName, "High-risk desktop/session control profile.", []string{"desktop"}, []string{profiledefs.CapReadFiles, profiledefs.CapDesktopControl, profiledefs.CapDesktopInteraction}, profileAllowedPeers, true, true, false, "allow", "allow", true, false, "30m", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
+		case profiledefs.SystemChange:
+			writeProfile(&b, profiledefs.SystemChange, runnerName, "High-risk system/service/package changes profile.", []string{"system"}, []string{profiledefs.CapReadFiles, profiledefs.CapSystemChange, profiledefs.CapLaunchProcesses}, profileAllowedPeers, true, true, false, "allow", "allow", true, false, "30m", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
 		case "network":
-			writeProfile(&b, "network", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "network"}, profileAllowedPeers, true, false, true, false, "2h")
+			writeProfile(&b, "network", runnerName, "Agent-assisted repo work with network access.", []string{"build", "modify"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo, profiledefs.CapNetworkCheck}, profileAllowedPeers, true, true, false, "repo_only", "allow", true, false, "2h", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
 		case "interactive":
-			writeProfile(&b, "interactive", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "network", "launch_processes", "desktop_interaction"}, profileAllowedPeers, true, false, true, false, "30m")
+			writeProfile(&b, "interactive", runnerName, "High-risk desktop/session control profile.", []string{"desktop"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo, profiledefs.CapNetworkCheck, profiledefs.CapDesktopControl}, profileAllowedPeers, true, true, false, "allow", "allow", true, false, "30m", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
 		case "git_push":
-			writeProfile(&b, "git_push", runnerName, []string{"read_files", "edit_repo", "execute_repo_commands", "git_push"}, profileAllowedPeers, true, false, false, true, "2h")
+			writeProfile(&b, "git_push", runnerName, "High-risk repo profile that can push git branches.", []string{"modify"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo, profiledefs.CapGitPush}, profileAllowedPeers, true, true, false, "repo_only", "allow", false, true, "2h", 1<<20, "loud", "medium")
+			runnersToWrite[runnerName] = runnerCommand
 		}
 	}
-	writeSection(&b, "runners."+runnerName)
-	writeArray(&b, "command", runnerCommand)
-	// default_profile must name a profile this node actually exposes, or preflight
-	// fails ("profile_unavailable"). Prefer dev when exposed (the historical default),
-	// otherwise fall back to the first exposed profile. profiles is non-empty here.
-	defaultProfile := profiles[0]
-	for _, p := range profiles {
-		if p == "dev" {
-			defaultProfile = "dev"
-			break
+	for runName, command := range runnersToWrite {
+		if runName == "" {
+			continue
 		}
+		writeSection(&b, "runners."+runName)
+		writeArray(&b, "command", command)
+		writeKV(&b, "default_profile", defaultProfileForRunner(runName, profiles))
+		writeInt(&b, "concurrency", 1)
 	}
-	writeKV(&b, "default_profile", defaultProfile)
-	writeInt(&b, "concurrency", 1)
 	writeSection(&b, "gateway")
 	writeKV(&b, "host_token", hostToken)
 	for _, peer := range selectedPeers {
@@ -402,6 +425,54 @@ func chooseRunner(wanted string, runners []RunnerStatus) (string, []string) {
 		return "codex", []string{"codex"}
 	}
 	return "", nil
+}
+
+func profilesNeedAgent(profiles []string) bool {
+	for _, name := range profiles {
+		switch name {
+		case profiledefs.Query, profiledefs.QueryNetwork, profiledefs.QueryShell:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func shellRunnerCommand() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"powershell"}
+	}
+	return []string{"sh"}
+}
+
+func defaultProfileForRunner(runnerName string, profiles []string) string {
+	if runnerName == profiledefs.RunnerProbe {
+		for _, preferred := range []string{profiledefs.Query, profiledefs.QueryNetwork} {
+			for _, name := range profiles {
+				if name == preferred {
+					return preferred
+				}
+			}
+		}
+		return profiledefs.Query
+	}
+	if runnerName == profiledefs.RunnerShell {
+		return profiledefs.QueryShell
+	}
+	for _, preferred := range []string{profiledefs.RepoDev, profiledefs.LegacyReadonly, "network", "interactive", "git_push"} {
+		for _, name := range profiles {
+			if name == preferred || (preferred == profiledefs.RepoDev && name == profiledefs.LegacyDev) {
+				return preferred
+			}
+		}
+	}
+	for _, name := range profiles {
+		if name != profiledefs.Query {
+			return name
+		}
+	}
+	return profiledefs.Query
 }
 
 func selectPeers(names []string, peers []PeerCandidate) []PeerCandidate {
@@ -549,20 +620,52 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw[:]), nil
 }
 
-func writeProfile(b *strings.Builder, name, runner string, claims, allowedPeers []string, requireExplicit, bare, network, gitPush bool, maxRuntime string) {
+func writeProfile(b *strings.Builder, name, runner, description string, intents, capabilities, allowedPeers []string, requireExplicit, requireLease, bare bool, writes, shell string, network, gitPush bool, maxRuntime string, maxOutputBytes int64, auditLevel, confidence string) {
 	writeSection(b, "profiles."+name)
+	writeKV(b, "description", description)
 	writeKV(b, "runner", runner)
-	writeArray(b, "claims", claims)
+	writeArray(b, "intents", intents)
+	writeArray(b, "capabilities", capabilities)
+	writeArray(b, "claims", capabilities)
 	if len(allowedPeers) > 0 {
 		writeArray(b, "allowed_peers", allowedPeers)
 	}
 	if requireExplicit {
 		writeBool(b, "require_explicit", true)
 	}
+	if requireLease {
+		writeBool(b, "require_lease", true)
+	}
 	writeBool(b, "bare", bare)
+	writeKV(b, "writes", writes)
+	writeKV(b, "shell", shell)
 	writeBool(b, "network", network)
 	writeBool(b, "git_push", gitPush)
 	writeKV(b, "max_runtime", maxRuntime)
+	if maxOutputBytes > 0 {
+		writeInt64(b, "max_output_bytes", maxOutputBytes)
+	}
+	writeKV(b, "audit_level", auditLevel)
+	writeKV(b, "enforcement_confidence", confidence)
+}
+
+func writeShellPolicy(b *strings.Builder, profileName string) {
+	tmpl, ok := profiledefs.TemplateByName(profileName)
+	if !ok || tmpl.ShellPolicy.Mode == "" {
+		return
+	}
+	writeSection(b, "profiles."+profileName+".shell_policy")
+	writeKV(b, "mode", tmpl.ShellPolicy.Mode)
+	writeArray(b, "denied_patterns", tmpl.ShellPolicy.DeniedPatterns)
+	keys := make([]string, 0, len(tmpl.ShellPolicy.AllowedCommands))
+	for osName := range tmpl.ShellPolicy.AllowedCommands {
+		keys = append(keys, osName)
+	}
+	sort.Strings(keys)
+	for _, osName := range keys {
+		writeSection(b, "profiles."+profileName+".shell_policy."+osName)
+		writeArray(b, "allowed_commands", tmpl.ShellPolicy.AllowedCommands[osName])
+	}
 }
 
 func writeSection(b *strings.Builder, section string) {
@@ -583,6 +686,13 @@ func writeKV(b *strings.Builder, key, value string) {
 }
 
 func writeInt(b *strings.Builder, key string, value int) {
+	b.WriteString(key)
+	b.WriteString(" = ")
+	b.WriteString(fmt.Sprintf("%d", value))
+	b.WriteByte('\n')
+}
+
+func writeInt64(b *strings.Builder, key string, value int64) {
 	b.WriteString(key)
 	b.WriteString(" = ")
 	b.WriteString(fmt.Sprintf("%d", value))

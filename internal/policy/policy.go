@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"cmesh/internal/config"
+	profiledefs "cmesh/internal/profile"
 )
 
 type Decision struct {
@@ -18,21 +19,31 @@ type Decision struct {
 	RequestedProfile string   `json:"requested_profile,omitempty"`
 	EffectiveProfile string   `json:"effective_profile,omitempty"`
 	Claims           []string `json:"claims,omitempty"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	Intents          []string `json:"intents,omitempty"`
+	Writes           string   `json:"writes,omitempty"`
+	Shell            string   `json:"shell,omitempty"`
+	Network          bool     `json:"network"`
+	AuditLevel       string   `json:"audit_level,omitempty"`
+	NormalizedCWD    string   `json:"normalized_cwd,omitempty"`
 }
 
 type TaskIntent struct {
-	PeerName      string
-	PeerNodeID    string
-	PeerStableID  string
-	PeerTags      []string
-	CWD           string
-	Runner        string
-	Profile       string
-	HopCount      int
-	Chain         []string
-	OriginNodeID  string
-	AllowDirty    bool
-	Subdelegation bool
+	PeerName         string
+	PeerNodeID       string
+	PeerStableID     string
+	PeerTags         []string
+	CWD              string
+	Runner           string
+	Profile          string
+	HopCount         int
+	Chain            []string
+	OriginNodeID     string
+	AllowDirty       bool
+	Subdelegation    bool
+	TaskKind         string
+	Capability       string
+	ProfileContextID string
 }
 
 type Engine struct {
@@ -60,6 +71,7 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 	if !pathAllowed(cwd, e.cfg.Policy.AllowedCWDs) {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
+	intent.CWD = cwd
 	return e.checkProfile(intent)
 }
 
@@ -123,11 +135,45 @@ func (e *Engine) checkProfile(intent TaskIntent) Decision {
 	if profile.RequireExplicit && !explicit {
 		return denied("profile_denied", fmt.Sprintf("profile %q requires an explicit profile request", effective), requested, effective)
 	}
+	if profile.RequireLease && strings.TrimSpace(intent.ProfileContextID) == "" {
+		return denied("profile_denied", fmt.Sprintf("profile %q requires an active lease", effective), requested, effective)
+	}
+	capabilities := profiledefs.NormalizeCapabilities(profile.Capabilities, profile.Claims)
+	if strings.TrimSpace(intent.Capability) != "" && !contains(capabilities, intent.Capability) {
+		return denied("profile_denied", fmt.Sprintf("profile %q does not grant capability %q", effective, intent.Capability), requested, effective)
+	}
+	if intent.TaskKind == "query" {
+		if profile.Writes != profiledefs.WritesDeny {
+			return denied("profile_denied", fmt.Sprintf("query task requires writes=deny on profile %q", effective), requested, effective)
+		}
+		switch profile.Runner {
+		case profiledefs.RunnerProbe:
+			if profile.Shell != profiledefs.ShellDeny {
+				return denied("profile_denied", fmt.Sprintf("probe query task requires shell=deny on profile %q", effective), requested, effective)
+			}
+		case profiledefs.RunnerShell:
+			if profile.Shell != profiledefs.ShellAllowlisted {
+				return denied("profile_denied", fmt.Sprintf("shell query task requires shell=allowlisted on profile %q", effective), requested, effective)
+			}
+			if !contains(capabilities, profiledefs.CapShellReadonly) {
+				return denied("profile_denied", fmt.Sprintf("shell query profile %q must grant shell_readonly", effective), requested, effective)
+			}
+		default:
+			return denied("profile_denied", fmt.Sprintf("query task requires probe or shell runner, got %q", profile.Runner), requested, effective)
+		}
+	}
 	return Decision{
 		Allowed:          true,
 		RequestedProfile: requested,
 		EffectiveProfile: effective,
-		Claims:           append([]string(nil), profile.Claims...),
+		Claims:           append([]string(nil), capabilities...),
+		Capabilities:     append([]string(nil), capabilities...),
+		Intents:          append([]string(nil), profile.Intents...),
+		Writes:           profile.Writes,
+		Shell:            profile.Shell,
+		Network:          profile.Network,
+		AuditLevel:       profile.AuditLevel,
+		NormalizedCWD:    intent.CWD,
 	}
 }
 

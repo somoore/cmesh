@@ -17,6 +17,7 @@ import (
 	meshrpc "cmesh/internal/mesh/rpc"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/onboard"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/service"
 	"cmesh/internal/task"
 )
@@ -109,7 +110,8 @@ func onboardingStatus(ctx context.Context) ToolResponse {
 
 type configureNodeRequest struct {
 	initOptionsRequest
-	Confirmed bool `json:"confirmed,omitempty"`
+	Confirmed               bool                                 `json:"confirmed,omitempty"`
+	ProfileAcknowledgements []profiledefs.ProfileAcknowledgement `json:"profile_acknowledgements,omitempty"`
 }
 
 // configureNode wraps GenerateConfig+WriteConfig+ValidateConfig. It auto-fills
@@ -143,12 +145,16 @@ func configureNode(ctx context.Context, args json.RawMessage) ToolResponse {
 			"message":               "Call configure_node again with confirmed=true to write this node's cmesh config.",
 			"path":                  path,
 		}
+		addProfileGuidance(result, opts, req.ProfileAcknowledgements)
 		if genErr != nil {
 			result["preview_error"] = genErr.Error()
 		} else {
 			result["preview_toml"] = body
 		}
 		return ToolResponse{OK: true, Result: result}
+	}
+	if problems := profiledefs.AcknowledgementProblems(selectedProfiles(opts), req.ProfileAcknowledgements); len(problems) > 0 {
+		return failure("profile_acknowledgement_required", strings.Join(problems, "; "))
 	}
 	if genErr != nil {
 		return failure("suggest_config_failed", genErr.Error())
@@ -462,18 +468,23 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	report.Reachable = true
 	report.Forward["reachable"] = true
 	report.Forward["node_name"] = firstNonEmpty(hello.NodeName, hello.NodeID)
+	smokeProfile := "readonly"
+	if helloSupportsProfile(hello, profiledefs.Query) {
+		smokeProfile = profiledefs.Query
+	}
+	report.Forward["profile"] = smokeProfile
 
 	const smokeExpected = "cmesh smoke ok"
 	// Leave CWD empty: the forward task runs on the REMOTE worker, which self-
 	// selects a cwd its own allowed_cwds accepts (keyed off the "cmesh-wizard-smoke"
 	// origin session). We can't know a path that exists on the remote — especially
 	// cross-OS — so the worker, which enforces the policy, picks it.
-	createResp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
+	createReq := schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-wizard-smoke",
 		Prompt:          "Reply with exactly: " + smokeExpected,
 		CWD:             "",
-		Profile:         "readonly",
+		Profile:         smokeProfile,
 		TimeoutSeconds:  60,
 		Wait:            true,
 		Provenance: schema.Provenance{
@@ -482,7 +493,13 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 			DelegationChain: []string{cfg.Node.ID},
 			HopCount:        0,
 		},
-	})
+	}
+	if smokeProfile == profiledefs.Query {
+		createReq.TaskKind = "query"
+		createReq.Query = &schema.QueryRequest{Kind: profiledefs.CapSystemInfo}
+		createReq.Prompt = ""
+	}
+	createResp, err := client.CreateTask(ctx, createReq)
 	if err != nil {
 		report.Forward["task_ok"] = false
 		report.Detail = "forward task failed: " + err.Error()
@@ -498,7 +515,7 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	// asks us to run it), and runPeerSmokeToCaller defaults an empty cwd to a path
 	// the worker's own policy accepts. Sending "~" here would force a cwd our own
 	// allowed_cwds may reject.
-	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{Profile: "readonly", TimeoutSeconds: 60})
+	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{Profile: smokeProfile, TimeoutSeconds: 60})
 	if err != nil {
 		report.Reverse["ok"] = false
 		report.Detail = "reverse smoke failed: " + err.Error()
@@ -523,6 +540,17 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 		report.Detail = "bidirectional smoke did not pass in both directions"
 	}
 	return report
+}
+
+func helloSupportsProfile(hello schema.HelloResponse, profile string) bool {
+	for _, runner := range hello.Runners {
+		for _, candidate := range runner.Profiles {
+			if candidate == profile {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func selectPeerCandidate(name string, peers []onboard.PeerCandidate) (onboard.PeerCandidate, bool) {
