@@ -450,6 +450,8 @@ func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
 	if strings.TrimSpace(rec.CWD) == "" {
 		t.Fatalf("expected a self-selected cwd on the smoke record, got empty")
 	}
+	waitForTerminalTask(t, server, "task-smoke-empty-cwd")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-smoke-empty-cwd")
 }
 
 // TestCreateTaskNonSmokeEmptyCWDNotSelfSelected proves the self-select is gated to
