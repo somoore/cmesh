@@ -51,8 +51,17 @@ func detectClaudeInstalled() (Agent, bool) {
 	return Agent{ID: "claude-code", Name: "Claude Code", Found: true, Detail: "cmesh MCP registered"}, true
 }
 
+// claudeScopes are every Claude Code MCP scope cmesh can be registered in. The
+// stdio setup server is installed at user scope; register_gateway adds the HTTP
+// gateway entry at local (project) scope. `claude mcp get` finds the server in
+// ANY scope, but `claude mcp remove` is scope-specific, so an uninstaller that
+// only removes one scope leaves the others behind (and a re-run loops forever
+// "detecting" a server it cannot remove). We therefore remove from every scope.
+var claudeScopes = []string{"user", "local", "project"}
+
 // claudeHasCmesh reports whether the cmesh MCP server is registered with Claude
-// Code. `claude mcp get cmesh` exits 0 when present and non-zero when absent.
+// Code in any scope. `claude mcp get cmesh` exits 0 when present and non-zero
+// when absent.
 func claudeHasCmesh(claude string) bool {
 	return exec.Command(claude, "mcp", "get", ServerName).Run() == nil
 }
@@ -89,14 +98,20 @@ func uninstallClaude(agent Agent) Result {
 	if !claudeHasCmesh(claude) {
 		return Result{Agent: agent, OK: true, Detail: "not registered"}
 	}
-	cmd := exec.Command(claude, "mcp", "remove", "--scope", "user", ServerName)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		detail := strings.TrimSpace(string(out))
-		if detail == "" {
-			detail = err.Error()
-		}
-		return Result{Agent: agent, Detail: detail}
+	// Sweep every scope cmesh can live in (the stdio setup server installs at
+	// user scope; register_gateway adds the HTTP gateway at local/project scope).
+	// `claude mcp remove --scope <s>` exits non-zero when cmesh is absent in that
+	// scope, so we IGNORE per-scope errors here and let the post-sweep `get` —
+	// which is NOT scope-filtered and is the one probe we know works — be the
+	// single source of truth for whether anything remains.
+	for _, scope := range claudeScopes {
+		_ = exec.Command(claude, "mcp", "remove", "--scope", scope, ServerName).Run()
+	}
+	if claudeHasCmesh(claude) {
+		// A real removal failure (or a scope we did not enumerate) left cmesh
+		// registered. Surface it rather than reporting a false success — this
+		// preserves correctness even if Claude adds a new scope later.
+		return Result{Agent: agent, Detail: "cmesh is still registered with Claude Code after removing user/local/project scopes"}
 	}
 	return Result{Agent: agent, OK: true, Detail: "removed from Claude Code"}
 }

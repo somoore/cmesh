@@ -110,32 +110,101 @@ func TestUninstallClaudeIdempotentWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestUninstallClaudeRemovesWhenPresent(t *testing.T) {
+// writeStatefulClaudeStub installs a fake `claude` that models per-scope
+// registration. cmesh is "present" (mcp get exits 0) as long as ANY scope marker
+// file exists; `mcp remove --scope <s>` deletes that scope's marker (and exits
+// non-zero when the marker is already gone, mirroring the real CLI). This lets a
+// test prove the sweep removes EVERY scope and that the post-sweep `get` arbiter
+// is honored. presentScopes are the scopes that start registered.
+func writeStatefulClaudeStub(t *testing.T, dir string, presentScopes ...string) string {
+	t.Helper()
+	logPath := filepath.Join(dir, "claude.log")
+	for _, s := range presentScopes {
+		if err := os.WriteFile(filepath.Join(dir, "scope-"+s), []byte("x"), 0o644); err != nil {
+			t.Fatalf("seed scope %s: %v", s, err)
+		}
+	}
+	// $0's dir holds the scope-<name> markers; resolve it portably. Set a real
+	// PATH first: tests run with PATH=<dir> (so LookPath finds this stub), but the
+	// script itself needs rm/printf/etc., which are not all shell builtins.
+	script := "#!/bin/sh\n" +
+		"PATH=/bin:/usr/bin:$PATH\n" +
+		"d=" + shellQuote(dir) + "\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
+		"  for m in \"$d\"/scope-*; do [ -e \"$m\" ] && exit 0; done; exit 1\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"remove\" ]; then\n" +
+		// args: mcp remove --scope <scope> cmesh
+		"  s=\"$4\"\n" +
+		"  if [ -e \"$d/scope-$s\" ]; then rm -f \"$d/scope-$s\"; exit 0; fi\n" +
+		"  echo \"No $s-scoped MCP server found with name: cmesh\" >&2; exit 1\n" +
+		"fi\n" +
+		"exit 0\n"
+	claudePath := filepath.Join(dir, "claude")
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return logPath
+}
+
+func TestUninstallClaudeRemovesAllScopes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake shell command uses POSIX sh")
 	}
 	dir := t.TempDir()
-	logPath := filepath.Join(dir, "claude.log")
-	claudePath := filepath.Join(dir, "claude")
-	// `mcp get` exits 0 (present); everything else logs and exits 0.
-	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then exit 0; fi\n" +
-		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
-		"exit 0\n"
-	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
+	// cmesh registered in BOTH user and local — the real-world case the old
+	// user-only removal missed.
+	logPath := writeStatefulClaudeStub(t, dir, "user", "local")
 	t.Setenv("PATH", dir)
+
 	res := uninstallClaude(Agent{ID: "claude-code", Name: "Claude Code"})
 	if !res.OK {
-		t.Fatalf("uninstallClaude failed: %+v", res)
+		t.Fatalf("uninstallClaude should succeed once every scope is cleared: %+v", res)
 	}
 	body, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if !strings.Contains(string(body), "mcp remove --scope user cmesh") {
-		t.Fatalf("remove command missing from log:\n%s", body)
+	log := string(body)
+	// Every scope must have been swept (user AND local at minimum).
+	for _, scope := range []string{"user", "local", "project"} {
+		if !strings.Contains(log, "mcp remove --scope "+scope+" cmesh") {
+			t.Fatalf("scope %q was not swept:\n%s", scope, log)
+		}
+	}
+	// Markers gone => the post-sweep arbiter `get` saw nothing.
+	for _, scope := range []string{"user", "local"} {
+		if _, err := os.Stat(filepath.Join(dir, "scope-"+scope)); !os.IsNotExist(err) {
+			t.Fatalf("scope %q marker should be removed", scope)
+		}
+	}
+}
+
+func TestUninstallClaudeReportsFailureWhenScopeRemains(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "claude.log")
+	// A stub where remove always claims success but never actually clears
+	// registration (mcp get stays 0). The post-sweep arbiter must catch this and
+	// report failure rather than a false success.
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then exit 0; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	res := uninstallClaude(Agent{ID: "claude-code", Name: "Claude Code"})
+	if res.OK {
+		t.Fatalf("uninstallClaude must NOT report success while cmesh is still registered: %+v", res)
+	}
+	if !strings.Contains(res.Detail, "still registered") {
+		t.Fatalf("failure detail should explain cmesh is still registered, got %q", res.Detail)
 	}
 }
 

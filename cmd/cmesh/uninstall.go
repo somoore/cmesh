@@ -111,6 +111,12 @@ func maybeRemoveService(report *cleanupReport) {
 		report.left = append(report.left, "OS service")
 		return
 	}
+	// svcpkg.Remove() STOPS the daemon as part of removal (launchctl bootout /
+	// systemctl stop / sc.exe stop) before deleting the unit, so a
+	// service-managed daemon is torn down here. We deliberately do NOT hunt for
+	// and kill a foreground `cmesh up` started by hand: matching processes by
+	// name risks killing an unrelated PID, which an uninstaller must never do.
+	// A hand-started daemon is the user's own process to stop.
 	if err := svcpkg.Remove(); err != nil {
 		printCheck("service remove", false, err.Error())
 		report.left = append(report.left, "OS service ("+err.Error()+")")
