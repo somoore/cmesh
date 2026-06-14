@@ -72,6 +72,17 @@ type QueryPeerRequest struct {
 	TaskToken      string         `json:"task_token,omitempty"`
 }
 
+type InspectPeerRequest struct {
+	Peer           string `json:"peer"`
+	Prompt         string `json:"prompt"`
+	CWD            string `json:"cwd,omitempty"`
+	Profile        string `json:"profile,omitempty"`
+	TimeoutSeconds int    `json:"timeout_s,omitempty"`
+	Wait           bool   `json:"wait,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	TaskToken      string `json:"task_token,omitempty"`
+}
+
 type ProfileUseRequest struct {
 	Peer                   string                             `json:"peer"`
 	Profile                string                             `json:"profile"`
@@ -163,6 +174,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
 	mux.HandleFunc("POST /tools/delegate", g.delegate)
 	mux.HandleFunc("POST /tools/query_peer", g.queryPeer)
+	mux.HandleFunc("POST /tools/inspect_peer", g.inspectPeer)
 	mux.HandleFunc("POST /tools/profile_guide", g.profileGuide)
 	mux.HandleFunc("POST /tools/profile_recommend", g.profileRecommend)
 	mux.HandleFunc("POST /tools/profile_generate", g.profileGenerate)
@@ -490,6 +502,12 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		return g.queryPeerCall(ctx, req)
+	case "inspect_peer":
+		var req InspectPeerRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.inspectPeerCall(ctx, req)
 	case "list_tasks":
 		var req struct {
 			Limit int `json:"limit,omitempty"`
@@ -635,6 +653,19 @@ func (g *Gateway) queryPeer(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
+func (g *Gateway) inspectPeer(w http.ResponseWriter, r *http.Request) {
+	var req InspectPeerRequest
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	resp, err := g.inspectPeerCall(r.Context(), req)
+	if err != nil {
+		writeTool(w, resp)
+		return
+	}
+	writeTool(w, resp)
+}
+
 func (g *Gateway) profileGuide(w http.ResponseWriter, _ *http.Request) {
 	writeTool(w, ToolResponse{OK: true, Result: profiledefs.Guide()})
 }
@@ -742,6 +773,12 @@ func (g *Gateway) queryPeerCall(ctx context.Context, req QueryPeerRequest) (Tool
 		return toolFailure(task.ErrorWorkerFailed, "kind is required")
 	}
 	profileName := firstNonEmpty(req.Profile, profiledefs.Query)
+	if !g.profileGrantsCapability(profileName, kind) {
+		if routedProfile := g.typedProfileForCapability(kind, profileName); routedProfile != "" {
+			return g.routeQueryToTypedProfile(ctx, req, profileName, routedProfile, kind)
+		}
+		return g.fallbackInspectForUnsupportedQuery(ctx, req, profileName, kind)
+	}
 	prompt := "Run cmesh deterministic query: " + kind
 	key := req.IdempotencyKey
 	if key == "" {
@@ -760,6 +797,118 @@ func (g *Gateway) queryPeerCall(ctx context.Context, req QueryPeerRequest) (Tool
 		TaskKind:       "query",
 		Query:          &schema.QueryRequest{Kind: kind, Params: req.Params, CWD: req.CWD},
 	})
+}
+
+func (g *Gateway) profileGrantsCapability(profileName, capability string) bool {
+	profileName = profiledefs.CanonicalProfile(profileName)
+	prof, ok := g.Config.Profiles[profileName]
+	if !ok {
+		return false
+	}
+	return contains(profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), capability)
+}
+
+func (g *Gateway) typedProfileForCapability(capability, currentProfile string) string {
+	candidates := map[string][]string{
+		profiledefs.CapNetworkCheck:  {profiledefs.QueryNetwork},
+		profiledefs.CapShellReadonly: {profiledefs.QueryShell},
+		profiledefs.CapServiceStatus: {profiledefs.QueryShell},
+		profiledefs.CapProcessList:   {profiledefs.QueryShell},
+		profiledefs.CapLogTail:       {profiledefs.QueryShell},
+	}
+	for _, profileName := range candidates[capability] {
+		if profileName == currentProfile {
+			continue
+		}
+		if g.profileGrantsCapability(profileName, capability) {
+			return profileName
+		}
+	}
+	return ""
+}
+
+func (g *Gateway) routeQueryToTypedProfile(ctx context.Context, req QueryPeerRequest, requestedProfile, routedProfile, kind string) (ToolResponse, error) {
+	req.Profile = routedProfile
+	resp, err := g.queryPeerCall(ctx, req)
+	if !resp.OK || resp.Error != nil {
+		return resp, err
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"routed_from":       "query_peer",
+		"reason":            "requested profile did not grant this typed query; used the least-powerful configured typed query profile instead",
+		"requested_kind":    kind,
+		"requested_profile": requestedProfile,
+		"used_tool":         "query_peer",
+		"used_profile":      routedProfile,
+		"result":            resp.Result,
+	}}, err
+}
+
+func (g *Gateway) fallbackInspectForUnsupportedQuery(ctx context.Context, req QueryPeerRequest, profileName, kind string) (ToolResponse, error) {
+	prompt := "Answer this read-only system inspection request. The caller attempted query_peer kind " + strconv.Quote(kind) + ", but it is not a typed native probe in profile " + strconv.Quote(profileName) + "."
+	if len(req.Params) > 0 {
+		paramsJSON, _ := json.Marshal(req.Params)
+		prompt += "\nQuery params JSON: " + string(paramsJSON)
+	}
+	if strings.TrimSpace(req.CWD) != "" {
+		prompt += "\nRequested cwd: " + req.CWD
+	}
+	if _, ok := g.Config.Profiles[profiledefs.ReadonlyAgent]; !ok {
+		return ToolResponse{OK: false, Error: &ToolError{
+			Code:   task.ErrorProfileUnavailable,
+			Detail: "profile " + strconv.Quote(profileName) + " does not grant capability " + strconv.Quote(kind) + "; this is an open-ended read-only question, so use inspect_peer with readonly-agent. Configure it first with profile_configure {\"template\":\"readonly-agent\",\"runner\":\"codex\",\"peer\":\"" + req.Peer + "\",\"confirmed\":true}, then retry.",
+		}}, nil
+	}
+	resp, err := g.inspectPeerCall(ctx, InspectPeerRequest{
+		Peer:           req.Peer,
+		Prompt:         prompt,
+		CWD:            req.CWD,
+		TimeoutSeconds: req.TimeoutSeconds,
+		Wait:           req.Wait,
+		IdempotencyKey: req.IdempotencyKey,
+		TaskToken:      req.TaskToken,
+	})
+	if !resp.OK || resp.Error != nil {
+		return resp, err
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"routed_from":       "query_peer",
+		"reason":            "unsupported native query kind; used readonly-agent inspection instead",
+		"requested_kind":    kind,
+		"requested_profile": profileName,
+		"used_tool":         "inspect_peer",
+		"used_profile":      profiledefs.ReadonlyAgent,
+		"result":            resp.Result,
+	}}, err
+}
+
+func (g *Gateway) inspectPeerCall(ctx context.Context, req InspectPeerRequest) (ToolResponse, error) {
+	if strings.TrimSpace(req.Prompt) == "" {
+		return toolFailure(task.ErrorWorkerFailed, "prompt is required")
+	}
+	profileName := strings.TrimSpace(req.Profile)
+	if profileName == "" {
+		profileName = profiledefs.ReadonlyAgent
+	}
+	resp, err := g.delegateCall(ctx, DelegateRequest{
+		Peer:           req.Peer,
+		Prompt:         readOnlyInspectionPrompt(req.Prompt),
+		CWD:            req.CWD,
+		Profile:        profileName,
+		TimeoutSeconds: req.TimeoutSeconds,
+		Wait:           req.Wait,
+		IdempotencyKey: req.IdempotencyKey,
+		TaskToken:      req.TaskToken,
+		TaskKind:       "inspect",
+	})
+	if resp.Error != nil && resp.Error.Code == task.ErrorProfileUnavailable && profileName == profiledefs.ReadonlyAgent {
+		resp.Error.Detail += `; configure the read-only inspection profile with profile_configure {"template":"readonly-agent","runner":"codex","peer":"` + req.Peer + `","confirmed":true}, then retry inspect_peer`
+	}
+	return resp, err
+}
+
+func readOnlyInspectionPrompt(prompt string) string {
+	return "Read-only inspection request. Answer the user's question using only read-only inspection. Do not write, delete, modify files, change system state, install software, start/stop services, or push network changes. If the request requires a write or system change, refuse that part and explain the read-only alternative.\n\nUser request:\n" + strings.TrimSpace(prompt)
 }
 
 func profileGenerateCall(req ProfileGenerateRequest) (ToolResponse, error) {
@@ -2050,7 +2199,7 @@ func mcpTools() []map[string]any {
 			"name":        "profile_recommend",
 			"description": "Recommend the least-powerful cmesh profile for a user intent and explain consent, TTL, safer alternative, and first tool to use.",
 			"inputSchema": objectSchema(map[string]any{
-				"intent": stringSchema("User intent, such as check disk, read files, edit code, restart service, or inspect repo."),
+				"intent": stringSchema("User intent, such as check disk, query battery, inventory installed apps, open a file, edit code, restart service, or inspect repo."),
 			}, []string{"intent"}),
 		},
 		{
@@ -2089,7 +2238,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "profile_current",
-			"description": "Show the local gateway's active profile context. Empty delegate profile requests resolve from this context and default to query.",
+			"description": "Show the local gateway's active profile context. Empty delegate profile requests resolve from this context and default to query; use inspect_peer for open-ended read-only questions instead of inventing query_peer kinds.",
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{
@@ -2194,7 +2343,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "delegate",
-			"description": "Delegate a coding-agent task to one or more configured peers. Single-peer calls return a task_id immediately unless wait is true; fan-out calls return a peer-keyed result map.",
+			"description": "Delegate a coding-agent task to one or more configured peers. Use inspect_peer for open-ended read-only system/file questions; use delegate for repo work or explicit profile workflows. Single-peer calls return a task_id immediately unless wait is true; fan-out calls return a peer-keyed result map.",
 			"inputSchema": objectSchema(map[string]any{
 				"peer":              stringSchema("Configured peer name."),
 				"peers":             arraySchema(stringSchema("Configured peer names for fan-out. Results are returned as a peer-keyed map.")),
@@ -2215,11 +2364,25 @@ func mcpTools() []map[string]any {
 			}, []string{"prompt", "cwd"}),
 		},
 		{
-			"name":        "query_peer",
-			"description": "Run a deterministic cmesh query on a peer through the probe runner. This is the safe query-only path: no shell, no writes, no arbitrary agent execution.",
+			"name":        "inspect_peer",
+			"description": "Ask an open-ended read-only question about a peer using readonly-agent. Use this for battery remaining, app inventory, last reboot time, opening/summarizing files, and other read-only system or file inspection that is not one of query_peer's typed native probes. Denies write/delete/system-change requests by prompt contract and profile policy.",
 			"inputSchema": objectSchema(map[string]any{
 				"peer":            stringSchema("Configured peer name."),
-				"kind":            stringSchema("Query kind such as disk_info, system_info, or repo_status."),
+				"prompt":          stringSchema("Natural-language read-only inspection request."),
+				"cwd":             stringSchema("Optional worker cwd. If omitted, a readonly-agent worker may self-select an allowed cwd."),
+				"profile":         stringSchema("Optional read-only inspection profile. Defaults to readonly-agent."),
+				"timeout_s":       map[string]any{"type": "integer", "minimum": 1},
+				"wait":            map[string]any{"type": "boolean"},
+				"idempotency_key": stringSchema("Optional stable key for retry-safe inspection dispatch."),
+				"task_token":      stringSchema("Optional CMESH_TASK_TOKEN for worker subdelegation."),
+			}, []string{"peer", "prompt"}),
+		},
+		{
+			"name":        "query_peer",
+			"description": "Run a deterministic typed cmesh query on a peer through the probe runner. Supported native kinds are disk_info, system_info, repo_status, and any explicitly configured probe capability such as network_check. For battery remaining, app inventory, last reboot time, opening files, or other open-ended read-only questions, use inspect_peer instead. Write requests under query-only must be denied.",
+			"inputSchema": objectSchema(map[string]any{
+				"peer":            stringSchema("Configured peer name."),
+				"kind":            stringSchema("Typed native query kind such as disk_info, system_info, repo_status, or network_check. Do not invent arbitrary kinds; use inspect_peer for open-ended read-only questions."),
 				"params":          map[string]any{"type": "object", "additionalProperties": true},
 				"cwd":             stringSchema("Optional worker cwd. Required for repo_status; otherwise the worker selects an allowed cwd when omitted."),
 				"profile":         stringSchema("Optional profile. Defaults to query."),

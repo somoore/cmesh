@@ -72,7 +72,7 @@ type ProfileAcknowledgement struct {
 func Guide() GuideResult {
 	return GuideResult{
 		DefaultRecommendation: Query,
-		DecisionRule:          "Start with query. Move to query-network only for bounded network checks, query-shell only for allowlisted read diagnostics, readonly-agent only for arbitrary file inspection, and repo-dev or higher only after explicit consent with a TTL and cwd scope.",
+		DecisionRule:          "Start with query for typed native probes. Move to readonly-agent for open-ended read-only system or file questions, query-network only for bounded network checks, query-shell only for allowlisted diagnostics, and repo-dev or higher only after explicit consent with a TTL and cwd scope.",
 		FirstTool:             "query_peer",
 		Profiles: []GuideItem{
 			guideItem(Query),
@@ -116,10 +116,10 @@ func Recommend(intent string) Recommendation {
 		profile = RepoDev
 		why = "Repo edits, builds, and test commands require repo-dev because it allows repo-scoped writes and shell execution."
 		firstTool = "profile_use then delegate"
-	case anyContains(text, "read file", "read files", "inspect files", "search files", "open file", "arbitrary file", "summarize code", "review code"):
+	case anyContains(text, "read file", "read files", "inspect files", "search files", "open file", "open ", "arbitrary file", "summarize code", "review code", "battery", "app inventory", "installed app", "install date", "last reboot", "rebooted", "uptime", "anything"):
 		profile = ReadonlyAgent
-		why = "Arbitrary file inspection needs an agent-backed read-only profile; it still denies writes/deletes through the runner sandbox."
-		firstTool = "delegate"
+		why = "Open-ended read-only inspection needs an agent-backed read-only profile; it denies writes/deletes while allowing the worker to inspect system facts and files through the runner sandbox."
+		firstTool = "inspect_peer"
 	case anyContains(text, "logs", "service status", "process", "processes", "event log", "psdrive"):
 		profile = QueryShell
 		why = "Read-oriented OS diagnostics need query-shell because it allows only specific allowlisted commands and still denies writes."
@@ -259,17 +259,18 @@ func guideItem(name string) GuideItem {
 		return GuideItem{
 			Name:                  ReadonlyAgent,
 			DisplayName:           "Readonly agent",
-			Description:           "Agent-assisted arbitrary file inspection. Reads are allowed; writes/deletes are denied by the runner sandbox.",
-			BestFor:               []string{"read files", "inspect source", "summarize code"},
+			Description:           "Agent-assisted open-ended read-only inspection. Reads are allowed; writes/deletes are denied by the runner sandbox.",
+			BestFor:               []string{"battery and uptime questions", "installed app inventory", "read/open files", "inspect source", "summarize code"},
 			AvoidWhen:             []string{"deterministic query output is enough", "you need edits, builds, or tests"},
 			EnforcementStrength:   StrengthHarnessDependent,
-			Powers:                PowerSummary{Reads: "files permitted by runner and OS account", Writes: "denied", Deletes: "denied", Shell: "denied by profile; runner may expose read-only tool attempts", Network: "runner-dependent, not granted by cmesh profile", ProcessDesktopSystem: "none"},
+			Powers:                PowerSummary{Reads: "system facts and files permitted by runner and OS account", Writes: "denied", Deletes: "denied", Shell: "read-only shell through harness sandbox", Network: "runner-dependent, not granted by cmesh profile", ProcessDesktopSystem: "read-only inspection only"},
 			Capabilities:          []string{CapReadFiles},
 			Writes:                WritesDeny,
-			Shell:                 ShellDeny,
+			Shell:                 ShellAllow,
 			SaferAlternative:      Query,
+			RecommendedFirstTool:  "inspect_peer",
 			KnownGaps:             []string{"read-only enforcement depends on the selected harness honoring its sandbox"},
-			PlainLanguageContract: "Can inspect files through an agent; cannot write/delete files or intentionally run shell through cmesh. Prefer query for deterministic no-agent inspection.",
+			PlainLanguageContract: "Can answer open-ended read-only system and file questions through an agent; cannot write/delete files. Prefer query_peer for deterministic no-agent probes.",
 		}
 	case RepoDev:
 		return GuideItem{
@@ -339,7 +340,7 @@ func guideItem(name string) GuideItem {
 			DisplayName:           "Query only",
 			Description:           "Deterministic read-only machine queries. No shell, no writes, no arbitrary agent.",
 			BestFor:               []string{"disk info", "system info", "repo status", "safe first look at a machine"},
-			AvoidWhen:             []string{"you need arbitrary file reads", "you need edits, builds, tests, or shell commands"},
+			AvoidWhen:             []string{"you need open-ended system or file inspection", "you need edits, builds, tests, or shell commands"},
 			EnforcementStrength:   StrengthNative,
 			Powers:                PowerSummary{Reads: "bounded machine/repo facts", Writes: "none", Deletes: "none", Shell: "none", Network: "none", ProcessDesktopSystem: "none"},
 			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapRepoStatus},

@@ -162,6 +162,7 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 - Keep `allowed_peers` explicit.
 - Keep `allowed_cwds` as narrow as practical.
 - Prefer `query` for inspection tasks that fit deterministic cmesh probes.
+- Use `readonly-agent` for open-ended read-only system or file inspection that does not fit a typed probe; it must still deny writes.
 - Avoid network and git push claims unless a workflow truly needs them.
 - Keep defaults strict: generated configs expose `query`; add `repo-dev` only when repo edits are needed.
 - Add `query-network`, `query-shell`, `desktop-control`, `system-change`, `network`, `interactive`, or `git_push` profiles only as explicit opt-ins.

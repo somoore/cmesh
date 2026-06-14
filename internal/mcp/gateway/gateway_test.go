@@ -502,6 +502,99 @@ func TestGatewayProfileGuideAndRecommendTools(t *testing.T) {
 	if !strings.Contains(string(body), `"profile":"readonly-agent"`) || !strings.Contains(string(body), `"safer_alternative":"query"`) {
 		t.Fatalf("read files recommendation did not pick readonly-agent with query alternative: %s", body)
 	}
+
+	rec, err = g.callTool(context.Background(), "profile_recommend", []byte(`{"intent":"query battery remaining"}`))
+	if err != nil || !rec.OK {
+		t.Fatalf("profile_recommend battery resp=%+v err=%v", rec, err)
+	}
+	body, _ = json.Marshal(rec.Result)
+	if !strings.Contains(string(body), `"profile":"readonly-agent"`) || !strings.Contains(string(body), `"first_tool":"inspect_peer"`) {
+		t.Fatalf("battery recommendation did not pick inspect_peer readonly-agent: %s", body)
+	}
+}
+
+func TestInspectPeerUsesReadonlyAgent(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	g.Config.Profiles[profiledefs.ReadonlyAgent] = config.ProfileConfig{
+		Runner:       "fake",
+		Capabilities: []string{profiledefs.CapReadFiles},
+		Claims:       []string{profiledefs.CapReadFiles},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellAllow,
+	}
+	g.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: profiledefs.ReadonlyAgent}
+
+	var got schema.CreateTaskRequest
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-inspect", State: task.StateQueued})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
+
+	resp, err := g.inspectPeerCall(ctx, InspectPeerRequest{Peer: "worker", Prompt: "how much battery is left?", Wait: true})
+	if err != nil || !resp.OK {
+		t.Fatalf("inspectPeerCall resp=%+v err=%v", resp, err)
+	}
+	if got.Profile != profiledefs.ReadonlyAgent || got.TaskKind != "inspect" {
+		t.Fatalf("inspect request profile/task kind = %q/%q", got.Profile, got.TaskKind)
+	}
+	if !strings.Contains(got.Prompt, "Read-only inspection request") || !strings.Contains(got.Prompt, "how much battery is left?") {
+		t.Fatalf("inspect prompt did not include read-only wrapper and user ask: %q", got.Prompt)
+	}
+}
+
+func TestUnsupportedQueryPeerFallsForwardToInspectPeer(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	g.Config.Profiles[profiledefs.Query] = config.ProfileConfig{
+		Runner:       profiledefs.RunnerProbe,
+		Capabilities: []string{profiledefs.CapDiskInfo},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellDeny,
+	}
+	g.Config.Profiles[profiledefs.ReadonlyAgent] = config.ProfileConfig{
+		Runner:       "fake",
+		Capabilities: []string{profiledefs.CapReadFiles},
+		Claims:       []string{profiledefs.CapReadFiles},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellAllow,
+	}
+	g.Config.Runners[profiledefs.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profiledefs.Query}
+	g.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: profiledefs.ReadonlyAgent}
+
+	var got schema.CreateTaskRequest
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-battery", State: task.StateQueued})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
+
+	resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: "battery_info", Wait: true})
+	if err != nil || !resp.OK {
+		t.Fatalf("queryPeerCall fallback resp=%+v err=%v", resp, err)
+	}
+	result := resp.Result.(map[string]any)
+	if result["routed_from"] != "query_peer" || result["used_tool"] != "inspect_peer" || result["used_profile"] != profiledefs.ReadonlyAgent {
+		t.Fatalf("fallback metadata = %+v", result)
+	}
+	if got.Profile != profiledefs.ReadonlyAgent || got.TaskKind != "inspect" || !strings.Contains(got.Prompt, "battery_info") {
+		t.Fatalf("fallback request = %+v", got)
+	}
 }
 
 func TestProfileDescribeReturnsConfiguredContract(t *testing.T) {
