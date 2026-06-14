@@ -116,6 +116,25 @@ func (c *Client) PeerSmoke(ctx context.Context, req schema.PeerSmokeRequest) (sc
 	return out, c.do(ctx, http.MethodPost, "/v1/peer-smoke", req, &out)
 }
 
+func (c *Client) IssueProfileLease(ctx context.Context, req schema.ProfileLeaseRequest) (schema.ProfileLease, error) {
+	var out schema.ProfileLease
+	return out, c.do(ctx, http.MethodPost, "/v1/profile-leases", req, &out)
+}
+
+func (c *Client) ListProfileLeases(ctx context.Context, includeExpired bool) (schema.ProfileLeaseListResponse, error) {
+	var out schema.ProfileLeaseListResponse
+	path := "/v1/profile-leases"
+	if includeExpired {
+		path += "?include_expired=true"
+	}
+	return out, c.do(ctx, http.MethodGet, path, nil, &out)
+}
+
+func (c *Client) RevokeProfileLease(ctx context.Context, leaseID string) (schema.ProfileLease, error) {
+	var out schema.ProfileLease
+	return out, c.do(ctx, http.MethodDelete, "/v1/profile-leases/"+url.PathEscape(leaseID), nil, &out)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
 	var body *bytes.Reader
 	if in != nil {

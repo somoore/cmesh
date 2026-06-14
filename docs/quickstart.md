@@ -109,7 +109,7 @@ The profile menu, from least to most authority:
 - `query` - deterministic cmesh probes, no shell, no writes, no arbitrary agent execution. This is the default.
 - `query-network` - deterministic probes plus bounded typed network checks.
 - `query-shell` - allowlisted read-oriented diagnostic commands, no writes.
-- `readonly-agent` / `readonly` - agent-assisted open-ended read-only system and file inspection; prefer `query` when a typed probe is enough.
+- `readonly-agent` / `readonly` - agent-assisted open-ended read-only system and file inspection with shell denied by default; prefer `query` when a typed probe is enough.
 - `repo-dev` / `dev` - agent edits/tests inside allowed cwd, explicit and lease-gated.
 - `desktop-control`, `system-change`, `network`, `interactive`, `git_push` - elevated profiles for desktop/session, system, network, or push authority.
 

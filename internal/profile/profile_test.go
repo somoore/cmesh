@@ -57,6 +57,9 @@ func TestBuiltinsIncludeRecommendedTemplateCatalog(t *testing.T) {
 		if err := ValidateSemantics(tmpl.Name, runner, tmpl.Capabilities, tmpl.Writes, tmpl.Shell, tmpl.Network, tmpl.GitPush, tmpl.RequireExplicit, tmpl.EnforcementConfidence); err != nil {
 			t.Fatalf("template %q should validate: %v", name, err)
 		}
+		if name == ReadonlyAgent && tmpl.Shell != ShellDeny {
+			t.Fatalf("readonly-agent shell = %q, want deny", tmpl.Shell)
+		}
 	}
 }
 

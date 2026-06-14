@@ -215,7 +215,17 @@ func TestRequireLeaseProfileNeedsActiveContextID(t *testing.T) {
 		t.Fatalf("repo-dev without lease should be denied, got %+v", denied)
 	}
 
-	allowed := New(cfg).CheckInbound(TaskIntent{
+	fakeID := NewWithLeaseValidator(cfg, fakeLeaseValidator{err: os.ErrNotExist}).CheckInbound(TaskIntent{
+		PeerName:         "mac-studio",
+		CWD:              root,
+		Profile:          "repo-dev",
+		ProfileContextID: "lease_fake",
+	})
+	if fakeID.Allowed || fakeID.Code != "profile_denied" {
+		t.Fatalf("repo-dev with fake lease should be denied, got %+v", fakeID)
+	}
+
+	allowed := NewWithLeaseValidator(cfg, fakeLeaseValidator{}).CheckInbound(TaskIntent{
 		PeerName:         "mac-studio",
 		CWD:              root,
 		Profile:          "repo-dev",
@@ -224,6 +234,14 @@ func TestRequireLeaseProfileNeedsActiveContextID(t *testing.T) {
 	if !allowed.Allowed {
 		t.Fatalf("repo-dev with lease should be allowed, got %+v", allowed)
 	}
+}
+
+type fakeLeaseValidator struct {
+	err error
+}
+
+func (f fakeLeaseValidator) ValidateProfileLease(req LeaseValidation) (LeaseValidation, error) {
+	return req, f.err
 }
 
 // TestSmokeCWDResolvesToAnAllowedExistingDir proves SmokeCWD returns a concrete

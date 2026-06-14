@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -138,8 +139,21 @@ func (r *Runner) runProbe(ctx context.Context, kind string, params map[string]an
 		}, nil
 	case profile.CapDiskInfo:
 		path := stringParam(params, "path")
-		if path == "" {
-			path = stringParam(params, "volume")
+		volume := stringParam(params, "volume")
+		if path != "" && volume != "" {
+			return nil, runner.E(runner.ErrWorkerFailed, "probe disk_info", fmt.Errorf("use either params.path or params.volume, not both"))
+		}
+		if path != "" {
+			if err := validateDiskPath(path); err != nil {
+				return nil, runner.E(runner.ErrWorkerFailed, "probe disk_info", err)
+			}
+		}
+		if path == "" && volume != "" {
+			var err error
+			path, err = normalizeDiskVolume(volume)
+			if err != nil {
+				return nil, runner.E(runner.ErrWorkerFailed, "probe disk_info", err)
+			}
 		}
 		if path == "" {
 			path = cwd
@@ -210,6 +224,46 @@ func (r *Runner) runProbe(ctx context.Context, kind string, params map[string]an
 	default:
 		return nil, runner.E(runner.ErrProfileDenied, "probe query", fmt.Errorf("unsupported query kind %q", kind))
 	}
+}
+
+func validateDiskPath(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		if strings.HasPrefix(path, `\\`) || strings.HasPrefix(path, `//`) {
+			return fmt.Errorf("params.path must be a local path; UNC/network paths require an explicit network-capable profile")
+		}
+		return nil
+	}
+	if strings.HasPrefix(path, "//") {
+		return fmt.Errorf("params.path must be local")
+	}
+	return nil
+}
+
+func normalizeDiskVolume(volume string) (string, error) {
+	volume = strings.TrimSpace(volume)
+	if volume == "" {
+		return "", nil
+	}
+	if runtime.GOOS == "windows" {
+		if len(volume) == 2 && volume[1] == ':' && ((volume[0] >= 'A' && volume[0] <= 'Z') || (volume[0] >= 'a' && volume[0] <= 'z')) {
+			return volume + `\`, nil
+		}
+		if len(volume) == 3 && volume[1] == ':' && (volume[2] == '\\' || volume[2] == '/') {
+			return volume, nil
+		}
+		return "", fmt.Errorf("params.volume must use a local drive like C:")
+	}
+	if !filepath.IsAbs(volume) {
+		return "", fmt.Errorf("params.volume must be an absolute local mount path")
+	}
+	if strings.HasPrefix(volume, "//") {
+		return "", fmt.Errorf("params.volume must be local")
+	}
+	return volume, nil
 }
 
 func encode(value any) string {

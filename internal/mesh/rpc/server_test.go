@@ -542,6 +542,76 @@ func TestCreateTaskNonSmokeEmptyCWDNotSelfSelected(t *testing.T) {
 	}
 }
 
+func TestWorkerIssuedLeaseRequiredForLeasedProfile(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	server.Config.Profiles["repo-dev"] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Claims:          []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Writes:          profiledefs.WritesRepoOnly,
+		Shell:           profiledefs.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+		MaxRuntime:      config.Duration{Duration: time.Minute},
+	}
+	server.Policy = policy.NewWithLeaseValidator(server.Config, server.Leases)
+
+	leaseBody := `{"profile":"repo-dev","cwd":` + strconv.Quote(root) + `,"ttl_s":1800}`
+	leaseReq := httptest.NewRequest(http.MethodPost, "/v1/profile-leases", strings.NewReader(leaseBody))
+	leaseReq.RemoteAddr = "100.64.0.1:12345"
+	leaseRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(leaseRes, leaseReq)
+	if leaseRes.Code != http.StatusCreated {
+		t.Fatalf("lease status = %d, body = %s", leaseRes.Code, leaseRes.Body.String())
+	}
+	var lease schema.ProfileLease
+	if err := json.Unmarshal(leaseRes.Body.Bytes(), &lease); err != nil {
+		t.Fatalf("decode lease: %v", err)
+	}
+	if lease.LeaseID == "" || lease.Profile != "repo-dev" || lease.CWD == "" {
+		t.Fatalf("lease = %+v", lease)
+	}
+
+	create := func(id, leaseID string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{
+			"task_id":` + strconv.Quote(id) + `,
+			"origin_node_id":"mac-studio",
+			"origin_session_id":"session-lease",
+			"prompt":"run tests",
+			"cwd":` + strconv.Quote(root) + `,
+			"runner":"fake",
+			"profile":"repo-dev",
+			"profile_context_id":` + strconv.Quote(leaseID) + `,
+			"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-lease"}
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(body))
+		req.RemoteAddr = "100.64.0.1:12345"
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		return res
+	}
+
+	fake := create("task-fake-lease", "lease_fake")
+	if fake.Code != http.StatusForbidden {
+		t.Fatalf("fake lease status = %d, body = %s", fake.Code, fake.Body.String())
+	}
+	var fakeResp schema.CreateTaskResponse
+	if err := json.Unmarshal(fake.Body.Bytes(), &fakeResp); err != nil {
+		t.Fatalf("decode fake response: %v", err)
+	}
+	if fakeResp.Error == nil || !strings.Contains(fakeResp.Error.Detail, "was not issued by this worker") {
+		t.Fatalf("fake lease error = %+v", fakeResp.Error)
+	}
+
+	ok := create("task-real-lease", lease.LeaseID)
+	if ok.Code != http.StatusAccepted {
+		t.Fatalf("real lease status = %d, body = %s", ok.Code, ok.Body.String())
+	}
+	waitForTerminalTask(t, server, "task-real-lease")
+}
+
 func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
 	root := t.TempDir()
 	run := &countingRunner{}
@@ -1000,11 +1070,13 @@ func newTestServer(t *testing.T, root string, run runner.Runner) *Server {
 	if err := reg.Register(run); err != nil {
 		t.Fatalf("Register runner: %v", err)
 	}
+	leases := policy.NewProfileLeaseStore(cfg.Node.DataDir)
 	return &Server{
 		Config:   cfg,
 		Store:    st,
 		Audit:    audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), cfg.Node.ID),
-		Policy:   policy.New(cfg),
+		Policy:   policy.NewWithLeaseValidator(cfg, leases),
+		Leases:   leases,
 		Identity: fakeIdentity{},
 		Runners:  reg,
 	}

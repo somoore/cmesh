@@ -156,3 +156,39 @@ func TestShellRunnerDeniesPatternBeforeExecution(t *testing.T) {
 		t.Fatalf("err = %v, want profile_denied", err)
 	}
 }
+
+func TestShellRunnerDeniesUnsafeAllowlistedCommandArgs(t *testing.T) {
+	tests := []struct {
+		goos string
+		argv []string
+	}{
+		{"windows", []string{"Get-EventLog", "-LogName", "System"}},
+		{"windows", []string{"Get-Service", "-ComputerName", "remote"}},
+		{"linux", []string{"journalctl", "-u", "cmesh"}},
+		{"linux", []string{"systemctl", "restart", "cmesh"}},
+		{"darwin", []string{"log", "stream"}},
+	}
+	for _, tc := range tests {
+		if err := validateCommandArgs(tc.goos, tc.argv); runner.CodeOf(err) != runner.ErrProfileDenied {
+			t.Fatalf("validateCommandArgs(%s, %#v) err=%v, want profile_denied", tc.goos, tc.argv, err)
+		}
+	}
+}
+
+func TestShellRunnerAllowsBoundedDiagnosticArgs(t *testing.T) {
+	tests := []struct {
+		goos string
+		argv []string
+	}{
+		{"windows", []string{"Get-EventLog", "-LogName", "System", "-Newest", "50"}},
+		{"windows", []string{"Get-Service", "-Name", "cmesh"}},
+		{"linux", []string{"journalctl", "-u", "cmesh", "-n", "50", "--no-pager"}},
+		{"linux", []string{"systemctl", "status", "cmesh", "--no-pager"}},
+		{"darwin", []string{"log", "show", "--last", "5m", "--style", "compact"}},
+	}
+	for _, tc := range tests {
+		if err := validateCommandArgs(tc.goos, tc.argv); err != nil {
+			t.Fatalf("validateCommandArgs(%s, %#v) err=%v, want nil", tc.goos, tc.argv, err)
+		}
+	}
+}

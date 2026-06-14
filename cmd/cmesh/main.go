@@ -325,7 +325,8 @@ func runDaemon(ctx context.Context, configPath string, preflight bool) error {
 	}
 	defer st.Close()
 	auditWriter := audit.NewWriter(cfg.Audit.Path, cfg.Node.ID)
-	policyEngine := policy.New(cfg)
+	leaseStore := policy.NewProfileLeaseStore(cfg.Node.DataDir)
+	policyEngine := policy.NewWithLeaseValidator(cfg, leaseStore)
 	registry, err := buildRunners(cfg)
 	if err != nil {
 		return err
@@ -347,7 +348,7 @@ func runDaemon(ctx context.Context, configPath string, preflight bool) error {
 	}
 	warnCleanup(cleanupRetainedTaskArtifacts(ctx, cfg, st))
 	resolver := tsid.NewResolver()
-	mesh := &meshrpc.Server{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine, Identity: resolver, Runners: registry}
+	mesh := &meshrpc.Server{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine, Leases: leaseStore, Identity: resolver, Runners: registry}
 	local := &gateway.Gateway{Config: cfg, ConfigPath: configPath, Store: st, Audit: auditWriter, Policy: policyEngine}
 	errCh := make(chan error, 2)
 	go func() { errCh <- mesh.ListenAndServe(ctx) }()
@@ -2095,7 +2096,8 @@ func cmdProfile(args []string) error {
 			return err
 		}
 		peerName, profileName := fs.Arg(0), fs.Arg(1)
-		if _, ok := cfg.Peers[peerName]; !ok {
+		peer, ok := cfg.Peers[peerName]
+		if !ok {
 			return fmt.Errorf("unknown peer %q", peerName)
 		}
 		prof, ok := cfg.Profiles[profileName]
@@ -2121,10 +2123,29 @@ func cmdProfile(args []string) error {
 		}
 		now := time.Now().UTC()
 		entry := cliProfilePeer{Profile: profileName, CWD: strings.TrimSpace(*cwd), Scope: "global", UpdatedAt: now}
-		if ttl > 0 {
+		if ttl > 0 && !prof.RequireLease {
 			entry.Scope = "session"
 			entry.ExpiresAt = now.Add(ttl)
-			entry.LeaseID = cliLeaseID(peerName, profileName, now)
+		}
+		if ttl > 0 && prof.RequireLease {
+			port := peer.Port
+			if port == 0 {
+				port = config.DefaultMeshPort
+			}
+			lease, err := meshrpc.NewClient("http://"+net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port))).IssueProfileLease(context.Background(), schema.ProfileLeaseRequest{
+				Profile:         profileName,
+				CWD:             strings.TrimSpace(*cwd),
+				TTLSeconds:      int64(ttl / time.Second),
+				Capabilities:    profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
+				OriginSessionID: "cli_profile_use",
+			})
+			if err != nil {
+				return err
+			}
+			entry.Scope = "worker_lease"
+			entry.CWD = strings.TrimSpace(lease.CWD)
+			entry.ExpiresAt = lease.ExpiresAt
+			entry.LeaseID = lease.LeaseID
 		}
 		ctxFile.Peers[peerName] = entry
 		ctxFile.UpdatedAt = now
@@ -2203,14 +2224,6 @@ func writeCLIProfileContext(cfg *config.Config, ctxFile cliProfileContext) error
 
 func profileContextPath(cfg *config.Config) string {
 	return filepath.Join(cfg.Node.DataDir, "profile-context.json")
-}
-
-func cliLeaseID(peer, profileName string, now time.Time) string {
-	sum := task.SHA256Hex([]byte(strings.Join([]string{peer, profileName, now.Format(time.RFC3339Nano)}, "\x00")))
-	if len(sum) > 24 {
-		sum = sum[:24]
-	}
-	return "lease_" + sum
 }
 
 func appendProfileToConfig(path string, tmpl profiledefs.Template, snippet string, force bool) error {

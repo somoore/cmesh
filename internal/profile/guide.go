@@ -259,18 +259,18 @@ func guideItem(name string) GuideItem {
 		return GuideItem{
 			Name:                  ReadonlyAgent,
 			DisplayName:           "Readonly agent",
-			Description:           "Agent-assisted open-ended read-only inspection. Reads are allowed; writes/deletes are denied by the runner sandbox.",
+			Description:           "Agent-assisted open-ended read-only inspection. Reads are allowed; writes, deletes, and shell are denied by default.",
 			BestFor:               []string{"battery and uptime questions", "installed app inventory", "read/open files", "inspect source", "summarize code"},
-			AvoidWhen:             []string{"deterministic query output is enough", "you need edits, builds, or tests"},
+			AvoidWhen:             []string{"deterministic query output is enough", "you need shell diagnostics, edits, builds, or tests"},
 			EnforcementStrength:   StrengthHarnessDependent,
-			Powers:                PowerSummary{Reads: "system facts and files permitted by runner and OS account", Writes: "denied", Deletes: "denied", Shell: "read-only shell through harness sandbox", Network: "runner-dependent, not granted by cmesh profile", ProcessDesktopSystem: "read-only inspection only"},
+			Powers:                PowerSummary{Reads: "system facts and files permitted by runner and OS account", Writes: "denied", Deletes: "denied", Shell: "denied", Network: "runner-dependent, not granted by cmesh profile", ProcessDesktopSystem: "read-only inspection only"},
 			Capabilities:          []string{CapReadFiles},
 			Writes:                WritesDeny,
-			Shell:                 ShellAllow,
+			Shell:                 ShellDeny,
 			SaferAlternative:      Query,
 			RecommendedFirstTool:  "inspect_peer",
-			KnownGaps:             []string{"read-only enforcement depends on the selected harness honoring its sandbox"},
-			PlainLanguageContract: "Can answer open-ended read-only system and file questions through an agent; cannot write/delete files. Prefer query_peer for deterministic no-agent probes.",
+			KnownGaps:             []string{"open-ended file read boundaries depend on the selected harness honoring its sandbox"},
+			PlainLanguageContract: "Can answer open-ended read-only system and file questions through an agent; cannot run shell, write, or delete files. Prefer query_peer for deterministic no-agent probes.",
 		}
 	case RepoDev:
 		return GuideItem{

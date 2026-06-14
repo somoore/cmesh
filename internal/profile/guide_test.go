@@ -19,8 +19,8 @@ func TestGuideIncludesEveryBuiltinProfile(t *testing.T) {
 			t.Fatalf("guide missing %q in %+v", want, guide.Profiles)
 		}
 	}
-	if seen[ReadonlyAgent].Powers.Writes != "denied" || seen[ReadonlyAgent].Powers.Deletes != "denied" {
-		t.Fatalf("readonly-agent must explicitly deny writes/deletes: %+v", seen[ReadonlyAgent].Powers)
+	if seen[ReadonlyAgent].Powers.Writes != "denied" || seen[ReadonlyAgent].Powers.Deletes != "denied" || seen[ReadonlyAgent].Shell != ShellDeny {
+		t.Fatalf("readonly-agent must explicitly deny writes/deletes/shell: %+v", seen[ReadonlyAgent])
 	}
 }
 

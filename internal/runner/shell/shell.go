@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -185,10 +187,150 @@ func validatePolicy(policy ShellPolicy, argv []string) error {
 	allowed := allowedCommandsForOS(policy, runtime.GOOS)
 	for _, candidate := range allowed {
 		if strings.EqualFold(candidate, argv[0]) {
-			return nil
+			return validateCommandArgs(runtime.GOOS, argv)
 		}
 	}
 	return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("command %q is not allowlisted for %s", argv[0], runtime.GOOS))
+}
+
+func validateCommandArgs(goos string, argv []string) error {
+	if len(argv) == 0 {
+		return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("empty command"))
+	}
+	cmd := strings.ToLower(filepath.Base(argv[0]))
+	args := argv[1:]
+	switch goos {
+	case "windows":
+		return validateWindowsArgs(cmd, args)
+	case "linux":
+		return validateLinuxArgs(cmd, args)
+	case "darwin":
+		return validateDarwinArgs(cmd, args)
+	default:
+		return nil
+	}
+}
+
+func validateWindowsArgs(cmd string, args []string) error {
+	switch cmd {
+	case "get-service":
+		return allowArgs(cmd, args, []string{"-name", "-displayname", "-dependentservices", "-requiredservices"})
+	case "get-process":
+		return allowArgs(cmd, args, []string{"-name", "-id"})
+	case "get-psdrive":
+		return allowArgs(cmd, args, []string{"-name", "-psprovider"})
+	case "get-eventlog":
+		if err := allowArgs(cmd, args, []string{"-logname", "-newest", "-source", "-entrytype"}); err != nil {
+			return err
+		}
+		return requireBoundedNewest(cmd, args, "-newest", 200)
+	default:
+		return nil
+	}
+}
+
+func validateLinuxArgs(cmd string, args []string) error {
+	switch cmd {
+	case "df":
+		return allowArgs(cmd, args, []string{"-h", "-k", "-p", "--human-readable", "--portability"})
+	case "uname":
+		return allowArgs(cmd, args, []string{"-a", "-s", "-r", "-m", "-n"})
+	case "ps":
+		return allowPSArgs(cmd, args)
+	case "systemctl":
+		return allowSystemctlArgs(cmd, args)
+	case "journalctl":
+		if err := allowArgs(cmd, args, []string{"-u", "-n", "--since", "--no-pager"}); err != nil {
+			return err
+		}
+		return requireBoundedNewest(cmd, args, "-n", 200)
+	default:
+		return nil
+	}
+}
+
+func validateDarwinArgs(cmd string, args []string) error {
+	switch cmd {
+	case "df":
+		return allowArgs(cmd, args, []string{"-h", "-k", "-p"})
+	case "uname":
+		return allowArgs(cmd, args, []string{"-a", "-s", "-r", "-m", "-n"})
+	case "sysctl":
+		return allowArgs(cmd, args, []string{"-n"})
+	case "ps":
+		return allowPSArgs(cmd, args)
+	case "log":
+		if len(args) == 0 || strings.ToLower(args[0]) != "show" {
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("log only allows the show subcommand"))
+		}
+		if err := allowArgs(cmd, args[1:], []string{"--last", "--predicate", "--style"}); err != nil {
+			return err
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func allowArgs(cmd string, args, allowedFlags []string) error {
+	allowed := map[string]struct{}{}
+	for _, flag := range allowedFlags {
+		allowed[strings.ToLower(flag)] = struct{}{}
+	}
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name := strings.ToLower(arg)
+		if idx := strings.Index(name, "="); idx >= 0 {
+			name = name[:idx]
+		}
+		if _, ok := allowed[name]; !ok {
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s argument %q is not allowed", cmd, arg))
+		}
+	}
+	return nil
+}
+
+func allowPSArgs(cmd string, args []string) error {
+	joined := strings.ToLower(strings.Join(args, " "))
+	if joined == "aux" || joined == "-ef" || joined == "-e -o pid,ppid,comm" || joined == "" {
+		return nil
+	}
+	return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s arguments must be empty, aux, -ef, or -e -o pid,ppid,comm", cmd))
+}
+
+func allowSystemctlArgs(cmd string, args []string) error {
+	if len(args) == 0 {
+		return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s requires a read-only subcommand", cmd))
+	}
+	switch strings.ToLower(args[0]) {
+	case "status", "is-active", "list-units", "list-unit-files":
+	default:
+		return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s subcommand %q is not allowed", cmd, args[0]))
+	}
+	return allowArgs(cmd, args[1:], []string{"--type", "--state", "--no-pager", "--plain"})
+}
+
+func requireBoundedNewest(cmd string, args []string, flag string, max int) error {
+	for i, arg := range args {
+		name := strings.ToLower(arg)
+		value := ""
+		if strings.HasPrefix(name, strings.ToLower(flag)+"=") {
+			value = strings.TrimPrefix(name, strings.ToLower(flag)+"=")
+		} else if name == strings.ToLower(flag) && i+1 < len(args) {
+			value = args[i+1]
+		}
+		if value == "" {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < 1 || n > max {
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s %s must be 1-%d", cmd, flag, max))
+		}
+		return nil
+	}
+	return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s requires bounded %s 1-%d", cmd, flag, max))
 }
 
 func shellExecArgv(argv []string) []string {

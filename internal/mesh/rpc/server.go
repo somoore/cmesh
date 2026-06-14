@@ -42,6 +42,7 @@ type Server struct {
 	Store    *store.Store
 	Audit    *audit.Writer
 	Policy   *policy.Engine
+	Leases   *policy.ProfileLeaseStore
 	Identity tsid.Provider
 	Runners  *runner.Registry
 
@@ -62,6 +63,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks/{task_id}/artifacts/{kind}", s.handleTaskArtifact)
 	mux.HandleFunc("POST /v1/tasks/{task_id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /v1/peer-smoke", s.handlePeerSmoke)
+	mux.HandleFunc("POST /v1/profile-leases", s.handleIssueProfileLease)
+	mux.HandleFunc("GET /v1/profile-leases", s.handleListProfileLeases)
+	mux.HandleFunc("DELETE /v1/profile-leases/{lease_id}", s.handleRevokeProfileLease)
 	return withSchemaVersion(mux)
 }
 
@@ -125,9 +129,156 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		StableID:       stableID,
 		SchemaVersions: []string{schema.Version},
 		Runners:        runners,
-		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status", "peer_smoke"},
+		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status", "peer_smoke", "profile_leases"},
 		ServerTime:     time.Now().UTC(),
 	})
+}
+
+func (s *Server) handleIssueProfileLease(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	body, err := readBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	var req schema.ProfileLeaseRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "invalid JSON: "+err.Error())
+		return
+	}
+	lease, err := s.issueProfileLease(r.Context(), identity, req)
+	if err != nil {
+		writeError(w, http.StatusForbidden, task.ErrorProfileDenied, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, lease)
+}
+
+func (s *Server) handleListProfileLeases(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	if _, ok := s.authenticate(w, r); !ok {
+		return
+	}
+	if s.Leases == nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, "profile lease store is not configured")
+		return
+	}
+	leases, err := s.Leases.List(r.URL.Query().Get("include_expired") == "true", time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, schema.ProfileLeaseListResponse{Leases: leases})
+}
+
+func (s *Server) handleRevokeProfileLease(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	if _, ok := s.authenticate(w, r); !ok {
+		return
+	}
+	if s.Leases == nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, "profile lease store is not configured")
+		return
+	}
+	lease, err := s.Leases.Revoke(r.PathValue("lease_id"), time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusNotFound, task.ErrorProfileDenied, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, lease)
+}
+
+func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, req schema.ProfileLeaseRequest) (schema.ProfileLease, error) {
+	if s.Leases == nil {
+		return schema.ProfileLease{}, errors.New("profile lease store is not configured")
+	}
+	profileName := strings.TrimSpace(req.Profile)
+	if profileName == "" {
+		return schema.ProfileLease{}, errors.New("profile is required")
+	}
+	prof, ok := s.Config.Profiles[profileName]
+	if !ok {
+		return schema.ProfileLease{}, fmt.Errorf("profile %q is not configured", profileName)
+	}
+	if !prof.RequireLease {
+		return schema.ProfileLease{}, fmt.Errorf("profile %q does not require a worker lease", profileName)
+	}
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if ttl <= 0 {
+		return schema.ProfileLease{}, errors.New("ttl_s must be positive")
+	}
+	if prof.Writes != profiledefs.WritesDeny && strings.TrimSpace(req.CWD) == "" {
+		return schema.ProfileLease{}, fmt.Errorf("profile %q requires cwd for lease scope", profileName)
+	}
+	normalizedCWD := strings.TrimSpace(req.CWD)
+	if normalizedCWD != "" {
+		normalized, err := policy.NormalizeCWD(req.CWD)
+		if err != nil {
+			return schema.ProfileLease{}, err
+		}
+		normalizedCWD = normalized
+	}
+	if err := s.validateLeaseRequest(identity, profileName, normalizedCWD); err != nil {
+		return schema.ProfileLease{}, err
+	}
+	lease, err := s.Leases.Issue(policy.LeaseValidation{
+		PeerName:     identity.NodeName,
+		PeerNodeID:   identity.NodeID,
+		PeerStableID: identity.StableID,
+		Profile:      profileName,
+		CWD:          normalizedCWD,
+		Capabilities: profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
+	}, ttl, time.Now().UTC())
+	if err != nil {
+		return schema.ProfileLease{}, err
+	}
+	s.record(context.Background(), audit.Event{
+		Type:           "profile.lease.issued",
+		PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+		OriginSession:  strings.TrimSpace(req.OriginSessionID),
+		Profile:        profileName,
+		PolicyDecision: "allowed",
+		Source:         "mesh_rpc",
+		Claims:         append([]string(nil), lease.Capabilities...),
+	})
+	return lease, nil
+}
+
+func (s *Server) validateLeaseRequest(identity tsid.Identity, profileName, cwd string) error {
+	cfgCopy := *s.Config
+	cfgCopy.Profiles = make(map[string]config.ProfileConfig, len(s.Config.Profiles))
+	for name, prof := range s.Config.Profiles {
+		cfgCopy.Profiles[name] = prof
+	}
+	prof := cfgCopy.Profiles[profileName]
+	prof.RequireLease = false
+	cfgCopy.Profiles[profileName] = prof
+	decision := policy.New(&cfgCopy).CheckInbound(policy.TaskIntent{
+		PeerName:     identity.NodeName,
+		PeerNodeID:   identity.NodeID,
+		PeerStableID: identity.StableID,
+		PeerTags:     append([]string(nil), identity.Tags...),
+		CWD:          cwd,
+		Profile:      profileName,
+		OriginNodeID: identity.NodeID,
+	})
+	if !decision.Allowed {
+		return errors.New(decision.Detail)
+	}
+	return nil
 }
 
 func (s *Server) handlePeerSmoke(w http.ResponseWriter, r *http.Request) {

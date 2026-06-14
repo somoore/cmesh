@@ -136,6 +136,31 @@ type PeerSmokeResponse struct {
 	Error          *Error               `json:"error,omitempty"`
 }
 
+type ProfileLeaseRequest struct {
+	Profile         string   `json:"profile"`
+	CWD             string   `json:"cwd,omitempty"`
+	TTLSeconds      int64    `json:"ttl_s"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	OriginSessionID string   `json:"origin_session_id,omitempty"`
+}
+
+type ProfileLease struct {
+	LeaseID        string    `json:"lease_id"`
+	OriginNodeID   string    `json:"origin_node_id"`
+	OriginStableID string    `json:"origin_stable_id,omitempty"`
+	OriginName     string    `json:"origin_name,omitempty"`
+	Profile        string    `json:"profile"`
+	CWD            string    `json:"cwd,omitempty"`
+	Capabilities   []string  `json:"capabilities,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	RevokedAt      time.Time `json:"revoked_at,omitempty"`
+}
+
+type ProfileLeaseListResponse struct {
+	Leases []ProfileLease `json:"leases"`
+}
+
 type CancelTaskRequest struct {
 	Reason string `json:"reason,omitempty"`
 }

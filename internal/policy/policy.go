@@ -47,11 +47,16 @@ type TaskIntent struct {
 }
 
 type Engine struct {
-	cfg *config.Config
+	cfg            *config.Config
+	leaseValidator LeaseValidator
 }
 
 func New(cfg *config.Config) *Engine {
 	return &Engine{cfg: cfg}
+}
+
+func NewWithLeaseValidator(cfg *config.Config, validator LeaseValidator) *Engine {
+	return &Engine{cfg: cfg, leaseValidator: validator}
 }
 
 func (e *Engine) CheckInbound(intent TaskIntent) Decision {
@@ -72,7 +77,7 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
 	intent.CWD = cwd
-	return e.checkProfile(intent)
+	return e.checkProfile(intent, true)
 }
 
 func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
@@ -92,10 +97,10 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 	if intent.HopCount > e.cfg.Policy.HopLimit {
 		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, e.cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	return e.checkProfile(intent)
+	return e.checkProfile(intent, false)
 }
 
-func (e *Engine) checkProfile(intent TaskIntent) Decision {
+func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 	requested := intent.Profile
 	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
@@ -135,8 +140,31 @@ func (e *Engine) checkProfile(intent TaskIntent) Decision {
 	if profile.RequireExplicit && !explicit {
 		return denied("profile_denied", fmt.Sprintf("profile %q requires an explicit profile request", effective), requested, effective)
 	}
-	if profile.RequireLease && strings.TrimSpace(intent.ProfileContextID) == "" {
-		return denied("profile_denied", fmt.Sprintf("profile %q requires an active lease", effective), requested, effective)
+	if profile.RequireLease {
+		if strings.TrimSpace(intent.ProfileContextID) == "" {
+			return denied("profile_denied", fmt.Sprintf("profile %q requires an active lease", effective), requested, effective)
+		}
+		if inbound {
+			if e.leaseValidator == nil {
+				return denied("profile_denied", fmt.Sprintf("profile %q requires a worker-issued lease", effective), requested, effective)
+			}
+			validated, err := e.leaseValidator.ValidateProfileLease(LeaseValidation{
+				LeaseID:      intent.ProfileContextID,
+				PeerName:     intent.PeerName,
+				PeerNodeID:   intent.PeerNodeID,
+				PeerStableID: intent.PeerStableID,
+				Profile:      effective,
+				CWD:          intent.CWD,
+				Capability:   intent.Capability,
+				Capabilities: profiledefs.NormalizeCapabilities(profile.Capabilities, profile.Claims),
+			})
+			if err != nil {
+				return denied("profile_denied", err.Error(), requested, effective)
+			}
+			if strings.TrimSpace(validated.EffectiveCWD) != "" {
+				intent.CWD = validated.EffectiveCWD
+			}
+		}
 	}
 	capabilities := profiledefs.NormalizeCapabilities(profile.Capabilities, profile.Claims)
 	if strings.TrimSpace(intent.Capability) != "" && !contains(capabilities, intent.Capability) {

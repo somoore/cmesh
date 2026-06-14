@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
@@ -293,6 +294,22 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 
 	var got schema.CreateTaskRequest
 	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/profile-leases", func(w http.ResponseWriter, r *http.Request) {
+		var leaseReq schema.ProfileLeaseRequest
+		if err := json.NewDecoder(r.Body).Decode(&leaseReq); err != nil {
+			t.Fatalf("decode lease: %v", err)
+		}
+		if leaseReq.Profile != "repo-dev" || leaseReq.CWD != cwd || leaseReq.TTLSeconds <= 0 {
+			t.Fatalf("lease request = %+v", leaseReq)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.ProfileLease{
+			LeaseID:   "lease_worker_1",
+			Profile:   "repo-dev",
+			CWD:       cwd,
+			ExpiresAt: time.Now().Add(30 * time.Minute),
+		})
+	})
 	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatalf("decode task: %v", err)
@@ -319,11 +336,11 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	if err != nil || !resp.OK {
 		t.Fatalf("delegate with active context resp=%+v err=%v", resp, err)
 	}
-	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID == "" || got.CWD != cwd {
+	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID != "lease_worker_1" || got.CWD != cwd {
 		t.Fatalf("delegated request did not inherit context: %+v", got)
 	}
 	local := resp.Result.(schema.CreateTaskResponse)
-	if local.RequestedProfile != "repo-dev" || local.ProfileSource != "active_context" || local.ProfileContextID == "" {
+	if local.RequestedProfile != "repo-dev" || local.ProfileSource != "active_context" || local.ProfileContextID != "lease_worker_1" {
 		t.Fatalf("local response missing profile metadata: %+v", local)
 	}
 
@@ -332,7 +349,7 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	if err != nil || !resp.OK {
 		t.Fatalf("delegate with explicit active profile resp=%+v err=%v", resp, err)
 	}
-	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID == "" || got.CWD != cwd {
+	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID != "lease_worker_1" || got.CWD != cwd {
 		t.Fatalf("explicit delegated request did not attach active lease: %+v", got)
 	}
 
@@ -421,6 +438,20 @@ port = 1
 	if _, ok := g.Config.Profiles["repo-dev"]; !ok {
 		t.Fatalf("gateway config did not reload repo-dev: %#v", g.Config.Profiles)
 	}
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/profile-leases", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.ProfileLease{
+			LeaseID:   "lease_after_configure",
+			Profile:   "repo-dev",
+			CWD:       root,
+			ExpiresAt: time.Now().Add(30 * time.Minute),
+		})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers["worker"] = config.PeerConfig{Name: "worker", NodeID: "worker-node", Address: host, Port: port}
 	ack := profiledefs.ProfileAcknowledgement{Profile: "repo-dev", Writes: profiledefs.WritesRepoOnly, Shell: profiledefs.ShellAllow, Network: false, TTL: "30m", AllowedCWDScope: root}
 	used, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: root, TTL: "30m", ProfileAcknowledgement: ack})
 	if !used.OK {
@@ -551,7 +582,7 @@ func TestInspectPeerUsesReadonlyAgent(t *testing.T) {
 	}
 }
 
-func TestUnsupportedQueryPeerFallsForwardToInspectPeer(t *testing.T) {
+func TestUnsupportedQueryPeerDeniesInsteadOfInspectFallback(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
 	g.Config.Profiles[profiledefs.Query] = config.ProfileConfig{
@@ -570,6 +601,30 @@ func TestUnsupportedQueryPeerFallsForwardToInspectPeer(t *testing.T) {
 	g.Config.Runners[profiledefs.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profiledefs.Query}
 	g.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: profiledefs.ReadonlyAgent}
 
+	resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: "battery_info", Wait: true})
+	if err != nil {
+		t.Fatalf("queryPeerCall err=%v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("queryPeerCall should deny unsupported kind, got %+v", resp)
+	}
+	if !strings.Contains(resp.Error.Detail, "inspect_peer") || !strings.Contains(resp.Error.Detail, "battery_info") {
+		t.Fatalf("denial should point to inspect_peer and requested kind: %+v", resp.Error)
+	}
+}
+
+func TestQueryPeerUsesActiveProfileContext(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	root := t.TempDir()
+	g.Config.Profiles[profiledefs.QueryShell] = config.ProfileConfig{
+		Runner:       profiledefs.RunnerShell,
+		Capabilities: []string{profiledefs.CapShellReadonly, profiledefs.CapServiceStatus},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellAllowlisted,
+	}
+	g.Config.Runners[profiledefs.RunnerShell] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profiledefs.QueryShell}
+
 	var got schema.CreateTaskRequest
 	workerMux := http.NewServeMux()
 	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
@@ -577,23 +632,65 @@ func TestUnsupportedQueryPeerFallsForwardToInspectPeer(t *testing.T) {
 			t.Fatalf("decode task: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-battery", State: task.StateQueued})
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-service", State: task.StateQueued})
 	})
 	worker := httptest.NewServer(workerMux)
 	defer worker.Close()
 	host, port := splitTestServerAddr(t, worker.URL)
 	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
 
-	resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: "battery_info", Wait: true})
+	if err := g.writeProfileContext(profileContextFile{
+		Peers: map[string]profileContextPeer{
+			"worker": {Profile: profiledefs.QueryShell, CWD: root, Scope: "session", UpdatedAt: time.Now().UTC(), ExpiresAt: time.Now().Add(time.Hour)},
+		},
+	}); err != nil {
+		t.Fatalf("writeProfileContext: %v", err)
+	}
+
+	resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: profiledefs.CapServiceStatus})
 	if err != nil || !resp.OK {
-		t.Fatalf("queryPeerCall fallback resp=%+v err=%v", resp, err)
+		t.Fatalf("queryPeerCall resp=%+v err=%v", resp, err)
 	}
-	result := resp.Result.(map[string]any)
-	if result["routed_from"] != "query_peer" || result["used_tool"] != "inspect_peer" || result["used_profile"] != profiledefs.ReadonlyAgent {
-		t.Fatalf("fallback metadata = %+v", result)
+	if got.Profile != profiledefs.QueryShell || got.ProfileSource != "active_context" || got.CWD != root || got.TaskKind != "query" {
+		t.Fatalf("query_peer did not inherit active context: %+v", got)
 	}
-	if got.Profile != profiledefs.ReadonlyAgent || got.TaskKind != "inspect" || !strings.Contains(got.Prompt, "battery_info") {
-		t.Fatalf("fallback request = %+v", got)
+}
+
+func TestQueryPeerWithoutIdempotencyKeyCreatesFreshTasks(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	g.Config.Profiles[profiledefs.Query] = config.ProfileConfig{
+		Runner:       profiledefs.RunnerProbe,
+		Capabilities: []string{profiledefs.CapSystemInfo},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellDeny,
+	}
+	g.Config.Runners[profiledefs.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profiledefs.Query}
+
+	var ids []string
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var got schema.CreateTaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		ids = append(ids, got.TaskID)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-" + strconv.Itoa(len(ids)), State: task.StateQueued})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
+
+	for i := 0; i < 2; i++ {
+		resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: profiledefs.CapSystemInfo})
+		if err != nil || !resp.OK {
+			t.Fatalf("queryPeerCall %d resp=%+v err=%v", i, resp, err)
+		}
+	}
+	if len(ids) != 2 || ids[0] == ids[1] {
+		t.Fatalf("query ids should be fresh, got %#v", ids)
 	}
 }
 

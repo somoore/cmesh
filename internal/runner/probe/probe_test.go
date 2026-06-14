@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"runtime"
 	"testing"
 
 	"cmesh/internal/profile"
@@ -92,5 +93,34 @@ func TestProbeRunnerRejectsUngrantCapability(t *testing.T) {
 	})
 	if runner.CodeOf(err) != runner.ErrProfileDenied {
 		t.Fatalf("error code = %q err=%v", runner.CodeOf(err), err)
+	}
+}
+
+func TestProbeRunnerRejectsAmbiguousDiskInfoParams(t *testing.T) {
+	run := New(map[string]ProfileConfig{
+		profile.Query: {Capabilities: []string{profile.CapDiskInfo}, EnforcementConfidence: "high"},
+	})
+	_, err := run.Run(runner.RunRequest{
+		TaskID:    "task-probe-disk",
+		Profile:   profile.Query,
+		QueryKind: profile.CapDiskInfo,
+		QueryParams: map[string]any{
+			"path":   ".",
+			"volume": ".",
+		},
+	})
+	if runner.CodeOf(err) != runner.ErrWorkerFailed {
+		t.Fatalf("error code = %q err=%v", runner.CodeOf(err), err)
+	}
+}
+
+func TestDiskInfoParamValidationRejectsRemoteOrAmbiguousVolumes(t *testing.T) {
+	if err := validateDiskPath(`\\server\share`); runtime.GOOS == "windows" && err == nil {
+		t.Fatal("Windows UNC path should be rejected")
+	}
+	if runtime.GOOS != "windows" {
+		if _, err := normalizeDiskVolume("relative"); err == nil {
+			t.Fatal("non-Windows relative volume should be rejected")
+		}
 	}
 }
