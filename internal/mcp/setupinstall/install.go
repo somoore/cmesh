@@ -168,9 +168,7 @@ func removeTable(body, table string) string {
 	lines := strings.Split(body, "\n")
 	skip := false
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
-			name := strings.Trim(trimmed, "[]")
+		if name, ok := tomlTableHeader(line); ok {
 			skip = name == table || strings.HasPrefix(name, table+".")
 		}
 		if !skip {
@@ -178,6 +176,37 @@ func removeTable(body, table string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// tomlTableHeader parses a TOML table header line and returns the table name.
+// It recognizes a header as a trimmed line starting with "[" whose first "]"
+// closes the table name, allowing an optional trailing "# comment" after the
+// closing bracket. Array-of-tables headers ([[...]]) are preserved as-is by
+// trimming the matching bracket pair around the name.
+func tomlTableHeader(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "[") {
+		return "", false
+	}
+	arrayOfTables := strings.HasPrefix(trimmed, "[[")
+	open := "["
+	close := "]"
+	if arrayOfTables {
+		open = "[["
+		close = "]]"
+	}
+	inner := trimmed[len(open):]
+	end := strings.Index(inner, close)
+	if end < 0 {
+		return "", false
+	}
+	// Anything after the closing bracket must be only whitespace and/or a
+	// trailing comment; otherwise this is not a valid table header.
+	rest := strings.TrimSpace(inner[end+len(close):])
+	if rest != "" && !strings.HasPrefix(rest, "#") {
+		return "", false
+	}
+	return strings.TrimSpace(inner[:end]), true
 }
 
 func tomlString(value string) string {
