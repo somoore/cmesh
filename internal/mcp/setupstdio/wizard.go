@@ -110,7 +110,8 @@ func onboardingStatus(ctx context.Context) ToolResponse {
 
 type configureNodeRequest struct {
 	initOptionsRequest
-	Confirmed bool `json:"confirmed,omitempty"`
+	Confirmed               bool                                 `json:"confirmed,omitempty"`
+	ProfileAcknowledgements []profiledefs.ProfileAcknowledgement `json:"profile_acknowledgements,omitempty"`
 }
 
 // configureNode wraps GenerateConfig+WriteConfig+ValidateConfig. It auto-fills
@@ -144,12 +145,16 @@ func configureNode(ctx context.Context, args json.RawMessage) ToolResponse {
 			"message":               "Call configure_node again with confirmed=true to write this node's cmesh config.",
 			"path":                  path,
 		}
+		addProfileGuidance(result, opts, req.ProfileAcknowledgements)
 		if genErr != nil {
 			result["preview_error"] = genErr.Error()
 		} else {
 			result["preview_toml"] = body
 		}
 		return ToolResponse{OK: true, Result: result}
+	}
+	if problems := profiledefs.AcknowledgementProblems(selectedProfiles(opts), req.ProfileAcknowledgements); len(problems) > 0 {
+		return failure("profile_acknowledgement_required", strings.Join(problems, "; "))
 	}
 	if genErr != nil {
 		return failure("suggest_config_failed", genErr.Error())

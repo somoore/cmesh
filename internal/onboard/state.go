@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"cmesh/internal/config"
+	profiledefs "cmesh/internal/profile"
 )
 
 // OnboardingState is a coarse, re-derived snapshot of how far first-run setup has
@@ -68,11 +69,14 @@ type SmokeFunc func(ctx context.Context, peer PeerCandidate) SmokeResult
 // OnboardingStatus is the structured result of DeriveOnboardingState. It carries
 // the verify-then-confirm narration the wizard surfaces to the user.
 type OnboardingStatus struct {
-	State    OnboardingState `json:"state"`
-	NextStep string          `json:"next_step"`
-	Detail   string          `json:"detail"`
-	Machine  Machine         `json:"machine"`
-	Peers    []PeerCandidate `json:"peers,omitempty"`
+	State               OnboardingState              `json:"state"`
+	NextStep            string                       `json:"next_step"`
+	Detail              string                       `json:"detail"`
+	Machine             Machine                      `json:"machine"`
+	Peers               []PeerCandidate              `json:"peers,omitempty"`
+	ProfileMenu         []profiledefs.GuideItem      `json:"profile_menu"`
+	RecommendedProfiles []profiledefs.Recommendation `json:"recommended_profiles"`
+	ProfileDecisionRule string                       `json:"profile_decision_rule"`
 }
 
 // Indirection seams for tests. In-package tests override these to inject fakes
@@ -101,7 +105,13 @@ func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealth
 		configPath = config.DefaultPath()
 	}
 	machine := detectMachineFn(ctx)
-	status := OnboardingStatus{Machine: machine}
+	guide := profiledefs.Guide()
+	status := OnboardingStatus{
+		Machine:             machine,
+		ProfileMenu:         guide.Profiles,
+		RecommendedProfiles: onboardingRecommendations(),
+		ProfileDecisionRule: guide.DecisionRule,
+	}
 
 	if !machine.TailscaleOK || len(machine.TailnetIPs) == 0 {
 		status.State = StateTailscaleDown
@@ -274,8 +284,7 @@ func ReadyPayoff(cfg *config.Config, originOnly bool, linked []PeerCandidate) st
 		b.WriteString("Bidirectional smoke passed — the mesh is verified ready. ")
 	}
 	b.WriteString(fmt.Sprintf("Linked peer(s): %s.\n\n", strings.Join(names, ", ")))
-	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Query is deterministic probes with no shell and no writes; switch by passing profile in a delegate call ", defaultProfile))
-	b.WriteString("(profile menu: query, query-shell, readonly-agent, repo-dev, network, interactive, git_push).\n\n")
+	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Query is deterministic probes with no shell and no writes; use query_peer first for machine facts. Switch profiles only after reading the profile menu and, for repo-dev or higher, creating an acknowledged TTL lease.\n\n", defaultProfile))
 	b.WriteString("Example prompts:\n")
 	for _, ex := range readyExamplePrompts(primary) {
 		b.WriteString("  - ")
@@ -316,6 +325,15 @@ func readyExamplePrompts(peer string) []string {
 		fmt.Sprintf("Use cmesh to ask %s to run the native build in ~/code/myapp (repo-dev).", peer),
 		fmt.Sprintf("Use cmesh to ask %s to run the test suite in ~/code/myapp (repo-dev).", peer),
 		fmt.Sprintf("Use cmesh to ask %s to continue work on a branch in ~/code/myapp (repo-dev).", peer),
+	}
+}
+
+func onboardingRecommendations() []profiledefs.Recommendation {
+	return []profiledefs.Recommendation{
+		profiledefs.Recommend("safe first look at a machine"),
+		profiledefs.Recommend("read files"),
+		profiledefs.Recommend("edit code"),
+		profiledefs.Recommend("restart service"),
 	}
 }
 func onlinePeers(peers []PeerCandidate) []PeerCandidate {

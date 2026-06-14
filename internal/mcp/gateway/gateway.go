@@ -72,10 +72,11 @@ type QueryPeerRequest struct {
 }
 
 type ProfileUseRequest struct {
-	Peer    string `json:"peer"`
-	Profile string `json:"profile"`
-	CWD     string `json:"cwd,omitempty"`
-	TTL     string `json:"ttl,omitempty"`
+	Peer                   string                             `json:"peer"`
+	Profile                string                             `json:"profile"`
+	CWD                    string                             `json:"cwd,omitempty"`
+	TTL                    string                             `json:"ttl,omitempty"`
+	ProfileAcknowledgement profiledefs.ProfileAcknowledgement `json:"profile_acknowledgement,omitempty"`
 }
 
 type ProfileGenerateRequest struct {
@@ -151,6 +152,8 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
 	mux.HandleFunc("POST /tools/delegate", g.delegate)
 	mux.HandleFunc("POST /tools/query_peer", g.queryPeer)
+	mux.HandleFunc("POST /tools/profile_guide", g.profileGuide)
+	mux.HandleFunc("POST /tools/profile_recommend", g.profileRecommend)
 	mux.HandleFunc("POST /tools/profile_generate", g.profileGenerate)
 	mux.HandleFunc("POST /tools/profile_validate", g.profileValidate)
 	mux.HandleFunc("POST /tools/profile_describe", g.profileDescribe)
@@ -277,6 +280,16 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}}, nil
 	case "profile_templates":
 		return ToolResponse{OK: true, Result: map[string]any{"templates": profiledefs.Builtins()}}, nil
+	case "profile_guide":
+		return ToolResponse{OK: true, Result: profiledefs.Guide()}, nil
+	case "profile_recommend":
+		var req struct {
+			Intent string `json:"intent"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return ToolResponse{OK: true, Result: profiledefs.Recommend(req.Intent)}, nil
 	case "profile_generate":
 		var req ProfileGenerateRequest
 		if err := json.Unmarshal(args, &req); err != nil {
@@ -604,6 +617,20 @@ func (g *Gateway) queryPeer(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
+func (g *Gateway) profileGuide(w http.ResponseWriter, _ *http.Request) {
+	writeTool(w, ToolResponse{OK: true, Result: profiledefs.Guide()})
+}
+
+func (g *Gateway) profileRecommend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Intent string `json:"intent"`
+	}
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	writeTool(w, ToolResponse{OK: true, Result: profiledefs.Recommend(req.Intent)})
+}
+
 func (g *Gateway) profileGenerate(w http.ResponseWriter, r *http.Request) {
 	var req ProfileGenerateRequest
 	if !decodeTool(w, r, &req) {
@@ -795,6 +822,9 @@ func (g *Gateway) profileUseCall(_ context.Context, req ProfileUseRequest) (Tool
 	}
 	if prof.RequireLease && ttl <= 0 {
 		return toolFailure(task.ErrorProfileDenied, "profile "+profileName+" requires ttl to create an active lease")
+	}
+	if problems := profiledefs.AcknowledgementProblems([]string{profileName}, []profiledefs.ProfileAcknowledgement{req.ProfileAcknowledgement}); len(problems) > 0 {
+		return toolFailure(task.ErrorProfileDenied, strings.Join(problems, "; "))
 	}
 	ctxFile, err := g.readProfileContext()
 	if err != nil {
@@ -1901,6 +1931,18 @@ func mcpTools() []map[string]any {
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{
+			"name":        "profile_guide",
+			"description": "Explain every cmesh profile in plain language, including exact powers, enforcement strength, safer alternatives, and why query is the default paved road.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "profile_recommend",
+			"description": "Recommend the least-powerful cmesh profile for a user intent and explain consent, TTL, safer alternative, and first tool to use.",
+			"inputSchema": objectSchema(map[string]any{
+				"intent": stringSchema("User intent, such as check disk, read files, edit code, restart service, or inspect repo."),
+			}, []string{"intent"}),
+		},
+		{
 			"name":        "profile_generate",
 			"description": "Generate a built-in profile template preview and TOML snippet without writing config.",
 			"inputSchema": objectSchema(map[string]any{
@@ -1947,6 +1989,14 @@ func mcpTools() []map[string]any {
 				"profile": stringSchema("Local profile to request by default for this peer."),
 				"cwd":     stringSchema("Optional cwd scope note for the active profile context."),
 				"ttl":     stringSchema("Optional lease TTL such as 30m. Required for profiles with require_lease=true."),
+				"profile_acknowledgement": objectSchema(map[string]any{
+					"profile":           stringSchema("Elevated profile being acknowledged, such as repo-dev, desktop-control, or system-change."),
+					"writes":            stringSchema("Acknowledged write mode, such as repo_only or allow."),
+					"shell":             stringSchema("Acknowledged shell mode, such as allow."),
+					"network":           map[string]any{"type": "boolean"},
+					"ttl":               stringSchema("Time-limited lease TTL, such as 30m."),
+					"allowed_cwd_scope": stringSchema("Human-readable allowed cwd scope the user approved."),
+				}, []string{"profile", "writes", "shell", "network", "ttl", "allowed_cwd_scope"}),
 			}, []string{"peer", "profile"}),
 		},
 		{

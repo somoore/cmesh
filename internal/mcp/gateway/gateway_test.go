@@ -305,7 +305,13 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	host, port := splitTestServerAddr(t, worker.URL)
 	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
 
-	used, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd, TTL: "30m"})
+	ack := profiledefs.ProfileAcknowledgement{Profile: "repo-dev", Writes: profiledefs.WritesRepoOnly, Shell: profiledefs.ShellAllow, Network: false, TTL: "30m", AllowedCWDScope: cwd}
+	stillDenied, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd, TTL: "30m"})
+	if stillDenied.OK || stillDenied.Error == nil || stillDenied.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("profile_use without explicit acknowledgement should be denied, got %+v", stillDenied)
+	}
+
+	used, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd, TTL: "30m", ProfileAcknowledgement: ack})
 	if !used.OK {
 		t.Fatalf("profile_use with ttl failed: %+v", used)
 	}
@@ -319,6 +325,29 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	local := resp.Result.(schema.CreateTaskResponse)
 	if local.RequestedProfile != "repo-dev" || local.ProfileSource != "active_context" || local.ProfileContextID == "" {
 		t.Fatalf("local response missing profile metadata: %+v", local)
+	}
+}
+
+func TestGatewayProfileGuideAndRecommendTools(t *testing.T) {
+	g := newTestGateway(t)
+	guide, err := g.callTool(context.Background(), "profile_guide", nil)
+	if err != nil || !guide.OK {
+		t.Fatalf("profile_guide resp=%+v err=%v", guide, err)
+	}
+	body, _ := json.Marshal(guide.Result)
+	for _, want := range []string{"query", "readonly-agent", "repo-dev", "no shell", "no writes"} {
+		if !strings.Contains(strings.ToLower(string(body)), want) {
+			t.Fatalf("profile_guide missing %q: %s", want, body)
+		}
+	}
+
+	rec, err := g.callTool(context.Background(), "profile_recommend", []byte(`{"intent":"read files"}`))
+	if err != nil || !rec.OK {
+		t.Fatalf("profile_recommend resp=%+v err=%v", rec, err)
+	}
+	body, _ = json.Marshal(rec.Result)
+	if !strings.Contains(string(body), `"profile":"readonly-agent"`) || !strings.Contains(string(body), `"safer_alternative":"query"`) {
+		t.Fatalf("read files recommendation did not pick readonly-agent with query alternative: %s", body)
 	}
 }
 

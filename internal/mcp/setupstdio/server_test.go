@@ -85,6 +85,55 @@ func TestProfilePreviewAndWriteConfigTools(t *testing.T) {
 	}
 }
 
+func TestProfileGuideAndRecommendTools(t *testing.T) {
+	srv := &Server{}
+	guide := srv.CallTool(context.Background(), "profile_guide", nil)
+	if !guide.OK {
+		t.Fatalf("profile_guide failed: %+v", guide)
+	}
+	body, _ := json.Marshal(guide.Result)
+	for _, want := range []string{"query", "readonly-agent", "repo-dev", "no shell", "no writes"} {
+		if !strings.Contains(strings.ToLower(string(body)), want) {
+			t.Fatalf("profile_guide missing %q: %s", want, body)
+		}
+	}
+
+	rec := srv.CallTool(context.Background(), "profile_recommend", []byte(`{"intent":"edit code and run tests"}`))
+	if !rec.OK {
+		t.Fatalf("profile_recommend failed: %+v", rec)
+	}
+	body, _ = json.Marshal(rec.Result)
+	if !strings.Contains(string(body), `"profile":"repo-dev"`) || !strings.Contains(string(body), `"requires_ttl":true`) {
+		t.Fatalf("repo edit recommendation missing repo-dev ttl: %s", body)
+	}
+}
+
+func TestProfileWriteConfigRequiresElevatedAcknowledgement(t *testing.T) {
+	srv := &Server{}
+	preview := srv.CallTool(context.Background(), "profile_write_config", []byte(`{"role":"worker","profiles":["query","repo-dev"],"runner":"codex"}`))
+	if !preview.OK {
+		t.Fatalf("profile_write_config preview failed: %+v", preview)
+	}
+	body, _ := json.Marshal(preview.Result)
+	if !strings.Contains(string(body), "profile_acknowledgement_required") || !strings.Contains(string(body), "repo-dev") {
+		t.Fatalf("preview did not guide acknowledgement: %s", body)
+	}
+
+	denied := srv.CallTool(context.Background(), "profile_write_config", []byte(`{"role":"worker","profiles":["query","repo-dev"],"runner":"codex","confirmed":true}`))
+	if denied.OK || denied.Error == nil || denied.Error.Code != "profile_acknowledgement_required" {
+		t.Fatalf("confirmed repo-dev without acknowledgement should be denied: %+v", denied)
+	}
+}
+
+func TestProfileWriteConfigScansRawTOMLForElevatedProfiles(t *testing.T) {
+	body := "[profiles.repo-dev]\nrunner = \"codex\"\nwrites = \"repo_only\"\nshell = \"allow\"\nrequire_lease = true\n\n"
+	encoded, _ := json.Marshal(map[string]any{"toml": body, "confirmed": true})
+	resp := (&Server{}).CallTool(context.Background(), "profile_write_config", encoded)
+	if resp.OK || resp.Error == nil || resp.Error.Code != "profile_acknowledgement_required" {
+		t.Fatalf("raw TOML repo-dev without acknowledgement should be denied: %+v", resp)
+	}
+}
+
 func TestToolSchemasUseArrayRequired(t *testing.T) {
 	for _, tool := range tools() {
 		schema, ok := tool["inputSchema"].(map[string]any)

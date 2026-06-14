@@ -100,6 +100,9 @@ func TestDeriveOnboardingState(t *testing.T) {
 			if got.NextStep == "" {
 				t.Fatalf("state %q has empty next_step", got.State)
 			}
+			if len(got.ProfileMenu) == 0 || len(got.RecommendedProfiles) == 0 || got.ProfileDecisionRule == "" {
+				t.Fatalf("state %q missing MCP-led profile guidance: %+v", got.State, got)
+			}
 		})
 	}
 }
@@ -144,6 +147,9 @@ func TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(got.Detail), "repo-dev") {
 		t.Fatalf("payoff must mention how to switch profiles (repo-dev): %s", got.Detail)
+	}
+	if len(got.ProfileMenu) == 0 || got.ProfileMenu[0].Name != "query" {
+		t.Fatalf("ready result must carry query-first profile menu: %+v", got.ProfileMenu)
 	}
 }
 

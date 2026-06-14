@@ -164,6 +164,61 @@ func TestUnconfirmedToolsNoSideEffects(t *testing.T) {
 	}
 }
 
+func TestConfigureNodeRequiresElevatedAcknowledgement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	t.Setenv("CMESH_CONFIG", path)
+
+	preview := configureNode(context.Background(), []byte(`{"role":"worker","profiles":["query","repo-dev"],"confirmed":false}`))
+	if !preview.OK {
+		t.Fatalf("configure_node preview failed: %+v", preview)
+	}
+	encoded, _ := json.Marshal(preview.Result)
+	if !strings.Contains(string(encoded), "profile_acknowledgement_required") || !strings.Contains(string(encoded), "repo-dev") {
+		t.Fatalf("configure_node preview missing profile acknowledgement guidance: %s", encoded)
+	}
+
+	denied := configureNode(context.Background(), []byte(`{"role":"worker","profiles":["query","repo-dev"],"confirmed":true}`))
+	if denied.OK || denied.Error == nil || denied.Error.Code != "profile_acknowledgement_required" {
+		t.Fatalf("configure_node confirmed without acknowledgement should be denied: %+v", denied)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("configure_node wrote config despite missing acknowledgement")
+	}
+}
+
+func TestConfigureNodeAcceptsElevatedAcknowledgement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	t.Setenv("CMESH_CONFIG", path)
+	resp := configureNode(context.Background(), []byte(`{
+		"role":"worker",
+		"profiles":["query","repo-dev"],
+		"runner":"codex",
+		"allowed_cwds":["~/code/myapp"],
+		"confirmed":true,
+		"profile_acknowledgements":[{
+			"profile":"repo-dev",
+			"writes":"repo_only",
+			"shell":"allow",
+			"network":false,
+			"ttl":"30m",
+			"allowed_cwd_scope":"~/code/myapp"
+		}]
+	}`))
+	if !resp.OK {
+		encoded, _ := json.Marshal(resp.Error)
+		t.Skipf("configure_node could not run in this environment: %s", encoded)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("config not written: %v", err)
+	}
+	if !strings.Contains(string(body), "[profiles.repo-dev]") {
+		t.Fatalf("config missing repo-dev:\n%s", body)
+	}
+}
+
 func TestConfigureNodePreservesHostToken(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
