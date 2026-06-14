@@ -100,6 +100,16 @@ go build -o cmesh ./cmd/cmesh
 ./cmesh install
 ```
 
+On Windows, run the PowerShell installer from the repo root (it builds from
+source or installs a prebuilt binary, then launches the picker):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+(The `-ExecutionPolicy Bypass` is what lets an unsigned local script run on a
+stock box; drop it if your policy already allows local scripts.)
+
 `cmesh install` puts the binary on PATH and shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. Do this on each machine.
 
 **2. Open a new agent session and say:**
