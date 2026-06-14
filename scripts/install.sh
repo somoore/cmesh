@@ -87,8 +87,16 @@ latest_version() {
   printf '%s' "$version"
 }
 
+# install_from_release downloads a prebuilt cmesh binary from a GitHub release.
+#
+# Release URL pattern (PLACEHOLDER until the public repo/CDN is published):
+#   https://github.com/<owner>/<repo>/releases/download/<version>/cmesh_<os>_<arch>.tar.gz
+# Override the source with:
+#   CMESH_REPO=owner/repo      # e.g. cmesh/cmesh (default below is a placeholder)
+#   CMESH_VERSION=v1.2.3        # or "latest" (default)
+# When get.cmesh.dev is live this script ships with CMESH_REPO baked in.
 install_from_release() {
-  [ -n "${CMESH_REPO:-}" ] || return 1
+  : "${CMESH_REPO:=cmesh/cmesh}" # PLACEHOLDER public repo; override via env.
   need_cmd tar
   os=$(detect_os)
   arch=$(detect_arch)
@@ -130,11 +138,25 @@ else
   die "no install source found; set CMESH_BIN, run from a source checkout containing ./cmd/cmesh, or set CMESH_REPO=owner/repo"
 fi
 
-if command -v "$install_path" >/dev/null 2>&1; then
-  "$install_path" version >/dev/null 2>&1 || true
+# Print the installed version so the user can confirm the binary works.
+if [ -x "$install_path" ]; then
+  printf 'cmesh install: version '
+  "$install_path" version 2>/dev/null || printf '(unknown)\n'
 fi
 
+on_path=0
 case ":$PATH:" in
-  *":$install_dir:"*) ;;
-  *) info "add $install_dir to PATH to run cmesh from any shell" ;;
+  *":$install_dir:"*) on_path=1 ;;
+  *) info "add $install_dir to PATH to run cmesh from any shell:"
+     info "  export PATH=\"$install_dir:\$PATH\"" ;;
 esac
+
+# Suggest the next step: the native interactive agent picker (Part 2).
+info ""
+if [ "$on_path" = "1" ]; then
+  info "Next, wire cmesh into your AI coding agent:"
+  info "  cmesh install"
+else
+  info "Next, wire cmesh into your AI coding agent (after fixing PATH):"
+  info "  $install_path install"
+fi
