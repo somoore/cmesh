@@ -100,3 +100,66 @@ args = ['serve']
 		t.Fatalf("new cmesh block missing:\n%s", body)
 	}
 }
+
+func TestRemoveTablePreservesTablesWithTrailingComment(t *testing.T) {
+	// A header following the cmesh table carries a trailing comment, so it does
+	// not end in "]". removeTable must still recognize it as a header and stop
+	// skipping, preserving the unrelated table and its secrets.
+	body := `[mcp_servers.cmesh]
+command = "x"
+[mcp_servers.other]   # my important server
+command = "other-tool"
+api_key = "SECRET123"
+[some_other_section]
+value = 42`
+
+	got := removeTable(body, "mcp_servers.cmesh")
+
+	if strings.Contains(got, "[mcp_servers.cmesh]") || strings.Contains(got, `command = "x"`) {
+		t.Fatalf("cmesh table should be removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[mcp_servers.other]") {
+		t.Fatalf("[mcp_servers.other] header was destroyed:\n%s", got)
+	}
+	if !strings.Contains(got, `api_key = "SECRET123"`) {
+		t.Fatalf("api_key secret was destroyed:\n%s", got)
+	}
+	if !strings.Contains(got, `command = "other-tool"`) {
+		t.Fatalf("[mcp_servers.other] contents were destroyed:\n%s", got)
+	}
+	if !strings.Contains(got, "[some_other_section]") || !strings.Contains(got, "value = 42") {
+		t.Fatalf("[some_other_section] was destroyed:\n%s", got)
+	}
+}
+
+func TestRemoveTablePrefixGuardKeepsSiblingTable(t *testing.T) {
+	body := `[mcp_servers.cmesh]
+command = "x"
+[mcp_servers.cmesh-extra]
+command = "extra"`
+
+	got := removeTable(body, "mcp_servers.cmesh")
+
+	if strings.Contains(got, "[mcp_servers.cmesh]\n") {
+		t.Fatalf("cmesh table should be removed:\n%s", got)
+	}
+	if !strings.Contains(got, "[mcp_servers.cmesh-extra]") || !strings.Contains(got, `command = "extra"`) {
+		t.Fatalf("cmesh-extra table must survive prefix guard:\n%s", got)
+	}
+}
+
+func TestRemoveTableStripsCmeshHeaderWithTrailingComment(t *testing.T) {
+	body := `[mcp_servers.cmesh]   # cmesh server
+command = "x"
+[some_other_section]
+value = 42`
+
+	got := removeTable(body, "mcp_servers.cmesh")
+
+	if strings.Contains(got, "mcp_servers.cmesh") || strings.Contains(got, `command = "x"`) {
+		t.Fatalf("cmesh table with trailing comment should be stripped:\n%s", got)
+	}
+	if !strings.Contains(got, "[some_other_section]") || !strings.Contains(got, "value = 42") {
+		t.Fatalf("[some_other_section] was destroyed:\n%s", got)
+	}
+}
