@@ -19,6 +19,7 @@ import (
 
 	"cmesh/internal/config"
 	tsid "cmesh/internal/identity/tailscale"
+	"cmesh/internal/mesh/schema"
 )
 
 type Machine struct {
@@ -205,7 +206,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	selectedPeers := selectPeers(opts.PeerNames, peers)
 	if len(allowedPeers) == 0 {
 		for _, peer := range selectedPeers {
-			allowedPeers = append(allowedPeers, firstNonEmpty(peer.NodeID, peer.Name))
+			allowedPeers = append(allowedPeers, matchableIdentity(peer))
 		}
 	}
 	if len(allowedPeers) == 0 {
@@ -270,7 +271,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 		}
 		writeSection(&b, "peers."+cleanName(peer.Name))
 		writeKV(&b, "name", peer.Name)
-		writeKV(&b, "node_id", firstNonEmpty(peer.NodeID, peer.Name))
+		writeKV(&b, "node_id", matchableIdentity(peer))
 		writeKV(&b, "address", peer.Address)
 		writeInt(&b, "port", config.DefaultMeshPort)
 	}
@@ -410,6 +411,44 @@ func uniqueNonEmpty(values []string) []string {
 		out = append(out, value)
 	}
 	return out
+}
+
+// matchableIdentity returns the whois-matchable identity for a discovered peer.
+// Trust allowlists must key on the stable, whois-matchable hostname label
+// (PeerCandidate.Name), not the ephemeral discovery node id (peer.ID from
+// tailscale status --json), which does not match a peer's whois identity.
+func matchableIdentity(peer PeerCandidate) string {
+	return firstNonEmpty(peer.Name, peer.NodeID)
+}
+
+// CapturePeerIdentity fetches a peer's authoritative, whois-matchable identity
+// from its /v1/hello endpoint, returning the node_name and stable_id the peer
+// reports for itself. Reachability is discovered separately; this records the
+// identity used for inbound allowlist matching.
+func CapturePeerIdentity(ctx context.Context, address string, meshPort int) (name, stableID string, err error) {
+	if meshPort == 0 {
+		meshPort = config.DefaultMeshPort
+	}
+	ctx, cancel := context.WithTimeout(ctx, 700*time.Millisecond)
+	defer cancel()
+	url := "http://" + net.JoinHostPort(address, fmt.Sprintf("%d", meshPort)) + "/v1/hello"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", "", fmt.Errorf("/v1/hello returned %s", resp.Status)
+	}
+	var hello schema.HelloResponse
+	if err := json.NewDecoder(resp.Body).Decode(&hello); err != nil {
+		return "", "", fmt.Errorf("decode /v1/hello: %w", err)
+	}
+	return hello.NodeName, hello.StableID, nil
 }
 
 func probeMesh(ctx context.Context, address string, port int) (bool, string) {
