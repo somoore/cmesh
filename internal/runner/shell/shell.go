@@ -66,7 +66,13 @@ func (r *Runner) Check(profileName string) error {
 }
 
 func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
-	prof, ok := r.profiles[req.Profile]
+	profileName := strings.TrimSpace(req.Profile)
+	if profileName == "" && len(r.profiles) == 1 {
+		for name := range r.profiles {
+			profileName = name
+		}
+	}
+	prof, ok := r.profiles[profileName]
 	if !ok {
 		return runner.Result{}, runner.E(runner.ErrProfileUnavailable, "select shell profile", fmt.Errorf("%q", req.Profile))
 	}
@@ -84,13 +90,14 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	if err := validatePolicy(prof.ShellPolicy, argv); err != nil {
 		return shellResult(kind, argv, time.Time{}, err), err
 	}
+	execArgv := shellExecArgv(argv)
 	limit := req.OutputLimit
 	if prof.MaxOutputBytes > 0 && (limit <= 0 || prof.MaxOutputBytes < limit) {
 		limit = prof.MaxOutputBytes
 	}
 	started := time.Now()
 	proc, err := runner.RunProgram(firstContext(req.Context), runner.Program{
-		Argv:        argv,
+		Argv:        execArgv,
 		Dir:         req.CWD,
 		Timeout:     req.Timeout,
 		OutputLimit: limit,
@@ -182,6 +189,15 @@ func validatePolicy(policy ShellPolicy, argv []string) error {
 		}
 	}
 	return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("command %q is not allowlisted for %s", argv[0], runtime.GOOS))
+}
+
+func shellExecArgv(argv []string) []string {
+	if runtime.GOOS == "windows" && len(argv) > 0 && strings.HasPrefix(strings.ToLower(argv[0]), "get-") {
+		out := []string{"powershell", "-NoProfile", "-Command"}
+		out = append(out, argv...)
+		return out
+	}
+	return argv
 }
 
 func allowedCommandsForOS(policy ShellPolicy, goos string) []string {

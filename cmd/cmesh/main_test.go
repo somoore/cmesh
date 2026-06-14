@@ -14,6 +14,8 @@ import (
 	"cmesh/internal/doctor"
 	"cmesh/internal/gitx"
 	"cmesh/internal/mcp/setupinstall"
+	profiledefs "cmesh/internal/profile"
+	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
@@ -225,6 +227,40 @@ func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
 	}
 	if smokeResultMatches(nil, "readonly") {
 		t.Fatal("nil result must not pass smoke validation")
+	}
+}
+
+type fakeShellSmokeRunner struct {
+	req runner.RunRequest
+}
+
+func (f *fakeShellSmokeRunner) Name() string { return "shell" }
+
+func (f *fakeShellSmokeRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{}
+}
+
+func (f *fakeShellSmokeRunner) Check(string) error { return nil }
+
+func (f *fakeShellSmokeRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	f.req = req
+	return runner.Result{CommandOutput: runner.CommandOutput{Command: "diagnostic", ExitCode: 0, Stdout: "ok"}}, nil
+}
+
+func TestShellRunnerSmokeUsesAllowlistedQuery(t *testing.T) {
+	run := &fakeShellSmokeRunner{}
+	check := shellRunnerSmokeCheck(context.Background(), run, time.Second, "")
+	if !check.OK {
+		t.Fatalf("check = %+v", check)
+	}
+	if run.req.Prompt != "" {
+		t.Fatalf("shell smoke should not use agent prompt, got %q", run.req.Prompt)
+	}
+	if run.req.QueryKind != profiledefs.CapShellReadonly {
+		t.Fatalf("query kind = %q, want %q", run.req.QueryKind, profiledefs.CapShellReadonly)
+	}
+	if run.req.QueryParams["command"] == "" {
+		t.Fatalf("shell smoke missing command: %+v", run.req.QueryParams)
 	}
 }
 

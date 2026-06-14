@@ -712,6 +712,9 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 	if runnerName == probe.Name {
 		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: true, Detail: "builtin deterministic probes; prompt smoke not applicable"}
 	}
+	if runnerName == shell.Name {
+		return shellRunnerSmokeCheck(ctx, run, timeout, logDir)
+	}
 	result, err := run.Run(runner.RunRequest{
 		Context:     ctx,
 		TaskID:      "doctor-runner-smoke",
@@ -744,6 +747,35 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 		check.Err = fmt.Sprintf("expected raw command artifact with exit=0 and %q, got exit=%d output=%q", smokeExpectedResponse, result.CommandOutput.ExitCode, output)
 	}
 	return check
+}
+
+func shellRunnerSmokeCheck(ctx context.Context, run runner.Runner, timeout time.Duration, logDir string) doctor.Check {
+	command := "df"
+	if runtime.GOOS == "windows" {
+		command = "Get-PSDrive"
+	}
+	result, err := run.Run(runner.RunRequest{
+		Context:     ctx,
+		TaskID:      "doctor-shell-smoke",
+		QueryKind:   profiledefs.CapShellReadonly,
+		QueryParams: map[string]any{"command": command},
+		CWD:         ".",
+		Timeout:     timeout,
+		OutputLimit: runner.DefaultOutputLimit,
+		LogDir:      logDir,
+	})
+	if err != nil {
+		output := oneLine(commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr))
+		detail := err.Error()
+		if output != "" {
+			detail += ": " + output
+		}
+		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: detail}
+	}
+	if result.CommandOutput.ExitCode != 0 {
+		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: fmt.Sprintf("expected allowlisted command exit=0, got exit=%d", result.CommandOutput.ExitCode)}
+	}
+	return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: true, Detail: "allowlisted diagnostic ok"}
 }
 
 func cmdDoctorServiceContext(args []string) error {
@@ -828,13 +860,27 @@ func serviceContextChecks(ctx context.Context, configPath string) []doctor.Check
 	}
 	for _, manifest := range reg.Manifests() {
 		run, _ := reg.Get(manifest.Runner)
-		err := run.Check("")
-		check := doctor.Check{Name: "spawn runner." + manifest.Runner, OK: err == nil, Detail: "available"}
-		if err != nil {
-			check.Detail = ""
-			check.Err = err.Error()
+		profiles := make([]string, 0, len(manifest.Profiles))
+		for profileName := range manifest.Profiles {
+			profiles = append(profiles, profileName)
 		}
-		checks = append(checks, check)
+		sort.Strings(profiles)
+		if len(profiles) == 0 {
+			profiles = append(profiles, "")
+		}
+		for _, profileName := range profiles {
+			err := run.Check(profileName)
+			name := "spawn runner." + manifest.Runner
+			if profileName != "" {
+				name += "." + profileName
+			}
+			check := doctor.Check{Name: name, OK: err == nil, Detail: "available"}
+			if err != nil {
+				check.Detail = ""
+				check.Err = err.Error()
+			}
+			checks = append(checks, check)
+		}
 	}
 	return checks
 }

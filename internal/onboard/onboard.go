@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -301,7 +302,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 		case profiledefs.QueryShell:
 			writeProfile(&b, profiledefs.QueryShell, profiledefs.RunnerShell, "Allowlisted read-oriented diagnostics. No writes.", []string{"query"}, []string{profiledefs.CapShellReadonly, profiledefs.CapServiceStatus, profiledefs.CapProcessList, profiledefs.CapLogTail}, nil, true, false, false, "deny", "allowlisted", false, false, "30s", 65536, "loud", "medium")
 			writeShellPolicy(&b, profiledefs.QueryShell)
-			runnersToWrite[profiledefs.RunnerShell] = []string{"builtin"}
+			runnersToWrite[profiledefs.RunnerShell] = shellRunnerCommand()
 		case profiledefs.ReadonlyAgent:
 			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
 			runnersToWrite[runnerName] = runnerCommand
@@ -436,6 +437,13 @@ func profilesNeedAgent(profiles []string) bool {
 		}
 	}
 	return false
+}
+
+func shellRunnerCommand() []string {
+	if runtime.GOOS == "windows" {
+		return []string{"powershell"}
+	}
+	return []string{"sh"}
 }
 
 func defaultProfileForRunner(runnerName string, profiles []string) string {

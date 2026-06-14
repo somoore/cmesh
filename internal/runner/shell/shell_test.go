@@ -42,6 +42,66 @@ func TestShellRunnerAllowsAllowlistedCommand(t *testing.T) {
 	}
 }
 
+func TestShellRunnerUsesOnlyProfileAsDefault(t *testing.T) {
+	goCmd, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("go command not on PATH")
+	}
+	run := New(map[string]ProfileConfig{
+		profile.QueryShell: {
+			Capabilities: []string{profile.CapShellReadonly},
+			ShellPolicy: ShellPolicy{
+				Mode:            "allowlist",
+				AllowedCommands: map[string][]string{runtime.GOOS: {goCmd}},
+			},
+		},
+	})
+	result, err := run.Run(runner.RunRequest{
+		Context:   context.Background(),
+		TaskID:    "task-1",
+		QueryKind: profile.CapShellReadonly,
+		QueryParams: map[string]any{
+			"command": goCmd,
+			"args":    []any{"version"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CommandOutput.ExitCode != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestShellRunnerExecutesWindowsCmdletThroughPowerShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell cmdlet smoke is Windows-only")
+	}
+	run := New(map[string]ProfileConfig{
+		profile.QueryShell: {
+			Capabilities: []string{profile.CapShellReadonly},
+			ShellPolicy: ShellPolicy{
+				Mode:            "allowlist",
+				AllowedCommands: map[string][]string{runtime.GOOS: {"Get-PSDrive"}},
+			},
+		},
+	})
+	result, err := run.Run(runner.RunRequest{
+		Context:   context.Background(),
+		TaskID:    "task-1",
+		QueryKind: profile.CapShellReadonly,
+		QueryParams: map[string]any{
+			"command": "Get-PSDrive",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.CommandOutput.ExitCode != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestShellRunnerDeniesCommandNotInAllowlist(t *testing.T) {
 	run := New(map[string]ProfileConfig{
 		"profile": {

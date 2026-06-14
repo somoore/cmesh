@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -80,6 +81,13 @@ func TestGenerateConfigQueryShellDoesNotRequireAgentRunner(t *testing.T) {
 	}
 	if cfg.Profiles["query-shell"].Shell != "allowlisted" || cfg.Profiles["query-shell"].Writes != "deny" {
 		t.Fatalf("query-shell profile = %+v", cfg.Profiles["query-shell"])
+	}
+	wantShellCommand := "sh"
+	if runtime.GOOS == "windows" {
+		wantShellCommand = "powershell"
+	}
+	if got := cfg.Runners["shell"].Command; len(got) == 0 || got[0] != wantShellCommand {
+		t.Fatalf("shell runner command = %#v, want first arg %q", got, wantShellCommand)
 	}
 }
 
