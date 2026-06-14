@@ -28,7 +28,29 @@ var (
 	// healthPollBudget bounds how long start_service waits for the gateway to come
 	// up before reporting. Overridable in tests to avoid a real 10s wait.
 	healthPollBudget = 10 * time.Second
+	// readySmokeFn is the bidirectional smoke that gates the 'ready' state in
+	// onboarding_status. Overridable in tests so status polls never hit a real
+	// tailnet. Production wraps bidirectionalSmoke with a short, fail-fast budget.
+	readySmokeFn = readySmoke
+	// readySmokeBudget bounds the ready-gate smoke. It runs on status polls (only in
+	// the late-state branch). The smoke does Hello + CreateTask{Wait:true} (a real
+	// runner round-trip) + PeerSmoke (a second runner round-trip), so it returns in
+	// actual-completion-time on a healthy mesh (~10-20s); the budget is only a
+	// CEILING for an unreachable/failing peer. It must therefore match link_peer's
+	// 90s budget — a shorter cap (e.g. 8s) is less than the operation itself and
+	// would make a healthy mesh always time out to peer_untrusted, never reaching
+	// 'ready'. Overridable in tests (which inject an instant fake smoke).
+	readySmokeBudget = 90 * time.Second
 )
+
+// readySmoke runs a short, fail-fast bidirectional smoke against a linked peer to
+// gate the 'ready' state. It returns true only when trust is verified in BOTH
+// directions.
+func readySmoke(ctx context.Context, peer onboard.PeerCandidate) bool {
+	ctx, cancel := context.WithTimeout(ctx, readySmokeBudget)
+	defer cancel()
+	return bidirectionalSmoke(ctx, peer).OK
+}
 
 // gatewayHealthy reports whether the local cmesh gateway answers GET /health.
 func gatewayHealthy(ctx context.Context, mcpPort int) bool {
@@ -50,9 +72,11 @@ func gatewayHealthy(ctx context.Context, mcpPort int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode <= 299
 }
 
-// onboardingStatus re-derives the wizard state from the live environment.
+// onboardingStatus re-derives the wizard state from the live environment. The
+// ready-gate smoke is injected so it only runs in the late-state branch and stays
+// fail-fast.
 func onboardingStatus(ctx context.Context) ToolResponse {
-	status := onboard.DeriveOnboardingState(ctx, config.DefaultPath(), gatewayHealthy)
+	status := onboard.DeriveOnboardingState(ctx, config.DefaultPath(), gatewayHealthy, readySmokeFn)
 	return ToolResponse{OK: true, Result: status}
 }
 
@@ -218,13 +242,37 @@ func withSuppressedStdout(fn func()) {
 }
 
 type linkPeerRequest struct {
-	Peer      string `json:"peer"`
+	Peer string `json:"peer"`
+	// Role lets an origin-only node opt out of the inbound trust grant. Empty or
+	// worker|both (the default) takes the bidirectional grant; only "origin" skips
+	// the inbound side. Role is not persisted in config, so it cannot be re-derived
+	// here — the wizard threads it explicitly.
+	Role      string `json:"role,omitempty"`
 	Confirmed bool   `json:"confirmed,omitempty"`
 }
 
-// linkPeer adds the single consented peer (reciprocal [peers.X] + outbound allow
-// keyed on the whois-matchable identity) and runs a bidirectional smoke:
-// Hello -> CreateTask (A->B) -> PeerSmoke (B->A). It never widens inbound policy.
+// linkPeerPreview builds the confirmation preview. For informed consent it MUST
+// disclose BOTH directions of the trust grant when inbound is granted.
+func linkPeerPreview(peer string, grantInbound bool) string {
+	if grantInbound {
+		return fmt.Sprintf("%s will be able to send work to this machine AND this machine can send work to %s.", peer, peer)
+	}
+	return fmt.Sprintf("This machine can send work to %s (origin-only: no inbound grant; %s cannot send work here).", peer, peer)
+}
+
+// grantsInbound reports whether this node should take the inbound trust grant when
+// linking a peer. Per the amended trust model the grant is role-aware: only an
+// explicit origin-only node skips it; worker|both (the default) takes it so the
+// reverse smoke leg can pass and the handshake closes.
+func (r linkPeerRequest) grantsInbound() bool {
+	return strings.ToLower(strings.TrimSpace(r.Role)) != "origin"
+}
+
+// linkPeer adds the single consented peer (reciprocal [peers.X] + outbound allow,
+// and — when this node serves as a worker — inbound allow, all keyed on the
+// whois-matchable identity) and runs a bidirectional smoke:
+// Hello -> CreateTask (A->B) -> PeerSmoke (B->A). The inbound grant is bounded to
+// the one consented peer (never a wildcard, never another node).
 func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 	var req linkPeerRequest
 	if err := json.Unmarshal(args, &req); err != nil {
@@ -245,30 +293,39 @@ func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 		return failure("peer_not_cmesh", fmt.Sprintf("peer %q does not appear to expose cmesh yet; install + start cmesh there first", req.Peer))
 	}
 
+	grantInbound := req.grantsInbound()
 	if !req.Confirmed {
 		return ToolResponse{OK: true, Result: map[string]any{
 			"requires_confirmation": true,
 			"message":               fmt.Sprintf("Call link_peer again with confirmed=true to trust and reach %q, then run the bidirectional smoke.", candidate.Name),
+			"preview":               linkPeerPreview(candidate.Name, grantInbound),
+			"grants_inbound":        grantInbound,
+			"note":                  "Bounded grant: the peer is still constrained by this node's allowed_cwds and profile ceilings. This is \"may ask\", not \"may do anything\".",
 			"peer":                  candidate.Name,
 			"address":               candidate.Address,
 		}}
 	}
 
 	// Capture the peer's authoritative whois identity (name + stable_id) from its
-	// /v1/hello so the outbound allowlist survives a hostname change. Best-effort:
-	// the hostname label already matches whois NodeName, so a failed capture is not
+	// /v1/hello so the allowlists survive a hostname change. Best-effort: the
+	// hostname label already matches whois NodeName, so a failed capture is not
 	// fatal.
 	_, stableID, _ := onboard.CapturePeerIdentity(ctx, candidate.Address, config.DefaultMeshPort)
-	peerName, err := onboard.AddPeerLink(config.DefaultPath(), candidate, stableID)
+	peerName, err := onboard.AddPeerLink(config.DefaultPath(), candidate, stableID, grantInbound)
 	if err != nil {
 		return failure("link_peer_failed", err.Error())
 	}
 	smoke := bidirectionalSmoke(ctx, candidate)
+	next := "Bidirectional smoke did not pass yet; call onboarding_status to see what to fix."
+	if smoke.OK {
+		next = "Trust verified. Call onboarding_status (it will show 'ready'), then call register_gateway to switch onto the cmesh HTTP delegation gateway."
+	}
 	return ToolResponse{OK: smoke.OK, Result: map[string]any{
-		"peer":      peerName,
-		"linked":    true,
-		"smoke":     smoke,
-		"next_step": "Call onboarding_status; if ready, try an example prompt.",
+		"peer":           peerName,
+		"linked":         true,
+		"grants_inbound": grantInbound,
+		"smoke":          smoke,
+		"next_step":      next,
 	}}
 }
 

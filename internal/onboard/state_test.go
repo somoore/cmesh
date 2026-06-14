@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"cmesh/internal/config"
+	"cmesh/internal/policy"
 )
 
 func TestDeriveOnboardingState(t *testing.T) {
@@ -25,11 +26,15 @@ func TestDeriveOnboardingState(t *testing.T) {
 	}
 	cfgLinked := func(string) (*config.Config, error) {
 		return &config.Config{
-			Node:  config.NodeConfig{MCPPort: config.DefaultMCPPort},
-			Peers: map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
+			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort},
+			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
+			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
 		}, nil
 	}
 	cfgMissing := func(string) (*config.Config, error) { return nil, os.ErrNotExist }
+
+	smokePass := func(context.Context, PeerCandidate) bool { return true }
+	smokeFail := func(context.Context, PeerCandidate) bool { return false }
 
 	tests := []struct {
 		name    string
@@ -37,22 +42,29 @@ func TestDeriveOnboardingState(t *testing.T) {
 		peers   []PeerCandidate
 		health  func(context.Context, int) bool
 		load    func(string) (*config.Config, error)
+		smoke   func(context.Context, PeerCandidate) bool
 		want    OnboardingState
 	}{
-		{"tailscale_down", downMachine, nil, healthy, cfgPresent, StateTailscaleDown},
-		{"tailscale_solo", upMachine, nil, healthy, cfgMissing, StateTailscaleSolo},
-		{"needs_config", upMachine, []PeerCandidate{onlinePeer}, healthy, cfgMissing, StateNeedsConfig},
-		{"daemon_down", upMachine, []PeerCandidate{onlinePeer}, unhealthy, cfgPresent, StateDaemonDown},
-		{"no_cmesh_peer", upMachine, []PeerCandidate{onlinePeer}, healthy, cfgPresent, StateNoCmeshPeer},
-		{"peer_untrusted", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgPresent, StatePeerUntrusted},
-		{"ready", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, StateReady},
+		{"tailscale_down", downMachine, nil, healthy, cfgPresent, smokePass, StateTailscaleDown},
+		{"tailscale_solo", upMachine, nil, healthy, cfgMissing, smokePass, StateTailscaleSolo},
+		{"needs_config", upMachine, []PeerCandidate{onlinePeer}, healthy, cfgMissing, smokePass, StateNeedsConfig},
+		{"daemon_down", upMachine, []PeerCandidate{onlinePeer}, unhealthy, cfgPresent, smokePass, StateDaemonDown},
+		{"no_cmesh_peer", upMachine, []PeerCandidate{onlinePeer}, healthy, cfgPresent, smokePass, StateNoCmeshPeer},
+		{"peer_untrusted_not_linked", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgPresent, smokePass, StatePeerUntrusted},
+		// J3: peer is linked in config but the bidirectional smoke FAILS -> must NOT
+		// be ready; it must report peer_untrusted with an actionable next_step.
+		{"peer_untrusted_smoke_fails", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokeFail, StatePeerUntrusted},
+		// J3: a nil smokeFn cannot verify -> never a false ready.
+		{"peer_untrusted_no_smoke_fn", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, nil, StatePeerUntrusted},
+		// ready requires an actual passing smoke.
+		{"ready", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokePass, StateReady},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			restore := swapStateFakes(tt.machine, tt.peers, tt.load)
 			defer restore()
-			got := DeriveOnboardingState(context.Background(), "/tmp/does-not-matter.toml", tt.health)
+			got := DeriveOnboardingState(context.Background(), "/tmp/does-not-matter.toml", tt.health, tt.smoke)
 			if got.State != tt.want {
 				t.Fatalf("state = %q, want %q (detail: %s)", got.State, tt.want, got.Detail)
 			}
@@ -60,6 +72,49 @@ func TestDeriveOnboardingState(t *testing.T) {
 				t.Fatalf("state %q has empty next_step", got.State)
 			}
 		})
+	}
+}
+
+// TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples covers J1: the verified
+// 'ready' state must route to register_gateway and surface the Part-5 payoff
+// (example prompts templated with the real peer name + the per-peer default
+// profile).
+func TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples(t *testing.T) {
+	machine := Machine{Name: "node-a", TailscaleOK: true, TailnetIPs: []string{"100.64.0.1"}, NodeID: "stable-a"}
+	cmeshPeer := PeerCandidate{Name: "node-b", Address: "100.64.0.2", Online: true, CmeshCapable: true}
+	load := func(string) (*config.Config, error) {
+		return &config.Config{
+			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort},
+			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
+			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
+		}, nil
+	}
+	restore := swapStateFakes(machine, []PeerCandidate{cmeshPeer}, load)
+	defer restore()
+
+	got := DeriveOnboardingState(context.Background(), "/tmp/x.toml",
+		func(context.Context, int) bool { return true },
+		func(context.Context, PeerCandidate) bool { return true })
+
+	if got.State != StateReady {
+		t.Fatalf("state = %q, want ready (detail: %s)", got.State, got.Detail)
+	}
+	if !strings.Contains(got.NextStep, "register_gateway") {
+		t.Fatalf("ready next_step must route to register_gateway: %q", got.NextStep)
+	}
+	// Payoff: example prompts templated with the real peer name.
+	if !strings.Contains(got.Detail, "node-b") {
+		t.Fatalf("payoff must template the real peer name node-b: %s", got.Detail)
+	}
+	if !strings.Contains(strings.ToLower(got.Detail), "disk usage") {
+		t.Fatalf("payoff must include example prompts from the recipe set: %s", got.Detail)
+	}
+	// Payoff: the per-peer default profile (read from runners.<r>.default_profile).
+	if !strings.Contains(got.Detail, "dev") {
+		t.Fatalf("payoff must include the default profile dev: %s", got.Detail)
+	}
+	if !strings.Contains(strings.ToLower(got.Detail), "readonly") {
+		t.Fatalf("payoff must mention how to switch profiles (readonly): %s", got.Detail)
 	}
 }
 
@@ -81,7 +136,8 @@ func TestAddPeerLinkWritesMatchableIdentity(t *testing.T) {
 	path := writeBaseConfig(t)
 	peer := PeerCandidate{Name: "Node-B", NodeID: "n12345ephemeral", Address: "100.64.0.2", Online: true, CmeshCapable: true}
 
-	name, err := AddPeerLink(path, peer, "nodeB-stable-id")
+	// grantInbound=true (worker|both, the default): bidirectional trust grant.
+	name, err := AddPeerLink(path, peer, "nodeB-stable-id", true)
 	if err != nil {
 		t.Fatalf("AddPeerLink: %v", err)
 	}
@@ -99,8 +155,8 @@ func TestAddPeerLinkWritesMatchableIdentity(t *testing.T) {
 	if strings.Contains(body, "n12345ephemeral") {
 		t.Fatalf("ephemeral discovery node id leaked into config:\n%s", body)
 	}
-	// outbound allow must contain the matchable identity AND the captured stable id;
-	// inbound must be untouched.
+	// J2: outbound AND inbound allow must contain the matchable identity AND the
+	// captured stable id; the original inbound entry ([self]) must be preserved.
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("reload: %v", err)
@@ -111,8 +167,35 @@ func TestAddPeerLinkWritesMatchableIdentity(t *testing.T) {
 	if !contains(cfg.Policy.Outbound.AllowedPeers, "nodeB-stable-id") {
 		t.Fatalf("outbound allowed_peers missing captured stable id: %v", cfg.Policy.Outbound.AllowedPeers)
 	}
+	if !contains(cfg.Policy.AllowedPeers, "Node-B") {
+		t.Fatalf("inbound allowed_peers missing the consented peer Node-B: %v", cfg.Policy.AllowedPeers)
+	}
+	if !contains(cfg.Policy.AllowedPeers, "nodeB-stable-id") {
+		t.Fatalf("inbound allowed_peers missing captured stable id: %v", cfg.Policy.AllowedPeers)
+	}
+	if !contains(cfg.Policy.AllowedPeers, "node-a") {
+		t.Fatalf("inbound grant clobbered the existing self entry: %v", cfg.Policy.AllowedPeers)
+	}
+}
+
+// TestAddPeerLinkOriginOnlySkipsInbound covers the role-aware guard: an origin-only
+// node (grantInbound=false) gets the outbound grant but NOT the inbound grant.
+func TestAddPeerLinkOriginOnlySkipsInbound(t *testing.T) {
+	path := writeBaseConfig(t)
+	peer := PeerCandidate{Name: "Node-B", Address: "100.64.0.2", Online: true, CmeshCapable: true}
+
+	if _, err := AddPeerLink(path, peer, "nodeB-stable-id", false); err != nil {
+		t.Fatalf("AddPeerLink: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !contains(cfg.Policy.Outbound.AllowedPeers, "Node-B") {
+		t.Fatalf("origin-only still grants outbound: %v", cfg.Policy.Outbound.AllowedPeers)
+	}
 	if contains(cfg.Policy.AllowedPeers, "Node-B") {
-		t.Fatalf("inbound allowed_peers was widened: %v", cfg.Policy.AllowedPeers)
+		t.Fatalf("origin-only must NOT take the inbound grant: %v", cfg.Policy.AllowedPeers)
 	}
 }
 
@@ -120,7 +203,7 @@ func TestAddPeerLinkRejectsGlobMetachars(t *testing.T) {
 	path := writeBaseConfig(t)
 	for _, bad := range []string{"node-*", "node-?", "node-[a]"} {
 		peer := PeerCandidate{Name: bad, Address: "100.64.0.2"}
-		if _, err := AddPeerLink(path, peer, ""); err == nil {
+		if _, err := AddPeerLink(path, peer, "", true); err == nil {
 			t.Fatalf("AddPeerLink(%q) should reject glob metachars", bad)
 		}
 	}
@@ -130,11 +213,11 @@ func TestAddPeerLinkIdempotent(t *testing.T) {
 	path := writeBaseConfig(t)
 	peer := PeerCandidate{Name: "node-b", Address: "100.64.0.2", Online: true, CmeshCapable: true}
 
-	if _, err := AddPeerLink(path, peer, ""); err != nil {
+	if _, err := AddPeerLink(path, peer, "", true); err != nil {
 		t.Fatalf("AddPeerLink first: %v", err)
 	}
 	first := readFile(t, path)
-	if _, err := AddPeerLink(path, peer, ""); err != nil {
+	if _, err := AddPeerLink(path, peer, "", true); err != nil {
 		t.Fatalf("AddPeerLink second: %v", err)
 	}
 	second := readFile(t, path)
@@ -148,6 +231,93 @@ func TestAddPeerLinkIdempotent(t *testing.T) {
 	if c := countOccurrences(cfg.Policy.Outbound.AllowedPeers, "node-b"); c != 1 {
 		t.Fatalf("outbound allow has node-b %d times, want 1", c)
 	}
+}
+
+// TestTwoSidedTrustPolicyAccepts is THE BAR: a policy-level, single-process,
+// no-tailnet regression guard for J2 (and the missing link_peer/B-QA1 coverage).
+// It builds Node A's and Node B's configs exactly the way the wizard does — A links
+// B via AddPeerLink (bidirectional grant), B is configured with A as a peer (role
+// both on each side) — then asserts that policy.CheckInbound AND CheckOutbound
+// ACCEPT the peer in BOTH directions given each side's whois identity, and that a
+// third node C is REJECTED both ways on both engines.
+func TestTwoSidedTrustPolicyAccepts(t *testing.T) {
+	// A shared, real, existing dir for cwd: CheckInbound -> NormalizeCWD ->
+	// EvalSymlinks requires the path to exist, and the "/**" form runs through
+	// normalizeAllowedRoot so it matches symlinked temp roots (e.g. macOS
+	// /var -> /private/var). Use it as both allowed_cwds and intent.CWD.
+	cwd := t.TempDir()
+	allowedCWDs := []string{cwd + "/**"}
+
+	machineA := Machine{Name: "node-a", NodeID: "stable-a", TailscaleOK: true, TailnetIPs: []string{"100.64.0.1"}}
+	machineB := Machine{Name: "node-b", NodeID: "stable-b", TailscaleOK: true, TailnetIPs: []string{"100.64.0.2"}}
+	peerA := PeerCandidate{Name: "node-a", Address: "100.64.0.1", Online: true, CmeshCapable: true}
+	peerB := PeerCandidate{Name: "node-b", Address: "100.64.0.2", Online: true, CmeshCapable: true}
+
+	// --- Node A: configure (no peer yet), then link B (bidirectional grant). ---
+	pathA := filepath.Join(t.TempDir(), "a.toml")
+	bodyA, err := GenerateConfig(InitOptions{Role: "both", Runner: "claude-code", AllowedCWDs: allowedCWDs}, machineA, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateConfig A: %v", err)
+	}
+	if err := WriteConfig(pathA, bodyA, true); err != nil {
+		t.Fatalf("WriteConfig A: %v", err)
+	}
+	if _, err := AddPeerLink(pathA, peerB, "stable-b", true); err != nil {
+		t.Fatalf("AddPeerLink B onto A: %v", err)
+	}
+
+	// --- Node B: configure with A as a peer (worker|both takes A inbound+outbound). ---
+	pathB := filepath.Join(t.TempDir(), "b.toml")
+	bodyB, err := GenerateConfig(InitOptions{Role: "both", Runner: "claude-code", AllowedCWDs: allowedCWDs, PeerNames: []string{"node-a"}}, machineB, nil, []PeerCandidate{peerA})
+	if err != nil {
+		t.Fatalf("GenerateConfig B: %v", err)
+	}
+	if err := WriteConfig(pathB, bodyB, true); err != nil {
+		t.Fatalf("WriteConfig B: %v", err)
+	}
+
+	cfgA, err := config.Load(pathA)
+	if err != nil {
+		t.Fatalf("load A: %v", err)
+	}
+	cfgB, err := config.Load(pathB)
+	if err != nil {
+		t.Fatalf("load B: %v", err)
+	}
+	engineA := policy.New(cfgA)
+	engineB := policy.New(cfgB)
+
+	// Intent describing "the other node B" as A would see it (whois identity node-b).
+	fromB := policy.TaskIntent{PeerName: "node-b", PeerStableID: "stable-b", CWD: cwd, Profile: "dev"}
+	// Intent describing "the other node A" as B would see it (whois identity node-a).
+	fromA := policy.TaskIntent{PeerName: "node-a", PeerStableID: "stable-a", CWD: cwd, Profile: "dev"}
+	// A third, unrelated node C — must be rejected everywhere.
+	fromC := policy.TaskIntent{PeerName: "node-c", PeerStableID: "stable-c", CWD: cwd, Profile: "dev"}
+
+	mustAllow := func(label string, d policy.Decision) {
+		t.Helper()
+		if !d.Allowed {
+			t.Fatalf("%s should be ALLOWED, got denied: %s %s", label, d.Code, d.Detail)
+		}
+	}
+	mustDeny := func(label string, d policy.Decision) {
+		t.Helper()
+		if d.Allowed {
+			t.Fatalf("%s should be DENIED, but was allowed", label)
+		}
+	}
+
+	// Both directions accepted on both engines.
+	mustAllow("A inbound from B", engineA.CheckInbound(fromB)) // B -> A (closes the handshake)
+	mustAllow("A outbound to B", engineA.CheckOutbound(fromB)) // A -> B
+	mustAllow("B inbound from A", engineB.CheckInbound(fromA)) // A -> B
+	mustAllow("B outbound to A", engineB.CheckOutbound(fromA)) // B -> A
+
+	// Third node C rejected both ways on both engines.
+	mustDeny("A inbound from C", engineA.CheckInbound(fromC))
+	mustDeny("A outbound to C", engineA.CheckOutbound(fromC))
+	mustDeny("B inbound from C", engineB.CheckInbound(fromC))
+	mustDeny("B outbound to C", engineB.CheckOutbound(fromC))
 }
 
 func writeBaseConfig(t *testing.T) string {

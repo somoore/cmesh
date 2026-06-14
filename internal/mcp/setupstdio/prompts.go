@@ -29,6 +29,13 @@ func setupCmeshPromptMessages() []map[string]any {
 		"State-changing tools (configure_node, start_service, link_peer, register_gateway) require " +
 		"the user's consent: call them once to preview, then again with confirmed=true after the " +
 		"user agrees. Never set confirmed=true without explicit user approval.\n\n" +
+		"The happy path on the origin node is a chain, each tool's next_step pointing to the next: " +
+		"configure_node -> start_service -> link_peer -> (onboarding_status shows 'ready' only once the " +
+		"bidirectional smoke actually passes) -> register_gateway. Always follow next_step. Once " +
+		"'ready', calling register_gateway switches this agent onto the cmesh HTTP delegation gateway, " +
+		"which requires ONE session restart — after that the stdio setup MCP and onboarding_status are " +
+		"gone and delegation runs over the gateway. Do not skip register_gateway: it is the only place " +
+		"that completes the swap and surfaces the example prompts.\n\n" +
 		"IMPORTANT: there is NO cross-node session. cmesh cannot \"resume\" one machine's session on " +
 		"another. Each node configures ITSELF to trust and reach the other; cmesh discovers the rest " +
 		"over the tailnet. To bring up a second machine, the user installs cmesh there and runs " +
