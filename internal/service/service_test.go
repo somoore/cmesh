@@ -2,9 +2,25 @@ package service
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// TestMain lets a re-exec'd copy of the test binary exit with a chosen code (set
+// via CMESH_TEST_EXIT_CODE), so TestWindowsAccessDeniedError can produce a real
+// *exec.ExitError with a specific exit code without shelling out.
+func TestMain(m *testing.M) {
+	if code, ok := os.LookupEnv("CMESH_TEST_EXIT_CODE"); ok {
+		if n, err := strconv.Atoi(code); err == nil {
+			os.Exit(n)
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
 	got := ServiceCommandLine(`C:\Tools\cmesh.exe`, `C:\Users\scott\.config\cmesh\config.toml`)
@@ -87,6 +103,35 @@ func TestWindowsServiceNotInstalledError(t *testing.T) {
 	}
 	if IsWindowsServiceNotInstalledError(nil) {
 		t.Fatal("nil error must not be treated as not-installed")
+	}
+}
+
+func TestWindowsAccessDeniedError(t *testing.T) {
+	// Produce a real *exec.ExitError carrying a chosen exit code without a shell:
+	// re-exec the test binary itself and have it exit(code) via the env switch
+	// handled in TestMain. This mirrors sc.exe failing with code 5 (access denied),
+	// whose "Access is denied." text goes to (uncaptured) stdout/stderr.
+	exitWith := func(code int) error {
+		cmd := exec.Command(os.Args[0], "-test.run=TestWindowsAccessDeniedError")
+		cmd.Env = append(os.Environ(), fmt.Sprintf("CMESH_TEST_EXIT_CODE=%d", code))
+		return cmd.Run()
+	}
+
+	if err := exitWith(5); err == nil || !isWindowsAccessDeniedError(err) {
+		t.Fatalf("exit code 5 must be detected as access-denied, got %v", err)
+	}
+	if err := exitWith(1); isWindowsAccessDeniedError(err) {
+		t.Fatal("exit code 1 must not be treated as access-denied")
+	}
+	// Text fallbacks for callers that do capture sc.exe output.
+	if !isWindowsAccessDeniedError(errors.New("sc.exe create: Access is denied.")) {
+		t.Fatal("expected access-denied detection from message text")
+	}
+	if !isWindowsAccessDeniedError(errors.New("exit status 5")) {
+		t.Fatal("expected access-denied detection from \"exit status 5\" text")
+	}
+	if isWindowsAccessDeniedError(nil) {
+		t.Fatal("nil error must not be treated as access-denied")
 	}
 }
 

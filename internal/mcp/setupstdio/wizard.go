@@ -394,11 +394,15 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	report.Forward["node_name"] = firstNonEmpty(hello.NodeName, hello.NodeID)
 
 	const smokeExpected = "cmesh smoke ok"
+	// Leave CWD empty: the forward task runs on the REMOTE worker, which self-
+	// selects a cwd its own allowed_cwds accepts (keyed off the "cmesh-wizard-smoke"
+	// origin session). We can't know a path that exists on the remote — especially
+	// cross-OS — so the worker, which enforces the policy, picks it.
 	createResp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-wizard-smoke",
 		Prompt:          "Reply with exactly: " + smokeExpected,
-		CWD:             "~",
+		CWD:             "",
 		Profile:         "readonly",
 		TimeoutSeconds:  60,
 		Wait:            true,
@@ -420,7 +424,11 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	forwardOK := createResp.State == "done"
 	report.Forward["ok"] = forwardOK
 
-	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{CWD: "~", Profile: "readonly", TimeoutSeconds: 60})
+	// Leave CWD empty: the reverse smoke runs THIS node as the worker (the remote
+	// asks us to run it), and runPeerSmokeToCaller defaults an empty cwd to a path
+	// the worker's own policy accepts. Sending "~" here would force a cwd our own
+	// allowed_cwds may reject.
+	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{Profile: "readonly", TimeoutSeconds: 60})
 	if err != nil {
 		report.Reverse["ok"] = false
 		report.Detail = "reverse smoke failed: " + err.Error()

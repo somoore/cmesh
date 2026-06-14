@@ -352,6 +352,82 @@ func TestCreateTaskDeniesDisallowedCWDWithoutRunner(t *testing.T) {
 	assertAuditContains(t, auditPath, `"policy_decision":"cwd_denied"`, `"error_code":"cwd_denied"`)
 }
 
+// TestCreateTaskSmokeSelfSelectsCWD proves a smoke task (origin session ending in
+// "-smoke") with an empty cwd is auto-filled by the worker with a cwd its own
+// allowed_cwds accepts, so the smoke is not cwd_denied. This is what lets the
+// onboarding "ready" gate pass under a conservatively-scoped allowlist, where a
+// hardcoded "~" would always be rejected.
+func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
+	root := t.TempDir()
+	run := &countingRunner{}
+	server := newTestServer(t, root, run) // allowed_cwds = [root/**]
+
+	createBody := `{
+		"task_id":"task-smoke-empty-cwd",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"cmesh-wizard-smoke",
+		"prompt":"Reply with exactly: cmesh smoke ok",
+		"cwd":"",
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"cmesh-wizard-smoke"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+
+	if createRes.Code == http.StatusForbidden {
+		t.Fatalf("smoke task with empty cwd was denied (expected self-selected cwd): %s", createRes.Body.String())
+	}
+	rec, err := server.Store.GetTask(context.Background(), "task-smoke-empty-cwd")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.State == task.StateDenied {
+		t.Fatalf("smoke task denied; cwd should have been self-selected. record=%+v", rec)
+	}
+	if strings.TrimSpace(rec.CWD) == "" {
+		t.Fatalf("expected a self-selected cwd on the smoke record, got empty")
+	}
+}
+
+// TestCreateTaskNonSmokeEmptyCWDNotSelfSelected proves the self-select is gated to
+// smoke tasks: an ordinary task with an empty cwd is NOT auto-filled (its cwd stays
+// empty and is handled by the normal path), so the smoke convenience can't silently
+// redirect real delegated work.
+func TestCreateTaskNonSmokeEmptyCWDNotSelfSelected(t *testing.T) {
+	root := t.TempDir()
+	run := &countingRunner{}
+	server := newTestServer(t, root, run)
+
+	createBody := `{
+		"task_id":"task-nonsmoke-empty-cwd",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-real",
+		"prompt":"hello",
+		"cwd":"",
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-real"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+
+	// An ordinary task with an empty cwd is NOT self-selected, so it fails the empty
+	// cwd just as before — proving the smoke convenience is gated and can't silently
+	// redirect real delegated work. (A self-selected cwd would instead let it
+	// through, like the smoke case above, returning 2xx.)
+	if createRes.Code >= 200 && createRes.Code < 300 {
+		t.Fatalf("non-smoke empty cwd should fail, not be self-selected; status=%d body=%s", createRes.Code, createRes.Body.String())
+	}
+	if !strings.Contains(createRes.Body.String(), "cwd") {
+		t.Fatalf("expected a cwd-related failure for non-smoke empty cwd, got %s", createRes.Body.String())
+	}
+}
+
 func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
 	root := t.TempDir()
 	run := &countingRunner{}

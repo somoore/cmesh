@@ -634,9 +634,11 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 	if strings.TrimSpace(peer) == "" {
 		return toolFailure(task.ErrorPeerUnreachable, "peer is required")
 	}
-	if strings.TrimSpace(cwd) == "" {
-		cwd = "~"
-	}
+	// An empty cwd is forwarded as-is: this task runs on the REMOTE worker, which
+	// self-selects a cwd its own policy accepts when none is given (keyed off the
+	// "mcp-smoke" origin session below). A cwd from this node's policy could name a
+	// path that does not exist on the worker (e.g. cross-OS). Callers can still pass
+	// an explicit cwd to target a specific directory.
 	if strings.TrimSpace(profile) == "" {
 		profile = "readonly"
 	}
@@ -652,13 +654,14 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	delegated, err := g.delegateCall(ctx, DelegateRequest{
-		Peer:           peer,
-		Prompt:         "Reply with exactly: " + gatewaySmokeExpectedResponse,
-		CWD:            cwd,
-		Profile:        profile,
-		TimeoutSeconds: timeoutSeconds,
-		Wait:           true,
-		IdempotencyKey: strings.Join([]string{"mcp-smoke", peer, cwd, profile, strconv.Itoa(timeoutSeconds)}, "\x00"),
+		Peer:            peer,
+		Prompt:          "Reply with exactly: " + gatewaySmokeExpectedResponse,
+		CWD:             cwd,
+		Profile:         profile,
+		TimeoutSeconds:  timeoutSeconds,
+		Wait:            true,
+		OriginSessionID: "mcp-smoke",
+		IdempotencyKey:  strings.Join([]string{"mcp-smoke", peer, cwd, profile, strconv.Itoa(timeoutSeconds)}, "\x00"),
 	})
 	if err != nil {
 		return delegated, err
