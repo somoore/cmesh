@@ -333,11 +333,18 @@ func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 		}}
 	}
 
-	// Capture the peer's authoritative whois identity (name + stable_id) from its
-	// /v1/hello so the allowlists survive a hostname change. Best-effort: the
-	// hostname label already matches whois NodeName, so a failed capture is not
-	// fatal.
-	_, stableID, _ := onboard.CapturePeerIdentity(ctx, candidate.Address, config.DefaultMeshPort)
+	// Resolve the peer's identity from its own /v1/hello — the authoritative source
+	// for the whois-matchable node_name and stable_id (both from MagicDNS, which is
+	// also what the inbound policy matches a connection against). When capture
+	// succeeds, prefer the reported node_name over the discovery-derived candidate
+	// name: discovery reads `tailscale status`, whose HostName can be a human
+	// display name ("Scott's MacBook Pro") that never matches the peer's whois
+	// identity. Capture is best-effort — on failure we keep the discovery name as a
+	// fallback rather than blanking it (AddPeerLink requires a non-empty name).
+	capturedName, stableID, _ := onboard.CapturePeerIdentity(ctx, candidate.Address, config.DefaultMeshPort)
+	if n := strings.TrimSpace(capturedName); n != "" {
+		candidate.Name = n
+	}
 	peerName, err := onboard.AddPeerLink(config.DefaultPath(), candidate, stableID, grantInbound)
 	if err != nil {
 		return failure("link_peer_failed", err.Error())
