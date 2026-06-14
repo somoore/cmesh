@@ -228,81 +228,17 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 		}
 		return ToolResponse{OK: true, Result: map[string]string{"path": path, "status": "valid"}}
 	case "write_config":
-		var req writeConfigRequest
-		if err := json.Unmarshal(args, &req); err != nil {
-			return failure("invalid_arguments", err.Error())
-		}
-		if !req.Confirmed {
-			result := map[string]any{
-				"requires_confirmation": true,
-				"message":               "Call write_config again with confirmed=true to write the cmesh config file.",
-				"path":                  firstNonEmpty(req.Path, config.DefaultPath()),
-			}
-			addProfileGuidance(result, req.options(), req.ProfileAcknowledgements)
-			return ToolResponse{OK: true, Result: result}
-		}
-		if problems := profiledefs.AcknowledgementProblems(profilesForWriteRequest(req), req.ProfileAcknowledgements); len(problems) > 0 {
-			return failure("profile_acknowledgement_required", strings.Join(problems, "; "))
-		}
-		body := req.TOML
-		var err error
-		if strings.TrimSpace(body) == "" {
-			body, err = suggestedConfig(ctx, req.options())
-			if err != nil {
-				return failure("suggest_config_failed", err.Error())
-			}
-		}
-		path := firstNonEmpty(req.Path, config.DefaultPath())
-		if err := onboard.WriteConfig(path, body, req.Force); err != nil {
-			return failure("write_config_failed", err.Error())
-		}
-		if err := onboard.ValidateConfig(path); err != nil {
-			return failure("invalid_written_config", err.Error())
-		}
-		return ToolResponse{OK: true, Result: map[string]string{
-			"path":        path,
-			"status":      "written",
-			"next_step":   "Run cmesh up, or register http://127.0.0.1:7777/mcp after the daemon is running.",
-			"gateway_url": "http://127.0.0.1:7777/mcp",
-		}}
+		return writeConfigTool(ctx, args, writeConfigToolOptions{
+			Name:             "write_config",
+			SuggestErrorCode: "suggest_config_failed",
+			WriteErrorCode:   "write_config_failed",
+		})
 	case "profile_write_config":
-		var req writeConfigRequest
-		if err := json.Unmarshal(args, &req); err != nil {
-			return failure("invalid_arguments", err.Error())
-		}
-		if !req.Confirmed {
-			result := map[string]any{
-				"requires_confirmation": true,
-				"message":               "Call profile_write_config again with confirmed=true to write the cmesh config file.",
-				"path":                  firstNonEmpty(req.Path, config.DefaultPath()),
-			}
-			addProfileGuidance(result, req.options(), req.ProfileAcknowledgements)
-			return ToolResponse{OK: true, Result: result}
-		}
-		if problems := profiledefs.AcknowledgementProblems(profilesForWriteRequest(req), req.ProfileAcknowledgements); len(problems) > 0 {
-			return failure("profile_acknowledgement_required", strings.Join(problems, "; "))
-		}
-		body := req.TOML
-		var err error
-		if strings.TrimSpace(body) == "" {
-			body, err = suggestedConfig(ctx, req.options())
-			if err != nil {
-				return failure("profile_preview_config_failed", err.Error())
-			}
-		}
-		path := firstNonEmpty(req.Path, config.DefaultPath())
-		if err := onboard.WriteConfig(path, body, req.Force); err != nil {
-			return failure("profile_write_config_failed", err.Error())
-		}
-		if err := onboard.ValidateConfig(path); err != nil {
-			return failure("invalid_written_config", err.Error())
-		}
-		return ToolResponse{OK: true, Result: map[string]string{
-			"path":        path,
-			"status":      "written",
-			"next_step":   "Run cmesh up, or register http://127.0.0.1:7777/mcp after the daemon is running.",
-			"gateway_url": "http://127.0.0.1:7777/mcp",
-		}}
+		return writeConfigTool(ctx, args, writeConfigToolOptions{
+			Name:             "profile_write_config",
+			SuggestErrorCode: "profile_preview_config_failed",
+			WriteErrorCode:   "profile_write_config_failed",
+		})
 	case "gateway_info":
 		cfg, err := config.Load(config.DefaultPath())
 		if err != nil {
@@ -342,6 +278,12 @@ type writeConfigRequest struct {
 	Force                   bool                                 `json:"force,omitempty"`
 	Confirmed               bool                                 `json:"confirmed,omitempty"`
 	ProfileAcknowledgements []profiledefs.ProfileAcknowledgement `json:"profile_acknowledgements,omitempty"`
+}
+
+type writeConfigToolOptions struct {
+	Name             string
+	SuggestErrorCode string
+	WriteErrorCode   string
 }
 
 type profileGenerateRequest struct {
@@ -404,6 +346,46 @@ func profileValidate(req profileValidateRequest) ToolResponse {
 		return failure("profile_denied", err.Error())
 	}
 	return ToolResponse{OK: true, Result: map[string]any{"status": "valid", "name": name, "capabilities": capabilities}}
+}
+
+func writeConfigTool(ctx context.Context, args json.RawMessage, opts writeConfigToolOptions) ToolResponse {
+	var req writeConfigRequest
+	if err := json.Unmarshal(args, &req); err != nil {
+		return failure("invalid_arguments", err.Error())
+	}
+	if !req.Confirmed {
+		result := map[string]any{
+			"requires_confirmation": true,
+			"message":               "Call " + opts.Name + " again with confirmed=true to write the cmesh config file.",
+			"path":                  firstNonEmpty(req.Path, config.DefaultPath()),
+		}
+		addProfileGuidance(result, req.options(), req.ProfileAcknowledgements)
+		return ToolResponse{OK: true, Result: result}
+	}
+	if problems := profiledefs.AcknowledgementProblems(profilesForWriteRequest(req), req.ProfileAcknowledgements); len(problems) > 0 {
+		return failure("profile_acknowledgement_required", strings.Join(problems, "; "))
+	}
+	body := req.TOML
+	var err error
+	if strings.TrimSpace(body) == "" {
+		body, err = suggestedConfig(ctx, req.options())
+		if err != nil {
+			return failure(opts.SuggestErrorCode, err.Error())
+		}
+	}
+	path := firstNonEmpty(req.Path, config.DefaultPath())
+	if err := onboard.WriteConfig(path, body, req.Force); err != nil {
+		return failure(opts.WriteErrorCode, err.Error())
+	}
+	if err := onboard.ValidateConfig(path); err != nil {
+		return failure("invalid_written_config", err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]string{
+		"path":        path,
+		"status":      "written",
+		"next_step":   "Run cmesh up, or register http://127.0.0.1:7777/mcp after the daemon is running.",
+		"gateway_url": "http://127.0.0.1:7777/mcp",
+	}}
 }
 
 func (r initOptionsRequest) options() onboard.InitOptions {
@@ -670,50 +652,12 @@ func tools() []map[string]any {
 		{
 			"name":        "write_config",
 			"description": "Write a cmesh config from provided TOML or generated setup intent. Requires confirmed=true.",
-			"inputSchema": objectSchema(map[string]any{
-				"path":      stringSchema("Optional config file path. Defaults to the cmesh config path."),
-				"toml":      stringSchema("Optional TOML content to write. If omitted, setup intent is used to generate TOML."),
-				"force":     map[string]any{"type": "boolean"},
-				"confirmed": map[string]any{"type": "boolean"},
-				"profile_acknowledgements": arraySchema(objectSchema(map[string]any{
-					"profile":           stringSchema("Elevated profile being acknowledged, such as repo-dev, desktop-control, or system-change."),
-					"writes":            stringSchema("Acknowledged write mode, such as repo_only or allow."),
-					"shell":             stringSchema("Acknowledged shell mode, such as allow."),
-					"network":           map[string]any{"type": "boolean"},
-					"ttl":               stringSchema("Time-limited lease TTL, such as 30m."),
-					"allowed_cwd_scope": stringSchema("Human-readable allowed cwd scope the user approved."),
-				}, []string{"profile", "writes", "shell", "network", "ttl", "allowed_cwd_scope"})),
-				"role":          stringSchema("Machine role: origin, worker, or both."),
-				"allowed_peers": arraySchema(stringSchema("Peer node/name allowed to delegate to this worker.")),
-				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
-				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
-				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
-				"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
-			}, nil),
+			"inputSchema": writeConfigInputSchema(),
 		},
 		{
 			"name":        "profile_write_config",
 			"description": "Write a cmesh config from provided TOML or selected profile templates. Requires confirmed=true.",
-			"inputSchema": objectSchema(map[string]any{
-				"path":      stringSchema("Optional config file path. Defaults to the cmesh config path."),
-				"toml":      stringSchema("Optional TOML content to write. If omitted, setup intent is used to generate TOML."),
-				"force":     map[string]any{"type": "boolean"},
-				"confirmed": map[string]any{"type": "boolean"},
-				"profile_acknowledgements": arraySchema(objectSchema(map[string]any{
-					"profile":           stringSchema("Elevated profile being acknowledged, such as repo-dev, desktop-control, or system-change."),
-					"writes":            stringSchema("Acknowledged write mode, such as repo_only or allow."),
-					"shell":             stringSchema("Acknowledged shell mode, such as allow."),
-					"network":           map[string]any{"type": "boolean"},
-					"ttl":               stringSchema("Time-limited lease TTL, such as 30m."),
-					"allowed_cwd_scope": stringSchema("Human-readable allowed cwd scope the user approved."),
-				}, []string{"profile", "writes", "shell", "network", "ttl", "allowed_cwd_scope"})),
-				"role":          stringSchema("Machine role: origin, worker, or both."),
-				"allowed_peers": arraySchema(stringSchema("Peer node/name allowed to delegate to this worker.")),
-				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
-				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
-				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
-				"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
-			}, nil),
+			"inputSchema": writeConfigInputSchema(),
 		},
 		{
 			"name":        "gateway_info",
@@ -787,6 +731,33 @@ func initOptionsSchema() map[string]any {
 		"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
 		"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
 	}, nil)
+}
+
+func writeConfigInputSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"path":                     stringSchema("Optional config file path. Defaults to the cmesh config path."),
+		"toml":                     stringSchema("Optional TOML content to write. If omitted, setup intent is used to generate TOML."),
+		"force":                    map[string]any{"type": "boolean"},
+		"confirmed":                map[string]any{"type": "boolean"},
+		"profile_acknowledgements": arraySchema(profileAcknowledgementSchema()),
+		"role":                     stringSchema("Machine role: origin, worker, or both."),
+		"allowed_peers":            arraySchema(stringSchema("Peer node/name allowed to delegate to this worker.")),
+		"allowed_cwds":             arraySchema(stringSchema("Directory glob workers may use on this machine.")),
+		"peer_names":               arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
+		"runner":                   stringSchema("Runner to use: auto, claude-code, or codex."),
+		"profiles":                 arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
+	}, nil)
+}
+
+func profileAcknowledgementSchema() map[string]any {
+	return objectSchema(map[string]any{
+		"profile":           stringSchema("Elevated profile being acknowledged, such as repo-dev, desktop-control, or system-change."),
+		"writes":            stringSchema("Acknowledged write mode, such as repo_only or allow."),
+		"shell":             stringSchema("Acknowledged shell mode, such as allow."),
+		"network":           map[string]any{"type": "boolean"},
+		"ttl":               stringSchema("Time-limited lease TTL, such as 30m."),
+		"allowed_cwd_scope": stringSchema("Human-readable allowed cwd scope the user approved."),
+	}, []string{"profile", "writes", "shell", "network", "ttl", "allowed_cwd_scope"})
 }
 
 func objectSchema(properties map[string]any, required []string) map[string]any {
