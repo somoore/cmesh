@@ -783,6 +783,43 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 	assertAuditContains(t, auditPath, `"type":"task.failed"`, `"error_code":"worker_failed"`)
 }
 
+func TestCreateTaskPassesTaskScopedMCPURLToRunner(t *testing.T) {
+	root := t.TempDir()
+	run := &captureRequestRunner{requests: make(chan runner.RunRequest, 1)}
+	server := newTestServer(t, root, run)
+	server.Config.Node.MCPPort = 8888
+
+	createBody := `{
+		"task_id":"task-mcp-url",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+
+	select {
+	case req := <-run.requests:
+		if req.Metadata.MCPURL != "http://127.0.0.1:8888/mcp" {
+			t.Fatalf("MCPURL = %q", req.Metadata.MCPURL)
+		}
+		if req.Metadata.TaskToken == "" || req.Env["CMESH_TASK_TOKEN"] == "" {
+			t.Fatalf("task token missing from metadata/env: metadata=%q env=%q", req.Metadata.TaskToken, req.Env["CMESH_TASK_TOKEN"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner was not invoked")
+	}
+}
+
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
 	ctx := context.Background()
 	testutil.EnsureGitOnPath(t)
@@ -1028,6 +1065,33 @@ func (r *countingRunner) Check(profile string) error {
 
 func (r *countingRunner) Run(req runner.RunRequest) (runner.Result, error) {
 	r.calls++
+	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
+}
+
+type captureRequestRunner struct {
+	requests chan runner.RunRequest
+}
+
+func (r *captureRequestRunner) Name() string {
+	return "fake"
+}
+
+func (r *captureRequestRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{
+		SchemaVersion: "runner_manifest.v1",
+		Runner:        "fake",
+		Profiles: map[string]runner.ProfileManifest{
+			"dev": {Claims: []string{"read_files", "edit_repo"}, EnforcementConfidence: "high"},
+		},
+	}
+}
+
+func (r *captureRequestRunner) Check(profile string) error {
+	return nil
+}
+
+func (r *captureRequestRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	r.requests <- req
 	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
 }
 

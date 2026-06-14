@@ -158,6 +158,9 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	if !hasArg(argv, "--skip-git-repo-check") && !hasArg(profile.ExtraArgs, "--skip-git-repo-check") {
 		argv = append(argv, "--skip-git-repo-check")
 	}
+	if req.Metadata.MCPURL != "" && !hasArg(argv, "--ignore-user-config") && !hasArg(profile.ExtraArgs, "--ignore-user-config") {
+		argv = append(argv, "--ignore-user-config")
+	}
 	if profile.Model != "" {
 		argv = append(argv, "--model", profile.Model)
 	}
@@ -168,6 +171,13 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	sort.Strings(keys)
 	for _, key := range keys {
 		argv = append(argv, "-c", key+"="+profile.Config[key])
+	}
+	if req.Metadata.MCPURL != "" {
+		argv = append(argv,
+			"-c", "mcp_servers.cmesh.url=\""+tomlEscape(req.Metadata.MCPURL)+"\"",
+			"-c", "mcp_servers.cmesh.bearer_token_env_var=\"CMESH_TASK_TOKEN\"",
+			"-c", "mcp_servers.cmesh.startup_timeout_sec=120",
+		)
 	}
 	if req.CWD != "" {
 		argv = append(argv, "-C", req.CWD)
@@ -242,6 +252,11 @@ func nativeFlags(profile ProfileConfig) []string {
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
 	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
+}
+
+func tomlEscape(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return replacer.Replace(value)
 }
 
 func defaultProfiles() map[string]ProfileConfig {

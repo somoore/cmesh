@@ -120,6 +120,7 @@ type TaskMetadata struct {
 	ResumeSessionID string
 	ContextFile     string
 	MCPConfigFile   string
+	MCPURL          string
 	TaskToken       string
 }
 
