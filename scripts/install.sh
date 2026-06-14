@@ -199,27 +199,57 @@ case ":$PATH:" in
      info "  export PATH=\"$install_dir:\$PATH\"" ;;
 esac
 
+# How the user invokes cmesh from here on: bare name if it's on PATH, else the
+# full install path (the new PATH entry isn't active in this already-running shell).
+cmesh_cmd="cmesh"
+if [ "$on_path" != "1" ]; then
+  cmesh_cmd="$install_path"
+fi
+
+# next_steps prints the full "now what?" guidance. The #1 confusion is that the
+# MCP gets wired but the user is left at a cliff, so spell out BOTH remaining
+# steps explicitly: register the MCP into the agent(s), then drive setup from
+# inside the agent with one phrase.
+next_steps() {
+  printf '%s\n' ""
+  printf '%s\n' "============================================================"
+  printf '%s\n' "  What to do next"
+  printf '%s\n' "============================================================"
+  printf '%s\n' ""
+  printf '%s\n' "  1. Register the cmesh MCP into your AI coding agent(s):"
+  printf '%s\n' "         $cmesh_cmd install"
+  printf '%s\n' ""
+  printf '%s\n' "  2. Open a NEW session in that agent and type exactly:"
+  printf '%s\n' ""
+  printf '%s\n' "         help me setup cmesh"
+  printf '%s\n' ""
+  printf '%s\n' "     cmesh guides the rest from inside the agent (detects your"
+  printf '%s\n' "     tailnet, writes config, starts the service, links a peer,"
+  printf '%s\n' "     shows example prompts). Just answer the yes/no prompts."
+  printf '%s\n' "============================================================"
+}
+
 # Part 1 step 3: auto-launch the native interactive agent picker (Part 2) so the
 # user goes straight from one curl|sh into "pick your agent" — unless they opted
 # out with --no-agent-setup, or stdin/stdout is not a terminal (piped install,
-# where we cannot drive the picker).
+# where we cannot drive the picker). In the interactive case, `cmesh install`
+# prints its own loud "open a new session and say: help me setup cmesh" banner,
+# so we don't duplicate it here.
 if [ "$no_agent_setup" = "1" ]; then
   info ""
-  info "Skipping agent setup (--no-agent-setup). When ready, run:"
-  info "  cmesh install"
+  info "Binary installed. Agent setup skipped (--no-agent-setup)."
+  next_steps
 elif [ -t 0 ] && [ -t 1 ]; then
   info ""
   info "Launching the cmesh agent picker..."
   info ""
   # Run via the resolved install path so it works before the new PATH entry is
-  # active in this shell.
+  # active in this shell. cmesh install prints the next-steps banner itself.
   "$install_path" install
 else
+  # Non-interactive (piped) install: we can't drive the picker, so tell the user
+  # the complete remaining path, not just "run cmesh install".
   info ""
-  info "Next, wire cmesh into your AI coding agent:"
-  if [ "$on_path" = "1" ]; then
-    info "  cmesh install"
-  else
-    info "  $install_path install"
-  fi
+  info "Binary installed. The terminal can't run the interactive picker here."
+  next_steps
 fi

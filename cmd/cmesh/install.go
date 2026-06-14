@@ -94,10 +94,13 @@ func cmdInstall(args []string) error {
 
 	fmt.Println()
 	var failed bool
+	var installedNames []string
 	for _, agent := range selected {
 		result := setupinstall.Install(agent, exe)
 		printCheck(agent.Name, result.OK, result.Detail)
-		if !result.OK {
+		if result.OK {
+			installedNames = append(installedNames, agent.Name)
+		} else {
 			failed = true
 		}
 	}
@@ -111,20 +114,48 @@ func cmdInstall(args []string) error {
 	fmt.Println()
 	if err := selfTestStdio(exe); err != nil {
 		printCheck("MCP self-test", false, err.Error())
-		fmt.Println()
-		fmt.Println("The agent registrations were written, but the stdio self-test did not pass.")
-		fmt.Println("You can still try opening a new agent session and running: help me setup cmesh")
+		printNextSteps(installedNames)
 		return nil
 	}
 	printCheck("MCP wired", true, "stdio handshake + tools/list OK")
-
-	fmt.Println()
-	fmt.Println("Done. Open a NEW session in your agent and run:")
-	fmt.Println()
-	fmt.Println("    help me setup cmesh")
-	fmt.Println()
-	fmt.Println("(`cmesh setup` re-runs this installer.)")
+	printNextSteps(installedNames)
 	return nil
+}
+
+// printNextSteps is the post-install handoff. The single most common point of
+// confusion is "the MCP is installed — now what?", so this is deliberately loud
+// and explicit: it names the agents cmesh was wired into, explains WHY a new
+// session is needed (agents load MCP servers at startup), and gives the exact
+// words to type. The cmesh MCP itself becomes the setup wizard from there.
+func printNextSteps(agentNames []string) {
+	into := "your AI coding agent"
+	if len(agentNames) == 1 {
+		into = agentNames[0]
+	} else if len(agentNames) > 1 {
+		into = strings.Join(agentNames, " and ")
+	}
+	bar := strings.Repeat("=", 60)
+	fmt.Println()
+	fmt.Println(bar)
+	fmt.Println("  cmesh is installed. Here is what to do next:")
+	fmt.Println(bar)
+	fmt.Println()
+	fmt.Printf("  1. Open a NEW chat/session in %s.\n", into)
+	fmt.Println("     (Agents load MCP servers at startup, so the cmesh tools")
+	fmt.Println("      only appear in a session started after this install.)")
+	fmt.Println()
+	fmt.Println("  2. In that new session, type exactly:")
+	fmt.Println()
+	fmt.Println("         help me setup cmesh")
+	fmt.Println()
+	fmt.Println("     cmesh then guides the rest from inside the agent: it")
+	fmt.Println("     detects your tailnet, writes config, starts the service,")
+	fmt.Println("     links a peer, and shows example prompts. Just answer the")
+	fmt.Println("     yes/no prompts — you will not need the terminal again.")
+	fmt.Println()
+	fmt.Println(bar)
+	fmt.Println("  (Run `cmesh setup` to re-open this installer; `cmesh uninstall` to remove.)")
+	fmt.Println(bar)
 }
 
 func agentNames(agents []setupinstall.Agent) []string {
