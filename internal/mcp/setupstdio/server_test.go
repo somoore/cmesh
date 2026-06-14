@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -82,6 +84,68 @@ func TestProfilePreviewAndWriteConfigTools(t *testing.T) {
 	encoded, _ = json.Marshal(write.Result)
 	if !strings.Contains(string(encoded), "requires_confirmation") {
 		t.Fatalf("expected confirmation preflight, got %s", encoded)
+	}
+}
+
+func TestProfileConfigureSetupToolWritesTempConfig(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	body := `[node]
+id = "origin"
+name = "origin"
+role = "origin"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = "` + filepath.ToSlash(filepath.Join(root, "data")) + `"
+
+[policy]
+allowed_peers = ["worker"]
+allowed_cwds = ["` + filepath.ToSlash(root) + `"]
+
+[profiles.query]
+runner = "probe"
+capabilities = ["disk_info"]
+writes = "deny"
+shell = "deny"
+
+[runners.probe]
+command = ["builtin"]
+default_profile = "query"
+
+[peers.worker]
+name = "worker"
+node_id = "worker-node"
+address = "127.0.0.1"
+port = 7778
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	args, _ := json.Marshal(map[string]any{
+		"path":      configPath,
+		"template":  "repo-dev",
+		"runner":    "codex",
+		"peer":      "worker",
+		"confirmed": true,
+	})
+	resp := (&Server{}).CallTool(context.Background(), "profile_configure", args)
+	if !resp.OK {
+		t.Fatalf("profile_configure failed: %+v", resp)
+	}
+	encoded, _ := json.Marshal(resp.Result)
+	for _, want := range []string{`"status":"configured"`, `"active_immediately":false`} {
+		if !strings.Contains(string(encoded), want) {
+			t.Fatalf("profile_configure result missing %s: %s", want, encoded)
+		}
+	}
+	updated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	for _, want := range []string{"[profiles.repo-dev]", `allowed_peers = ["worker"]`, "[runners.codex]"} {
+		if !strings.Contains(string(updated), want) {
+			t.Fatalf("updated config missing %q:\n%s", want, updated)
+		}
 	}
 }
 

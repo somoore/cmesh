@@ -81,6 +81,7 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 	if rec.State != task.StateCancelled {
 		t.Fatalf("state = %q, want cancelled", rec.State)
 	}
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-1")
 }
 
 func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
@@ -629,6 +630,28 @@ func waitForTerminalTask(t *testing.T, server *Server, taskID string) {
 		t.Fatalf("GetTask: %v", err)
 	}
 	t.Fatalf("task %s did not reach terminal state, got %s", taskID, rec.State)
+}
+
+func waitForTaskSecretsRemoved(t *testing.T, dataDir, taskID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		contextPath := filepath.Join(dataDir, taskContextDirName, taskID+".json")
+		mcpPath := filepath.Join(dataDir, taskMCPConfigDir, taskID+".json")
+		contextGone := pathMissing(contextPath)
+		mcpGone := pathMissing(mcpPath)
+		tokenMatches, _ := filepath.Glob(filepath.Join(dataDir, taskTokenDirName, "*.json"))
+		if contextGone && mcpGone && len(tokenMatches) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task secrets for %s were not removed from %s", taskID, dataDir)
+}
+
+func pathMissing(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func splitHostPort(t *testing.T, rawURL string) (string, int) {

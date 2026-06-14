@@ -45,12 +45,21 @@ func Generate(name string, opts GenerateOptions) (Template, error) {
 
 func RenderTOML(tmpl Template) string {
 	var b strings.Builder
+	b.WriteString(RenderProfileTOML(tmpl))
+	b.WriteString("\n")
+	b.WriteString(RenderRunnerTOML(tmpl))
+	return b.String()
+}
+
+func RenderProfileTOML(tmpl Template) string {
+	var b strings.Builder
 	writeSection(&b, "profiles."+tmpl.Name)
 	writeKV(&b, "description", tmpl.Description)
 	writeKV(&b, "runner", tmpl.Runner)
 	writeArray(&b, "intents", tmpl.Intents)
 	writeArray(&b, "capabilities", tmpl.Capabilities)
 	writeArray(&b, "claims", tmpl.Capabilities)
+	writeArray(&b, "allowed_peers", tmpl.AllowedPeers)
 	writeKV(&b, "writes", defaultString(tmpl.Writes, WritesDeny))
 	writeKV(&b, "shell", defaultString(tmpl.Shell, ShellDeny))
 	writeBool(&b, "network", tmpl.Network)
@@ -80,14 +89,28 @@ func RenderTOML(tmpl Template) string {
 			writeArray(&b, "allowed_commands", tmpl.ShellPolicy.AllowedCommands[osName])
 		}
 	}
+	return b.String()
+}
+
+func RenderRunnerTOML(tmpl Template) string {
+	return RenderRunnerTOMLWithCommand(tmpl, nil)
+}
+
+func RenderRunnerTOMLWithCommand(tmpl Template, command []string) string {
+	var b strings.Builder
 	b.WriteString("\n")
 	writeSection(&b, "runners."+tmpl.Runner)
-	if tmpl.Runner == RunnerProbe || tmpl.Runner == RunnerShell {
+	if len(command) > 0 {
+		writeArray(&b, "command", command)
+	} else if tmpl.Runner == RunnerProbe || tmpl.Runner == RunnerShell {
 		writeArray(&b, "command", []string{"builtin"})
 	} else {
 		writeArray(&b, "command", []string{tmpl.Runner})
 	}
 	writeKV(&b, "default_profile", tmpl.Name)
+	if tmpl.Runner != RunnerProbe && tmpl.Runner != RunnerShell {
+		fmt.Fprintf(&b, "concurrency = %d\n", 1)
+	}
 	return b.String()
 }
 

@@ -54,6 +54,7 @@ type Template struct {
 	Runner                string
 	Intents               []string
 	Capabilities          []string
+	AllowedPeers          []string
 	Writes                string
 	Shell                 string
 	Network               bool

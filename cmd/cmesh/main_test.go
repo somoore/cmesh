@@ -46,6 +46,69 @@ func TestCodexSandboxForProfileKeepsDenyWriteReadOnlyOnWindows(t *testing.T) {
 	}
 }
 
+func TestProfileConfigureCommandAddsRepoDev(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	body := `[node]
+id = "origin"
+name = "origin"
+role = "origin"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = "` + filepath.ToSlash(filepath.Join(root, "data")) + `"
+
+[policy]
+allowed_peers = ["win11-desktop"]
+allowed_cwds = ["` + filepath.ToSlash(root) + `"]
+
+[profiles.query]
+runner = "probe"
+capabilities = ["disk_info", "system_info", "repo_status"]
+writes = "deny"
+shell = "deny"
+
+[runners.probe]
+command = ["builtin"]
+default_profile = "query"
+
+[peers.win11-desktop]
+name = "win11-desktop"
+node_id = "win11-desktop"
+address = "127.0.0.1"
+port = 7778
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	err := cmdProfile([]string{"configure", "repo-dev", "--config", configPath, "--runner", "codex", "--peer", "win11-desktop", "--confirmed"})
+	if err != nil {
+		t.Fatalf("profile configure: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	prof, ok := cfg.Profiles["repo-dev"]
+	if !ok {
+		t.Fatalf("repo-dev profile missing: %#v", cfg.Profiles)
+	}
+	if prof.Runner != "codex" || !testContains(prof.AllowedPeers, "win11-desktop") || !prof.RequireLease {
+		t.Fatalf("repo-dev profile = %#v", prof)
+	}
+	if _, ok := cfg.Runners["codex"]; !ok {
+		t.Fatalf("codex runner missing: %#v", cfg.Runners)
+	}
+}
+
+func testContains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClaudeProfileForDenyWriteDisallowsWriteAndShellTools(t *testing.T) {
 	cfg := &config.Config{
 		Profiles: map[string]config.ProfileConfig{

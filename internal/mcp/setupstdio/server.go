@@ -239,6 +239,12 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			SuggestErrorCode: "profile_preview_config_failed",
 			WriteErrorCode:   "profile_write_config_failed",
 		})
+	case "profile_configure":
+		var req profileConfigureRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+		return profileConfigure(req)
 	case "gateway_info":
 		cfg, err := config.Load(config.DefaultPath())
 		if err != nil {
@@ -294,6 +300,17 @@ type profileGenerateRequest struct {
 	OS           string   `json:"os,omitempty"`
 }
 
+type profileConfigureRequest struct {
+	Path         string   `json:"path,omitempty"`
+	Template     string   `json:"template,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Runner       string   `json:"runner,omitempty"`
+	Peer         string   `json:"peer,omitempty"`
+	AllowedPeers []string `json:"allowed_peers,omitempty"`
+	Force        bool     `json:"force,omitempty"`
+	Confirmed    bool     `json:"confirmed,omitempty"`
+}
+
 type profileValidateRequest struct {
 	Name                  string   `json:"name"`
 	Runner                string   `json:"runner"`
@@ -314,6 +331,47 @@ type initOptionsRequest struct {
 	PeerNames    []string `json:"peer_names,omitempty"`
 	Runner       string   `json:"runner,omitempty"`
 	Profiles     []string `json:"profiles,omitempty"`
+}
+
+func profileConfigure(req profileConfigureRequest) ToolResponse {
+	allowedPeers := append([]string(nil), req.AllowedPeers...)
+	if strings.TrimSpace(req.Peer) != "" {
+		allowedPeers = append(allowedPeers, strings.TrimSpace(req.Peer))
+	}
+	result, err := onboard.ConfigureProfile(firstNonEmpty(req.Path, config.DefaultPath()), onboard.ProfileConfigureOptions{
+		Template:     req.Template,
+		Name:         req.Name,
+		Runner:       req.Runner,
+		AllowedPeers: allowedPeers,
+		Force:        req.Force,
+	}, req.Confirmed)
+	if err != nil {
+		return failure("profile_configure_failed", err.Error())
+	}
+	payload := map[string]any{
+		"path":                  result.Path,
+		"profile":               result.Profile,
+		"runner":                result.Runner,
+		"already_configured":    result.AlreadyConfigured,
+		"profile_added":         result.ProfileAdded,
+		"runner_added":          result.RunnerAdded,
+		"profile_repaired":      result.ProfileRepaired,
+		"runner_repaired":       result.RunnerRepaired,
+		"requires_confirmation": !req.Confirmed,
+		"next_step":             result.NextStep,
+	}
+	if len(result.RunnerCommand) > 0 {
+		payload["runner_command"] = result.RunnerCommand
+	}
+	if result.PreviewTOML != "" {
+		payload["preview_toml"] = result.PreviewTOML
+	}
+	if req.Confirmed {
+		payload["status"] = "configured"
+		payload["active_immediately"] = false
+		payload["next_step"] = "Profile is configured. If the daemon is already running, restart it or use the registered gateway MCP profile_configure tool to hot-reload; then call profile_use with the required acknowledgement/TTL."
+	}
+	return ToolResponse{OK: true, Result: payload}
 }
 
 func profileGenerate(req profileGenerateRequest) ToolResponse {
@@ -658,6 +716,20 @@ func tools() []map[string]any {
 			"name":        "profile_write_config",
 			"description": "Write a cmesh config from provided TOML or selected profile templates. Requires confirmed=true.",
 			"inputSchema": writeConfigInputSchema(),
+		},
+		{
+			"name":        "profile_configure",
+			"description": "Preview or add a built-in profile to the local config, such as repo-dev bound to codex for a peer. Requires confirmed=true to write. When called through setup stdio, restart or use the registered gateway MCP to hot-reload a running daemon.",
+			"inputSchema": objectSchema(map[string]any{
+				"path":          stringSchema("Optional config file path. Defaults to the cmesh config path."),
+				"template":      stringSchema("Built-in template name such as repo-dev, readonly-agent, query-shell, desktop-control, or system-change. Defaults to repo-dev."),
+				"name":          stringSchema("Optional generated profile name override."),
+				"runner":        stringSchema("Runner to bind agent-backed profiles to, such as codex or claude-code."),
+				"peer":          stringSchema("Optional peer name to allow on this profile."),
+				"allowed_peers": arraySchema(stringSchema("Optional peer names allowed to use this profile.")),
+				"force":         map[string]any{"type": "boolean"},
+				"confirmed":     map[string]any{"type": "boolean", "description": "Set true after user consent to write the local config."},
+			}, nil),
 		},
 		{
 			"name":        "gateway_info",

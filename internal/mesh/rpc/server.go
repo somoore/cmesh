@@ -854,6 +854,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if cancel := s.cancelRunningTask(taskID); cancel != nil {
 		cancel()
 	}
+	_ = removeTaskSecrets(s.Config.Node.DataDir, taskID)
 	s.record(r.Context(), audit.Event{Type: "task.cancelled", TaskID: taskID, Source: "mesh_rpc", ErrorCode: string(task.ErrorCancelled)})
 	writeJSON(w, http.StatusOK, schema.CancelTaskResponse{TaskID: taskID, State: rec.State})
 }
@@ -1026,6 +1027,9 @@ func removeTaskSecrets(dataDir, taskID string) error {
 				return err
 			}
 		}
+	}
+	if err := os.Remove(contextPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.Remove(filepath.Join(dataDir, taskMCPConfigDir, taskID+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

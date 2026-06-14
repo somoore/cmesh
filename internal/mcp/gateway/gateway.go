@@ -30,10 +30,11 @@ import (
 )
 
 type Gateway struct {
-	Config *config.Config
-	Store  *store.Store
-	Audit  *audit.Writer
-	Policy *policy.Engine
+	Config     *config.Config
+	ConfigPath string
+	Store      *store.Store
+	Audit      *audit.Writer
+	Policy     *policy.Engine
 }
 
 type DelegateRequest struct {
@@ -77,6 +78,16 @@ type ProfileUseRequest struct {
 	CWD                    string                             `json:"cwd,omitempty"`
 	TTL                    string                             `json:"ttl,omitempty"`
 	ProfileAcknowledgement profiledefs.ProfileAcknowledgement `json:"profile_acknowledgement,omitempty"`
+}
+
+type ProfileConfigureRequest struct {
+	Template     string   `json:"template,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Runner       string   `json:"runner,omitempty"`
+	Peer         string   `json:"peer,omitempty"`
+	AllowedPeers []string `json:"allowed_peers,omitempty"`
+	Force        bool     `json:"force,omitempty"`
+	Confirmed    bool     `json:"confirmed,omitempty"`
 }
 
 type ProfileGenerateRequest struct {
@@ -158,6 +169,7 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /tools/profile_validate", g.profileValidate)
 	mux.HandleFunc("POST /tools/profile_describe", g.profileDescribe)
 	mux.HandleFunc("POST /tools/profile_current", g.profileCurrent)
+	mux.HandleFunc("POST /tools/profile_configure", g.profileConfigure)
 	mux.HandleFunc("POST /tools/profile_use", g.profileUse)
 	mux.HandleFunc("POST /tools/profile_reset", g.profileReset)
 	mux.HandleFunc("POST /tools/list_tasks", g.listTasks)
@@ -312,6 +324,12 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return g.profileDescribeCall(req.Profile)
 	case "profile_current":
 		return g.profileCurrentCall(ctx, args)
+	case "profile_configure":
+		var req ProfileConfigureRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.profileConfigureCall(req)
 	case "profile_use":
 		var req ProfileUseRequest
 		if err := json.Unmarshal(args, &req); err != nil {
@@ -690,6 +708,19 @@ func (g *Gateway) profileUse(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
+func (g *Gateway) profileConfigure(w http.ResponseWriter, r *http.Request) {
+	var req ProfileConfigureRequest
+	if !decodeTool(w, r, &req) {
+		return
+	}
+	resp, err := g.profileConfigureCall(req)
+	if err != nil {
+		writeTool(w, resp)
+		return
+	}
+	writeTool(w, resp)
+}
+
 func (g *Gateway) profileReset(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Peer string `json:"peer,omitempty"`
@@ -810,7 +841,7 @@ func (g *Gateway) profileUseCall(_ context.Context, req ProfileUseRequest) (Tool
 	}
 	prof, ok := g.Config.Profiles[profileName]
 	if !ok {
-		return toolFailure(task.ErrorProfileUnavailable, "local profile "+profileName+" is not configured")
+		return toolFailure(task.ErrorProfileUnavailable, "local profile "+profileName+" is not configured; call profile_configure with confirmed=true to add a built-in profile such as repo-dev")
 	}
 	var ttl time.Duration
 	if strings.TrimSpace(req.TTL) != "" {
@@ -846,6 +877,49 @@ func (g *Gateway) profileUseCall(_ context.Context, req ProfileUseRequest) (Tool
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	return ToolResponse{OK: true, Result: map[string]any{"peer": peer, "profile": profileName, "cwd": strings.TrimSpace(req.CWD), "profile_source": "active_context", "profile_context_id": entry.LeaseID, "expires_at": entry.ExpiresAt}}, nil
+}
+
+func (g *Gateway) profileConfigureCall(req ProfileConfigureRequest) (ToolResponse, error) {
+	allowedPeers := append([]string(nil), req.AllowedPeers...)
+	if strings.TrimSpace(req.Peer) != "" {
+		allowedPeers = append(allowedPeers, strings.TrimSpace(req.Peer))
+	}
+	result, err := onboard.ConfigureProfile(g.configPath(), onboard.ProfileConfigureOptions{
+		Template:     req.Template,
+		Name:         req.Name,
+		Runner:       req.Runner,
+		AllowedPeers: allowedPeers,
+		Force:        req.Force,
+	}, req.Confirmed)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	payload := map[string]any{
+		"path":                  result.Path,
+		"profile":               result.Profile,
+		"runner":                result.Runner,
+		"already_configured":    result.AlreadyConfigured,
+		"profile_added":         result.ProfileAdded,
+		"runner_added":          result.RunnerAdded,
+		"profile_repaired":      result.ProfileRepaired,
+		"runner_repaired":       result.RunnerRepaired,
+		"requires_confirmation": !req.Confirmed,
+		"next_step":             result.NextStep,
+	}
+	if len(result.RunnerCommand) > 0 {
+		payload["runner_command"] = result.RunnerCommand
+	}
+	if result.PreviewTOML != "" {
+		payload["preview_toml"] = result.PreviewTOML
+	}
+	if req.Confirmed {
+		if err := g.reloadConfig(); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		payload["status"] = "configured"
+		payload["active_immediately"] = true
+	}
+	return ToolResponse{OK: true, Result: payload}, nil
 }
 
 func (g *Gateway) profileResetCall(_ context.Context, peer string) (ToolResponse, error) {
@@ -899,11 +973,25 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		req.Profile = resolved.Profile
 		req.ProfileSource = resolved.Source
 		req.ProfileContextID = resolved.ContextID
+		if !profileContextCWDAllowed(req.CWD, resolved.CWD) {
+			return toolFailure(task.ErrorProfileDenied, fmt.Sprintf("active profile lease for %q is scoped to cwd %q; requested cwd %q", resolved.Profile, resolved.CWD, req.CWD))
+		}
 		if strings.TrimSpace(req.CWD) == "" && strings.TrimSpace(resolved.CWD) != "" {
 			req.CWD = resolved.CWD
 		}
 	} else if req.ProfileSource == "" {
-		req.ProfileSource = "request"
+		if resolved := g.resolveProfileContext(req.Peer); resolved.Profile == req.Profile && resolved.ContextID != "" {
+			if !profileContextCWDAllowed(req.CWD, resolved.CWD) {
+				return toolFailure(task.ErrorProfileDenied, fmt.Sprintf("active profile lease for %q is scoped to cwd %q; requested cwd %q", resolved.Profile, resolved.CWD, req.CWD))
+			}
+			req.ProfileSource = resolved.Source
+			req.ProfileContextID = resolved.ContextID
+			if strings.TrimSpace(req.CWD) == "" && strings.TrimSpace(resolved.CWD) != "" {
+				req.CWD = resolved.CWD
+			}
+		} else {
+			req.ProfileSource = "request"
+		}
 	}
 	peer, ok := g.Config.Peers[req.Peer]
 	if !ok {
@@ -1579,6 +1667,15 @@ func (g *Gateway) resolveProfileContext(peer string) resolvedProfileContext {
 	return resolvedProfileContext{Profile: g.defaultProfile(), Source: "default_profile"}
 }
 
+func profileContextCWDAllowed(requested, leased string) bool {
+	requested = strings.TrimSpace(requested)
+	leased = strings.TrimSpace(leased)
+	if requested == "" || leased == "" {
+		return true
+	}
+	return strings.EqualFold(requested, leased)
+}
+
 func leaseID(peer, profileName string, now time.Time) string {
 	seed := strings.Join([]string{peer, profileName, now.Format(time.RFC3339Nano)}, "\x00")
 	sum := task.SHA256Hex([]byte(seed))
@@ -1590,6 +1687,20 @@ func leaseID(peer, profileName string, now time.Time) string {
 
 func (g *Gateway) profileContextPath() string {
 	return filepath.Join(g.Config.Node.DataDir, "profile-context.json")
+}
+
+func (g *Gateway) configPath() string {
+	return firstNonEmpty(g.ConfigPath, config.DefaultPath())
+}
+
+func (g *Gateway) reloadConfig() error {
+	cfg, err := config.Load(g.configPath())
+	if err != nil {
+		return err
+	}
+	g.Config = cfg
+	g.Policy = policy.New(cfg)
+	return nil
 }
 
 func (g *Gateway) readProfileContext() (profileContextFile, error) {
@@ -1980,6 +2091,19 @@ func mcpTools() []map[string]any {
 			"name":        "profile_current",
 			"description": "Show the local gateway's active profile context. Empty delegate profile requests resolve from this context and default to query.",
 			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "profile_configure",
+			"description": "Preview or add a built-in profile to the local gateway config, such as repo-dev bound to codex for a peer. Preserves existing config and hot-reloads the gateway after confirmed=true.",
+			"inputSchema": objectSchema(map[string]any{
+				"template":      stringSchema("Built-in template name such as repo-dev, readonly-agent, query-shell, desktop-control, or system-change. Defaults to repo-dev."),
+				"name":          stringSchema("Optional generated profile name override."),
+				"runner":        stringSchema("Runner to bind agent-backed profiles to, such as codex or claude-code."),
+				"peer":          stringSchema("Optional peer name to allow on this profile."),
+				"allowed_peers": arraySchema(stringSchema("Optional peer names allowed to use this profile.")),
+				"force":         map[string]any{"type": "boolean"},
+				"confirmed":     map[string]any{"type": "boolean", "description": "Set true after user consent to write the local config and hot-reload this gateway."},
+			}, nil),
 		},
 		{
 			"name":        "profile_use",
