@@ -55,30 +55,48 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "init":
-		return cmdInit(args[1:])
-	case "_service":
-		return cmdServiceRun(args[1:])
+	// Primary surface: the only real install is the binary + MCP. Everything
+	// else (config, discovery, linking) is driven from the AI agent via the MCP.
+	case "install", "setup":
+		return cmdInstall(args[1:])
+	case "uninstall":
+		return cmdUninstall(args[1:])
+	case "self-install":
+		return cmdSelfInstall(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
 	case "up":
 		return cmdUp(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
 	case "peers":
 		return cmdPeers(args[1:])
-	case "mcp":
-		return cmdMCP(args[1:])
+	case "version":
+		return cmdVersion(args[1:])
+	case "_service":
+		return cmdServiceRun(args[1:])
+
+	// Headless config generation, retained for CI/scripted setup. The
+	// interactive path is now the agent picker (`cmesh install`) plus the
+	// MCP onboarding wizard.
+	case "init":
+		return cmdInit(args[1:])
+
+	// Compatibility aliases retained for scripts. The intended path is small:
+	// install / mcp / up / doctor / peers / uninstall.
 	case "test":
 		return cmdTest(args[1:])
-	case "connect":
-		return cmdConnect(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
 	case "log":
 		return cmdLog(args[1:])
 	case "hello":
 		return cmdHello(args[1:])
-	case "version":
-		return cmdVersion(args[1:])
+	case "connect":
+		fmt.Fprintln(os.Stderr, "note: `cmesh connect` is superseded. Register the gateway from your agent")
+		fmt.Fprintln(os.Stderr, "      via the cmesh MCP (\"help me setup cmesh\"). Running it anyway:")
+		return cmdConnect(args[1:])
+
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -90,14 +108,30 @@ func run(args []string) error {
 
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	stdio := fs.Bool("stdio", false, "run the setup MCP server over stdio")
-	install := fs.Bool("install", false, "install the setup MCP server into a detected AI coding agent")
+	stdio := fs.Bool("stdio", false, "run the onboarding MCP server over stdio")
+	install := fs.Bool("install", false, "register the cmesh MCP into a detected AI coding agent")
 	agent := fs.String("agent", "", "agent to install into with --install: claude-code, codex, or all")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *install || (!*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout)) {
+	// `--install` keeps working for scripts, but the intended path is the
+	// interactive picker `cmesh install`.
+	if *install {
 		return cmdMCPInstall(*agent)
+	}
+	// Agents launch `cmesh mcp --stdio` over pipes (no TTY) — serve the wizard.
+	// A human running bare `cmesh mcp` in a terminal almost certainly wants the
+	// installer; point them there instead of silently blocking on stdin.
+	if !*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+		fmt.Println("cmesh mcp serves the onboarding MCP over stdio for your AI coding agent.")
+		fmt.Println()
+		fmt.Println("To register cmesh with your agent, run:")
+		fmt.Println("  cmesh install")
+		fmt.Println()
+		fmt.Println("Then open a new agent session and say: help me setup cmesh")
+		fmt.Println()
+		fmt.Println("(To serve the stdio MCP directly anyway, run: cmesh mcp --stdio)")
+		return nil
 	}
 	return (&setupstdio.Server{}).Serve(context.Background())
 }
@@ -1957,13 +1991,22 @@ func firstNonEmpty(values ...string) string {
 }
 
 func usage() {
-	fmt.Println("usage: cmesh <init|doctor|up|peers|test|mcp>")
+	fmt.Println("usage: cmesh <install|uninstall|up|doctor|peers|mcp>")
 	fmt.Println()
-	fmt.Println("common:")
-	fmt.Println("  cmesh init")
-	fmt.Println("  cmesh doctor")
-	fmt.Println("  cmesh up")
-	fmt.Println("  cmesh peers")
+	fmt.Println("The only real install is the cmesh binary + the MCP. After that,")
+	fmt.Println("drive everything from your AI coding agent via the cmesh MCP.")
+	fmt.Println()
+	fmt.Println("get started:")
+	fmt.Println("  cmesh install                 register the cmesh MCP into your AI coding agent(s)")
+	fmt.Println("  # then in a new agent session: \"help me setup cmesh\"")
+	fmt.Println()
+	fmt.Println("commands:")
+	fmt.Println("  cmesh install                 detect agents and register the cmesh MCP (alias: setup)")
+	fmt.Println("  cmesh uninstall               remove the cmesh MCP and optionally clean up")
+	fmt.Println("  cmesh self-install            copy the cmesh binary onto your PATH")
+	fmt.Println("  cmesh up                      run the daemon (or: cmesh up service install)")
+	fmt.Println("  cmesh doctor                  check Tailscale, config, runners, and the gateway")
+	fmt.Println("  cmesh peers                   list configured and discovered peers")
 	fmt.Println("  cmesh peers test <peer> --cwd <peer-cwd> --bidirectional")
-	fmt.Println("  cmesh mcp")
+	fmt.Println("  cmesh mcp --stdio             serve the onboarding MCP over stdio (agents launch this)")
 }
