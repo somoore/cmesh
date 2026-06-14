@@ -18,6 +18,15 @@ const selfInstallMarker = "# added by cmesh self-install"
 // destination and re-ensuring PATH are both safe to repeat.
 func cmdSelfInstall(args []string) error {
 	_ = args
+	return ensureBinaryOnPath(false)
+}
+
+// ensureBinaryOnPath copies the running binary to a user PATH directory (unless
+// it already lives on PATH) and ensures that directory is on PATH. It is the
+// shared "put the binary where you can run it from any shell" step used by both
+// `cmesh self-install` and `cmesh install`. When quiet is true it stays silent
+// on the common already-on-PATH path so `cmesh install` doesn't add noise.
+func ensureBinaryOnPath(quiet bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -25,6 +34,15 @@ func cmdSelfInstall(args []string) error {
 	exe, err = filepath.EvalSymlinks(exe)
 	if err != nil {
 		return err
+	}
+
+	// If the running binary is already reachable on PATH, there is nothing to do.
+	// Don't copy it elsewhere — respect where the user runs cmesh from.
+	if dirOnPath(filepath.Dir(exe)) {
+		if !quiet {
+			fmt.Printf("cmesh is already on PATH at %s\n", exe)
+		}
+		return nil
 	}
 
 	dir := preferredInstallDir()

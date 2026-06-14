@@ -22,10 +22,27 @@ import (
 //
 // `cmesh setup` is an alias for this command.
 func cmdInstall(args []string) error {
-	_ = args // no flags today; reserved for future --agent / --no-agent-setup
+	// `cmesh install` is the one command a user runs by hand: it makes the binary
+	// runnable from any shell (PATH) and then registers the cmesh MCP into the
+	// detected agents. --no-self-install skips the PATH step (e.g. when a package
+	// manager owns the binary location).
+	selfInstall := true
+	for _, a := range args {
+		if a == "--no-self-install" {
+			selfInstall = false
+		}
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
+	}
+
+	if selfInstall {
+		if err := ensureBinaryOnPath(true); err != nil {
+			// PATH setup is best-effort; the MCP registration is the essential
+			// step, so warn and continue rather than abort.
+			fmt.Fprintf(os.Stderr, "note: could not ensure cmesh is on PATH: %v\n", err)
+		}
 	}
 
 	all := setupinstall.DetectAgents()

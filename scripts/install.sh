@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+# --no-agent-setup: install the binary only; do not auto-launch the agent picker.
+no_agent_setup=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --no-agent-setup) no_agent_setup=1 ;;
+  esac
+done
+
 die() {
   printf '%s\n' "cmesh install: $*" >&2
   exit 1
@@ -151,12 +159,27 @@ case ":$PATH:" in
      info "  export PATH=\"$install_dir:\$PATH\"" ;;
 esac
 
-# Suggest the next step: the native interactive agent picker (Part 2).
-info ""
-if [ "$on_path" = "1" ]; then
-  info "Next, wire cmesh into your AI coding agent:"
+# Part 1 step 3: auto-launch the native interactive agent picker (Part 2) so the
+# user goes straight from one curl|sh into "pick your agent" — unless they opted
+# out with --no-agent-setup, or stdin/stdout is not a terminal (piped install,
+# where we cannot drive the picker).
+if [ "$no_agent_setup" = "1" ]; then
+  info ""
+  info "Skipping agent setup (--no-agent-setup). When ready, run:"
   info "  cmesh install"
+elif [ -t 0 ] && [ -t 1 ]; then
+  info ""
+  info "Launching the cmesh agent picker..."
+  info ""
+  # Run via the resolved install path so it works before the new PATH entry is
+  # active in this shell.
+  "$install_path" install
 else
-  info "Next, wire cmesh into your AI coding agent (after fixing PATH):"
-  info "  $install_path install"
+  info ""
+  info "Next, wire cmesh into your AI coding agent:"
+  if [ "$on_path" = "1" ]; then
+    info "  cmesh install"
+  else
+    info "  $install_path install"
+  fi
 fi
