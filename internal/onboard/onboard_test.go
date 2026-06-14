@@ -55,6 +55,51 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	}
 }
 
+// TestGenerateConfigRoleRoundTrips proves node.role written by GenerateConfig
+// survives config.Load for every valid role, and that an omitted role (default
+// "both") also round-trips. This is what lets DeriveOnboardingState re-derive an
+// origin-only node's readiness statelessly.
+func TestGenerateConfigRoleRoundTrips(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		want string
+	}{
+		{"origin", "origin", "origin"},
+		{"worker", "worker", "worker"},
+		{"both", "both", "both"},
+		{"empty_defaults_to_both", "", "both"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:        tc.role,
+				Runner:      "codex",
+				AllowedCWDs: []string{"~/code/**"},
+			}, Machine{Name: "homelab-vm", NodeID: "homelab-vm"}, []RunnerStatus{
+				{Name: "codex", Command: []string{"codex"}, Found: true},
+			}, nil)
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+			if !strings.Contains(body, `role = "`+tc.want+`"`) {
+				t.Fatalf("expected role = %q in [node]:\n%s", tc.want, body)
+			}
+			path := t.TempDir() + "/config.toml"
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("generated config should load: %v\n%s", err, body)
+			}
+			if cfg.Node.Role != tc.want {
+				t.Fatalf("node.role = %q, want %q", cfg.Node.Role, tc.want)
+			}
+		})
+	}
+}
+
 func TestGenerateConfigInteractiveProfileIsExplicitAndPeerScoped(t *testing.T) {
 	body, err := GenerateConfig(InitOptions{
 		Role:         "worker",

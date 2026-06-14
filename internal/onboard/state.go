@@ -127,26 +127,34 @@ func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealth
 	linked := linkedCmeshPeers(cfg, cmeshPeers)
 	if len(linked) == 0 {
 		status.State = StatePeerUntrusted
-		status.NextStep = "Call link_peer to trust and reach the discovered cmesh peer, then verify the bidirectional smoke."
+		status.NextStep = "On THIS origin node, call link_peer to trust and reach the discovered cmesh peer (this writes the [peers.X] block + allowlist and runs the smoke). The OTHER node must already have run configure_node + start_service so it is reachable."
 		status.Detail = fmt.Sprintf("%d cmesh peer(s) discovered but not yet linked in this config.", len(cmeshPeers))
 		return status
 	}
 
-	// 'ready' must reflect a REAL, re-derived bidirectional smoke — not just the
-	// presence of a [peers.X] block (which link_peer writes BEFORE running its
-	// smoke). Only here, in the late-state branch, do we pay for the CreateTask
-	// round-trip; early polls returned above without it. A nil smokeFn or a failing
-	// smoke yields peer_untrusted, never a false ready.
-	if smokeFn == nil || !anyPeerSmokePasses(ctx, smokeFn, linked) {
+	// Role-aware ready gate. An origin-only node (role == "origin") has no inbound
+	// worker duty — it only sends work — so it never serves the reverse (peer ->
+	// this node) leg of the bidirectional smoke and must not be held at
+	// peer_untrusted waiting for it. For an origin-only node, reaching the linked
+	// state (peer linked + outbound reachable, already established above) IS ready.
+	//
+	// For worker/both (the default, and an empty role), 'ready' must reflect a
+	// REAL, re-derived bidirectional smoke — not just the presence of a [peers.X]
+	// block (which link_peer writes BEFORE running its smoke). Only here, in the
+	// late-state branch, do we pay for the CreateTask round-trip; early polls
+	// returned above without it. A nil smokeFn or a failing smoke yields
+	// peer_untrusted, never a false ready. (J3: do NOT relax this for worker/both.)
+	originOnly := strings.EqualFold(strings.TrimSpace(cfg.Node.Role), "origin")
+	if !originOnly && (smokeFn == nil || !anyPeerSmokePasses(ctx, smokeFn, linked)) {
 		status.State = StatePeerUntrusted
-		status.NextStep = "Call link_peer to verify / re-establish trust with the linked cmesh peer (the bidirectional smoke did not pass)."
+		status.NextStep = "On THIS origin node, call link_peer again to re-establish trust with the linked cmesh peer (the bidirectional smoke did not pass). Confirm the OTHER node has run configure_node + start_service and is reachable on the tailnet."
 		status.Detail = fmt.Sprintf("%d cmesh peer(s) linked in config, but the bidirectional smoke did not pass — the peer may be down, unreachable, or not trusting this node yet.", len(linked))
 		return status
 	}
 
 	status.State = StateReady
 	status.NextStep = "Setup is verified. Call register_gateway to switch this agent onto the cmesh HTTP delegation gateway (one session restart); then try an example prompt below."
-	status.Detail = ReadyPayoff(cfg, linked)
+	status.Detail = ReadyPayoff(cfg, originOnly, linked)
 	return status
 }
 
@@ -163,10 +171,14 @@ func anyPeerSmokePasses(ctx context.Context, smokeFn func(ctx context.Context, p
 }
 
 // ReadyPayoff builds the Part-5 post-onboarding narration shown when the mesh is
-// verified ready: the per-peer default profile (read from config), how to switch
-// profiles, and example prompts templated with the real linked peer name(s). It is
-// exported so the wizard can surface it directly and so it is unit-testable.
-func ReadyPayoff(cfg *config.Config, linked []PeerCandidate) string {
+// ready: the per-peer default profile (read from config), how to switch profiles,
+// and example prompts templated with the real linked peer name(s). It is exported
+// so the wizard can surface it directly and so it is unit-testable.
+//
+// originOnly selects the accurate readiness sentence: an origin-only node reaches
+// ready on the linked-and-reachable signal (it never serves the reverse smoke),
+// whereas worker/both reach ready only after a passing bidirectional smoke.
+func ReadyPayoff(cfg *config.Config, originOnly bool, linked []PeerCandidate) string {
 	defaultProfile := defaultRunnerProfile(cfg)
 	var names []string
 	for _, p := range linked {
@@ -180,7 +192,11 @@ func ReadyPayoff(cfg *config.Config, linked []PeerCandidate) string {
 	primary := names[0]
 
 	var b strings.Builder
-	b.WriteString("Bidirectional smoke passed — the mesh is verified ready. ")
+	if originOnly {
+		b.WriteString("Origin node linked and reachable — the mesh is ready. ")
+	} else {
+		b.WriteString("Bidirectional smoke passed — the mesh is verified ready. ")
+	}
 	b.WriteString(fmt.Sprintf("Linked peer(s): %s.\n\n", strings.Join(names, ", ")))
 	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Anything past dev is real authority — switch by passing profile in a delegate call ", defaultProfile))
 	b.WriteString("(profile menu: readonly, dev, network, interactive, git_push).\n\n")

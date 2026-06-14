@@ -31,6 +31,16 @@ func TestDeriveOnboardingState(t *testing.T) {
 			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
 		}, nil
 	}
+	// cfgOriginLinked mirrors cfgLinked but the node is origin-only (role="origin").
+	// An origin-only node serves no inbound worker duty, so it must reach 'ready'
+	// on the linked-and-reachable signal WITHOUT a passing reverse smoke.
+	cfgOriginLinked := func(string) (*config.Config, error) {
+		return &config.Config{
+			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort, Role: "origin"},
+			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
+			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
+		}, nil
+	}
 	cfgMissing := func(string) (*config.Config, error) { return nil, os.ErrNotExist }
 
 	smokePass := func(context.Context, PeerCandidate) bool { return true }
@@ -56,8 +66,13 @@ func TestDeriveOnboardingState(t *testing.T) {
 		{"peer_untrusted_smoke_fails", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokeFail, StatePeerUntrusted},
 		// J3: a nil smokeFn cannot verify -> never a false ready.
 		{"peer_untrusted_no_smoke_fn", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, nil, StatePeerUntrusted},
-		// ready requires an actual passing smoke.
+		// ready requires an actual passing smoke for worker/both (default, empty role).
 		{"ready", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokePass, StateReady},
+		// Origin-only node: no inbound worker duty, so 'ready' must NOT require the
+		// reverse smoke. A linked peer reaches ready even with a FAILING smoke...
+		{"ready_origin_only_smoke_fails", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgOriginLinked, smokeFail, StateReady},
+		// ...and even with no smokeFn at all (the gate is skipped for origin-only).
+		{"ready_origin_only_no_smoke_fn", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgOriginLinked, nil, StateReady},
 	}
 
 	for _, tt := range tests {
@@ -115,6 +130,46 @@ func TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(got.Detail), "readonly") {
 		t.Fatalf("payoff must mention how to switch profiles (readonly): %s", got.Detail)
+	}
+}
+
+// TestOriginOnlyReachesReadyWithoutReverseSmoke covers the role-persistence fix:
+// an origin-only node (role="origin") serves no inbound worker duty, so reaching
+// the linked-and-reachable state IS 'ready' — it must NOT be held at
+// peer_untrusted waiting for a reverse (peer -> this node) smoke it never serves.
+// Asserted with a FAILING smoke (the strongest form) so the test proves the gate
+// is skipped, not merely satisfied. The ready next_step + payoff must still fire.
+func TestOriginOnlyReachesReadyWithoutReverseSmoke(t *testing.T) {
+	machine := Machine{Name: "node-a", TailscaleOK: true, TailnetIPs: []string{"100.64.0.1"}, NodeID: "stable-a"}
+	cmeshPeer := PeerCandidate{Name: "node-b", Address: "100.64.0.2", Online: true, CmeshCapable: true}
+	load := func(string) (*config.Config, error) {
+		return &config.Config{
+			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort, Role: "origin"},
+			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
+			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
+		}, nil
+	}
+	restore := swapStateFakes(machine, []PeerCandidate{cmeshPeer}, load)
+	defer restore()
+
+	got := DeriveOnboardingState(context.Background(), "/tmp/x.toml",
+		func(context.Context, int) bool { return true },
+		func(context.Context, PeerCandidate) bool { return false }) // reverse smoke FAILS
+
+	if got.State != StateReady {
+		t.Fatalf("origin-only node must reach ready without the reverse smoke; got %q (detail: %s)", got.State, got.Detail)
+	}
+	if !strings.Contains(got.NextStep, "register_gateway") {
+		t.Fatalf("origin-only ready next_step must route to register_gateway: %q", got.NextStep)
+	}
+	// The payoff still fires (example prompts templated with the real peer name).
+	if !strings.Contains(got.Detail, "node-b") || !strings.Contains(strings.ToLower(got.Detail), "disk usage") {
+		t.Fatalf("origin-only ready must surface the payoff: %s", got.Detail)
+	}
+	// The readiness sentence must be accurate: origin-only did not run a smoke, so
+	// it must not claim "bidirectional smoke passed".
+	if strings.Contains(strings.ToLower(got.Detail), "bidirectional smoke passed") {
+		t.Fatalf("origin-only payoff must not claim a passing smoke: %s", got.Detail)
 	}
 }
 

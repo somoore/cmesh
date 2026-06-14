@@ -30,8 +30,14 @@ type Config struct {
 }
 
 type NodeConfig struct {
-	ID       string `toml:"id"`
-	Name     string `toml:"name"`
+	ID   string `toml:"id"`
+	Name string `toml:"name"`
+	// Role records how this node participates in the mesh: "origin" (only sends
+	// work), "worker" (only accepts work), or "both" (default). It is optional;
+	// an empty value behaves like "both". Persisting it lets the stateless
+	// onboarding wizard re-derive that an origin-only node reaches 'ready'
+	// without requiring the reverse (worker-side) smoke it never serves.
+	Role     string `toml:"role"`
 	MeshPort int    `toml:"mesh_port"`
 	MCPPort  int    `toml:"mcp_port"`
 	DataDir  string `toml:"data_dir"`
@@ -212,6 +218,13 @@ func (c *Config) ApplyDefaults(configDir string) error {
 func (c *Config) Validate() error {
 	if c.Node.Name == "" {
 		return errors.New("node.name is required")
+	}
+	// Role is optional (empty behaves like "both"); only reject a clearly-invalid
+	// non-empty value so existing configs without a role keep loading.
+	switch c.Node.Role {
+	case "", "origin", "worker", "both":
+	default:
+		return fmt.Errorf("node.role must be origin, worker, or both, got %q", c.Node.Role)
 	}
 	if c.Node.MeshPort < 1 || c.Node.MeshPort > 65535 {
 		return fmt.Errorf("node.mesh_port out of range: %d", c.Node.MeshPort)

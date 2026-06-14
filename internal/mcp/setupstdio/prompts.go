@@ -30,12 +30,15 @@ func setupCmeshPromptMessages() []map[string]any {
 		"the user's consent: call them once to preview, then again with confirmed=true after the " +
 		"user agrees. Never set confirmed=true without explicit user approval.\n\n" +
 		"The happy path on the origin node is a chain, each tool's next_step pointing to the next: " +
-		"configure_node -> start_service -> link_peer -> (onboarding_status shows 'ready' only once the " +
-		"bidirectional smoke actually passes) -> register_gateway. Always follow next_step. Once " +
-		"'ready', calling register_gateway switches this agent onto the cmesh HTTP delegation gateway, " +
-		"which requires ONE session restart — after that the stdio setup MCP and onboarding_status are " +
-		"gone and delegation runs over the gateway. Do not skip register_gateway: it is the only place " +
-		"that completes the swap and surfaces the example prompts.\n\n" +
+		"configure_node -> start_service -> link_peer -> (onboarding_status shows 'ready' once the " +
+		"bidirectional smoke passes — or, for an origin-only node, once the peer is linked and reachable) " +
+		"-> register_gateway. Always follow next_step. When " +
+		"onboarding_status reports 'ready', its result already carries the payoff — the example prompts " +
+		"(templated with the real peer name) and the per-peer default profile/profile menu — so surface " +
+		"those to the user from the 'ready' result. register_gateway is the step that switches this agent " +
+		"onto the cmesh HTTP delegation gateway, which requires ONE session restart — after that the stdio " +
+		"setup MCP and onboarding_status are gone and delegation runs over the gateway. Do not skip " +
+		"register_gateway: it is the only place that completes the swap.\n\n" +
 		"IMPORTANT: there is NO cross-node session. cmesh cannot \"resume\" one machine's session on " +
 		"another. Each node configures ITSELF to trust and reach the other; cmesh discovers the rest " +
 		"over the tailnet. To bring up a second machine, the user installs cmesh there and runs " +

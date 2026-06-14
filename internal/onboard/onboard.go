@@ -244,6 +244,9 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	writeSection(&b, "node")
 	writeKV(&b, "id", nodeID)
 	writeKV(&b, "name", nodeName)
+	// Persist the role so DeriveOnboardingState can re-derive that an origin-only
+	// node reaches 'ready' without the reverse worker-side smoke it never serves.
+	writeKV(&b, "role", role)
 	writeInt(&b, "mesh_port", config.DefaultMeshPort)
 	writeInt(&b, "mcp_port", config.DefaultMCPPort)
 	writeKV(&b, "data_dir", "~/.local/share/cmesh")
