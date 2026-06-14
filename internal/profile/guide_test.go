@@ -32,6 +32,10 @@ func TestRecommendLeastPowerfulProfile(t *testing.T) {
 		{"check disk usage", Query},
 		{"inspect repo status", Query},
 		{"read files in the repo", ReadonlyAgent},
+		{"query battery remaining", ReadonlyAgent},
+		{"give me an app inventory sorted by install date", ReadonlyAgent},
+		{"tell me the last time this system was rebooted", ReadonlyAgent},
+		{"open /tmp/report.txt and tell me what was found", ReadonlyAgent},
 		{"edit code and run tests", RepoDev},
 		{"restart a service", SystemChange},
 	}
@@ -42,6 +46,9 @@ func TestRecommendLeastPowerfulProfile(t *testing.T) {
 		}
 		if got.Profile == RepoDev && (!got.RequiresConsent || !got.RequiresTTL || got.RecommendedTTL == "") {
 			t.Fatalf("repo-dev recommendation must require consent+ttl: %+v", got)
+		}
+		if got.Profile == ReadonlyAgent && got.FirstTool != "inspect_peer" {
+			t.Fatalf("readonly-agent recommendation should use inspect_peer: %+v", got)
 		}
 	}
 }

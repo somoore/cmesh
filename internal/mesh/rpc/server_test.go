@@ -210,6 +210,58 @@ func TestQueryProfilePromptDoesNotExecuteOrWriteTargetFile(t *testing.T) {
 	}
 }
 
+func TestReadonlyInspectSelfSelectsAllowedCWD(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	server.Config.Profiles[profiledefs.ReadonlyAgent] = config.ProfileConfig{
+		Runner:       "fake",
+		Capabilities: []string{profiledefs.CapReadFiles},
+		Claims:       []string{profiledefs.CapReadFiles},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellAllow,
+		MaxRuntime:   config.Duration{Duration: time.Minute},
+	}
+	server.Policy = policy.New(server.Config)
+
+	createBody := `{
+		"task_id":"inspect-no-cwd",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"task_kind":"inspect",
+		"prompt":"tell me how much battery is left",
+		"runner":"fake",
+		"profile":"readonly-agent",
+		"wait":true,
+		"timeout_s":5,
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusOK {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	rec, err := server.Store.GetTask(context.Background(), "inspect-no-cwd")
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if rec.CWD == "" {
+		t.Fatal("readonly inspect task did not self-select a cwd")
+	}
+	normalizedRoot, err := policy.NormalizeCWD(root)
+	if err != nil {
+		t.Fatalf("NormalizeCWD root: %v", err)
+	}
+	normalizedCWD, err := policy.NormalizeCWD(rec.CWD)
+	if err != nil {
+		t.Fatalf("NormalizeCWD rec.CWD: %v", err)
+	}
+	if normalizedCWD != normalizedRoot {
+		t.Fatalf("cwd = %q, want %q", normalizedCWD, normalizedRoot)
+	}
+}
+
 func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t, root, immediateRunner{})

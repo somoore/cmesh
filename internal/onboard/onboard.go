@@ -304,10 +304,10 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 			writeShellPolicy(&b, profiledefs.QueryShell)
 			runnersToWrite[profiledefs.RunnerShell] = shellRunnerCommand()
 		case profiledefs.ReadonlyAgent:
-			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
+			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "allow", false, false, "30m", 1<<20, "normal", "medium")
 			runnersToWrite[runnerName] = runnerCommand
 		case profiledefs.LegacyReadonly:
-			writeProfile(&b, profiledefs.LegacyReadonly, runnerName, "Agent-assisted read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
+			writeProfile(&b, profiledefs.LegacyReadonly, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "allow", false, false, "30m", 1<<20, "normal", "medium")
 			runnersToWrite[runnerName] = runnerCommand
 		case profiledefs.RepoDev, profiledefs.LegacyDev:
 			writeProfile(&b, profiledefs.RepoDev, runnerName, "Agent-assisted repo-local edits and test commands inside allowed cwd.", []string{"build", "modify"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo}, profileAllowedPeers, true, true, false, "repo_only", "allow", false, false, "2h", 1<<20, "loud", "medium")

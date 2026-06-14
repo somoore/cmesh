@@ -29,7 +29,7 @@ func setupCmeshPromptMessages() []map[string]any {
 		"Before choosing or writing profiles, use the profile_guide/profile_recommend tools to explain " +
 		"the differences in plain language. Recommend the least-powerful profile: query first for " +
 		"machine facts, query-network only for bounded network checks, query-shell only for allowlisted " +
-		"read diagnostics, readonly-agent only for arbitrary file reads, and repo-dev or higher only " +
+		"read diagnostics, readonly-agent for open-ended read-only system or file inspection, and repo-dev or higher only " +
 		"after the user explicitly acknowledges writes, shell/network, TTL, and allowed cwd scope.\n\n" +
 		"State-changing tools (configure_node, start_service, link_peer, register_gateway) require " +
 		"the user's consent: call them once to preview, then again with confirmed=true after the " +

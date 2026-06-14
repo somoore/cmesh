@@ -416,12 +416,11 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// A smoke task with no cwd self-selects one this worker's policy accepts. The
-	// smoke verifies the runner round-trips; the delegator can't know a cwd that
-	// exists on this worker (especially cross-OS), so the worker — the node that
-	// runs the task and enforces allowed_cwds — picks it. Non-smoke tasks keep
-	// their existing empty-cwd behavior; only smoke is auto-filled.
-	if strings.TrimSpace(req.CWD) == "" && (isSmokeOriginSession(req.Provenance.OriginSessionID, req.OriginSessionID) || req.TaskKind == "query") {
+	// A smoke, typed query, or read-only inspection task with no cwd self-selects
+	// one this worker's policy accepts. The delegator often cannot know a cwd
+	// that exists on this worker (especially cross-OS), so the worker — the node
+	// that runs the task and enforces allowed_cwds — picks it.
+	if strings.TrimSpace(req.CWD) == "" && shouldSelfSelectCWD(s.Config, req) {
 		if cwd := policy.SmokeCWD(s.Config); cwd != "" {
 			req.CWD = cwd
 		}
@@ -705,6 +704,28 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	_, _ = s.Store.UpdateTaskState(context.Background(), rec.ID, store.StateUpdate{State: task.StateDone, Result: resultAsTask(result), ResultRef: ref})
 	_ = removeTaskSecrets(s.Config.Node.DataDir, rec.ID)
 	s.record(context.Background(), audit.Event{Type: "task.completed", TaskID: rec.ID, OriginSession: rec.OriginSessionID, Chain: rec.DelegationChain, Runner: rec.Runner, Profile: rec.ProfileEffective, Source: "worker"})
+}
+
+func shouldSelfSelectCWD(cfg *config.Config, req schema.CreateTaskRequest) bool {
+	if isSmokeOriginSession(req.Provenance.OriginSessionID, req.OriginSessionID) || req.TaskKind == "query" {
+		return true
+	}
+	if req.TaskKind != "inspect" {
+		return false
+	}
+	profileName := profiledefs.CanonicalProfile(req.Profile)
+	if profileName != profiledefs.ReadonlyAgent {
+		return false
+	}
+	prof, ok := cfg.Profiles[req.Profile]
+	if !ok {
+		prof, ok = cfg.Profiles[profileName]
+	}
+	if !ok {
+		return false
+	}
+	caps := profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims)
+	return prof.Writes == profiledefs.WritesDeny && contains(caps, profiledefs.CapReadFiles)
 }
 
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
