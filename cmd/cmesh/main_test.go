@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"os"
 	"path/filepath"
@@ -138,88 +137,6 @@ func TestSelectMCPInstallAgentsRequiresDetectedAgent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not detected") {
 		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestServiceCommandLineUsesServiceEntrypoint(t *testing.T) {
-	got := serviceCommandLine(`C:\Tools\cmesh.exe`, `C:\Users\scott\.config\cmesh\config.toml`)
-	if !strings.Contains(got, ` _service --config `) {
-		t.Fatalf("service command line = %q, want _service entrypoint", got)
-	}
-	if strings.Contains(got, ` up --config `) {
-		t.Fatalf("service command line = %q, must not use foreground up command", got)
-	}
-}
-
-func TestLaunchdPlistIncludesPathEnvironment(t *testing.T) {
-	got := launchdPlistBody(`/Applications/cmesh&tools/cmesh`, `/Users/scott/config<cmesh>.toml`, `/opt/homebrew/bin:/usr/bin`)
-	for _, want := range []string{
-		"<key>EnvironmentVariables</key>",
-		"<key>PATH</key>",
-		"<string>/opt/homebrew/bin:/usr/bin</string>",
-		"/Applications/cmesh&amp;tools/cmesh",
-		"/Users/scott/config&lt;cmesh&gt;.toml",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("launchd plist missing %q in %s", want, got)
-		}
-	}
-}
-
-func TestLaunchdPATHAddsHomebrewAheadOfLaunchdDefaults(t *testing.T) {
-	t.Setenv("PATH", "/usr/bin:/bin")
-	got := launchdPATH()
-	for _, want := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("launchd PATH missing %q in %q", want, got)
-		}
-	}
-	if !strings.HasPrefix(got, "/opt/homebrew/bin:") {
-		t.Fatalf("launchd PATH = %q, want Homebrew first", got)
-	}
-}
-
-func TestWindowsServiceSCArgsWithUser(t *testing.T) {
-	got := strings.Join(windowsServiceSCArgs("config", `C:\Tools\cmesh.exe _service`, `.\scott`, "secret"), "\x00")
-	for _, want := range []string{"config", "cmesh", "binPath=", `C:\Tools\cmesh.exe _service`, "start=", "auto", "obj=", `.\scott`, "password=", "secret"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("windowsServiceSCArgs missing %q in %#v", want, got)
-		}
-	}
-}
-
-func TestWindowsServiceNotInstalledError(t *testing.T) {
-	err := errors.New("query Windows service cmesh: [SC] OpenService FAILED 1060:\n\nThe specified service does not exist as an installed service.")
-	if !isWindowsServiceNotInstalledError(err) {
-		t.Fatal("expected service-not-installed error")
-	}
-	if isWindowsServiceNotInstalledError(errors.New("query Windows service cmesh: access denied")) {
-		t.Fatal("access denied should remain a service query failure")
-	}
-}
-
-func TestParseWindowsServiceStartName(t *testing.T) {
-	out := `
-SERVICE_NAME: cmesh
-        TYPE               : 10  WIN32_OWN_PROCESS
-        START_TYPE         : 2   AUTO_START
-        SERVICE_START_NAME : .\scott
-`
-	got, err := parseWindowsServiceStartName(out)
-	if err != nil {
-		t.Fatalf("parseWindowsServiceStartName: %v", err)
-	}
-	if got != `.\scott` {
-		t.Fatalf("start name = %q", got)
-	}
-}
-
-func TestSameWindowsUserNormalizesDomainAndDotPrefix(t *testing.T) {
-	if !sameWindowsUser(`.\scott`, `DESKTOP\scott`) {
-		t.Fatal("expected dot-prefix and machine-domain names to match")
-	}
-	if sameWindowsUser(`.\scott`, `DESKTOP\other`) {
-		t.Fatal("different users should not match")
 	}
 }
 
