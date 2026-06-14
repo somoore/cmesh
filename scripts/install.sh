@@ -69,7 +69,8 @@ source_checkout_dir() {
     return 0
   fi
   # $0 may be relative; resolve its directory, then check its parent (repo root).
-  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || return 1
+  # Unset CDPATH so `cd` never prints a path or jumps to a CDPATH entry.
+  script_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || return 1
   if [ -d "$script_dir/../cmd/cmesh" ]; then
     printf '%s' "$script_dir/.."
     return 0
