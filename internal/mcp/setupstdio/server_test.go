@@ -143,6 +143,15 @@ func TestToolSchemasUseArrayRequired(t *testing.T) {
 		if _, ok := schema["required"].([]string); !ok {
 			t.Fatalf("tool %q required = %#v, want []string", tool["name"], schema["required"])
 		}
+		if tool["name"] == "configure_node" {
+			properties, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("configure_node properties = %#v", schema["properties"])
+			}
+			if _, ok := properties["runner"]; !ok {
+				t.Fatalf("configure_node schema missing runner property: %#v", properties)
+			}
+		}
 	}
 	body, err := json.Marshal(tools())
 	if err != nil {

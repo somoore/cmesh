@@ -732,6 +732,7 @@ func tools() []map[string]any {
 				"role":         stringSchema("Machine role: origin, worker, or both."),
 				"allowed_cwds": arraySchema(stringSchema("Directory glob workers may use on this machine.")),
 				"peer_names":   arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
+				"runner":       stringSchema("Runner to use: auto, claude-code, or codex."),
 				"profiles":     arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
 				"profile_acknowledgements": arraySchema(objectSchema(map[string]any{
 					"profile":           stringSchema("Elevated profile being acknowledged, such as repo-dev, desktop-control, or system-change."),

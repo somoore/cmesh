@@ -824,7 +824,7 @@ func (g *Gateway) profileUseCall(_ context.Context, req ProfileUseRequest) (Tool
 		return toolFailure(task.ErrorProfileDenied, "profile "+profileName+" requires ttl to create an active lease")
 	}
 	if problems := profiledefs.AcknowledgementProblems([]string{profileName}, []profiledefs.ProfileAcknowledgement{req.ProfileAcknowledgement}); len(problems) > 0 {
-		return toolFailure(task.ErrorProfileDenied, strings.Join(problems, "; "))
+		return toolFailure(task.ErrorProfileAckRequired, strings.Join(problems, "; "))
 	}
 	ctxFile, err := g.readProfileContext()
 	if err != nil {

@@ -446,7 +446,7 @@ func cmdDoctor(args []string) error {
 	if cfg != nil {
 		meshPort = cfg.Node.MeshPort
 	}
-	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: meshPort})
+	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: meshPort, AcceptExistingMeshService: true})
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"status":    status,

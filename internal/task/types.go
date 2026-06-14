@@ -37,6 +37,7 @@ const (
 	ErrorRunnerUnavailable     ErrorCode = "runner_unavailable"
 	ErrorProfileUnavailable    ErrorCode = "profile_unavailable"
 	ErrorProfileDenied         ErrorCode = "profile_denied"
+	ErrorProfileAckRequired    ErrorCode = "profile_acknowledgement_required"
 	ErrorCWDDenied             ErrorCode = "cwd_denied"
 	ErrorDirtyWorktree         ErrorCode = "dirty_worktree"
 	ErrorVersionMismatch       ErrorCode = "version_mismatch"

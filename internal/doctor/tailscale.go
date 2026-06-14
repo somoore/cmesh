@@ -2,12 +2,15 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	tsid "cmesh/internal/identity/tailscale"
+	"cmesh/internal/mesh/schema"
 )
 
 type Check struct {
@@ -53,8 +56,9 @@ func (r Report) Text() string {
 }
 
 type TailscaleOptions struct {
-	MeshPort int
-	Timeout  time.Duration
+	MeshPort                  int
+	Timeout                   time.Duration
+	AcceptExistingMeshService bool
 }
 
 func Tailscale(ctx context.Context, opts TailscaleOptions) Report {
@@ -101,6 +105,12 @@ func Tailscale(ctx context.Context, opts TailscaleOptions) Report {
 	}
 
 	if err := bindTailnetIP(ctx, tailnetIP, opts.MeshPort); err != nil {
+		if opts.AcceptExistingMeshService {
+			if detail, ok := existingMeshServiceHealthy(ctx, tailnetIP, opts.MeshPort); ok {
+				checks = append(checks, pass("bind_tailnet_ip", detail))
+				return Report{Checks: checks}
+			}
+		}
 		checks = append(checks, fail("bind_tailnet_ip", err))
 	} else {
 		checks = append(checks, pass("bind_tailnet_ip", "ok"))
@@ -135,6 +145,30 @@ func bindTailnetIP(ctx context.Context, ip string, port int) error {
 		return err
 	}
 	return ln.Close()
+}
+
+func existingMeshServiceHealthy(ctx context.Context, ip string, port int) (string, bool) {
+	addr := net.JoinHostPort(ip, fmt.Sprintf("%d", port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/v1/hello", nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", false
+	}
+	var hello schema.HelloResponse
+	if err := json.NewDecoder(resp.Body).Decode(&hello); err != nil {
+		return "", false
+	}
+	if hello.NodeID == "" && hello.NodeName == "" && len(hello.SchemaVersions) == 0 {
+		return "", false
+	}
+	return "existing cmesh listener healthy", true
 }
 
 func pass(name, detail string) Check {

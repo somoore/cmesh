@@ -307,7 +307,7 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 
 	ack := profiledefs.ProfileAcknowledgement{Profile: "repo-dev", Writes: profiledefs.WritesRepoOnly, Shell: profiledefs.ShellAllow, Network: false, TTL: "30m", AllowedCWDScope: cwd}
 	stillDenied, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd, TTL: "30m"})
-	if stillDenied.OK || stillDenied.Error == nil || stillDenied.Error.Code != task.ErrorProfileDenied {
+	if stillDenied.OK || stillDenied.Error == nil || stillDenied.Error.Code != task.ErrorProfileAckRequired {
 		t.Fatalf("profile_use without explicit acknowledgement should be denied, got %+v", stillDenied)
 	}
 
