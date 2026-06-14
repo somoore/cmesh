@@ -191,6 +191,31 @@ Reuse `TailnetPeers(probeCmesh=true)` and `probeMesh`. Surface as
 `discover_peers` returning `{online_peers, cmesh_peers, this_node}` with plain
 narration. No new transport.
 
+## Trust-model amendment (review finding, conscious change)
+
+Original security guidance held that `link_peer` must add the consented peer to
+**outbound** allow only and **must not widen inbound** `allowed_peers`. That letter
+is wrong: in the canonical sequential flow Node A is configured before Node B
+exists, so A's inbound `allowed_peers` falls back to `[self]`, and nothing ever
+adds B — the bidirectional smoke's reverse leg (B→A) then fails and the handshake
+never closes.
+
+Amended rule: **`link_peer` grants the single consented peer trust in BOTH
+directions** — outbound (A may send work to B) and inbound (A may accept work from
+B) — because linking a peer is exactly an explicit, consented, single-peer trust
+grant. The *spirit* of the original guard (never broaden beyond the one consented
+peer, never wildcard) is preserved:
+
+- The inbound entry is the one peer's whois-matchable identity, glob-escaped (no
+  `* ? [ ]`), never a wildcard, never any other node.
+- The grant is bounded: B is still constrained by A's `allowed_cwds` and profile
+  ceilings; inbound trust is "may ask," not "may do anything."
+- The confirmation preview MUST disclose both directions ("A will send work to B
+  AND accept work from B"), or the consent is not informed.
+- The grant is role-aware: inbound trust + requiring the B→A smoke for `ready`
+  only applies when this node serves as a worker (`role` = worker|both, the
+  default). An origin-only node does not take the inbound grant.
+
 ## Part 4 — Two-node trust handshake (the symmetric dance)
 
 Concrete ordering the wizard enforces (per R1). Node A = origin already set up,
