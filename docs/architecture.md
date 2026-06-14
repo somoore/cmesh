@@ -71,7 +71,7 @@ flowchart LR
 
 ## Request lifecycle
 
-Before the daemon exists, `cmesh mcp` can install a setup MCP entry into Claude Code or Codex. That setup server runs over stdio and can guide onboarding without exposing any network listener.
+Onboarding is wizard-driven. The two MCP surfaces are split by daemon start: the stdio setup MCP (`cmesh mcp --stdio`, installed into Claude Code or Codex before the daemon exists, no network listener) runs first-run setup, and the local HTTP gateway (`http://127.0.0.1:7777/mcp`, served by `cmesh up`) runs delegation afterward. The stdio setup server is a stateless onboarding wizard: it re-derives where setup stands from the environment on every call (verify, don't ask), confirms before each state change, and is therefore resumable and safe to re-run. It detects Tailscale and peers, writes config, installs and starts the daemon, registers the gateway, and walks the two-machine handshake — where each machine independently configures itself to trust and reach the other rather than resuming a shared session. Once it brings the daemon up, the agent's cmesh MCP moves from this stdio setup server to the HTTP gateway below.
 
 Once `cmesh up` is running:
 

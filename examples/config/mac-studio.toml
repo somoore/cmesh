@@ -9,6 +9,9 @@ data_dir = "~/.local/share/cmesh"
 mode = "host"
 bind = "tailnet_ip"
 
+# Allowlists key on the matchable hostname (Tailscale whois NodeName, the first
+# DNS label), not an ephemeral tailscale node id. Use the peer's hostname here
+# and in peers.<x>.node_id below so inbound policy can match the caller.
 [policy]
 allowed_peers = ["homelab-vm"]
 allowed_cwds = ["~/code/**", "~/work/**"]
@@ -43,6 +46,7 @@ concurrency = 1
 
 [peers.homelab-vm]
 name = "homelab-vm"
+# Matchable hostname (whois NodeName), not an ephemeral tailscale node id.
 node_id = "homelab-vm"
 address = "100.64.10.20"
 port = 7778
