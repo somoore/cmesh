@@ -59,14 +59,32 @@ install_from_binary() {
   return 0
 }
 
+# source_checkout_dir returns a directory that contains ./cmd/cmesh, checking the
+# current working directory first and then the script's own parent (so running
+# `sh scripts/install.sh` from inside scripts/ still finds the repo root). Prints
+# nothing and returns non-zero when no source checkout is found.
+source_checkout_dir() {
+  if [ -d "./cmd/cmesh" ]; then
+    printf '%s' "."
+    return 0
+  fi
+  # $0 may be relative; resolve its directory, then check its parent (repo root).
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || return 1
+  if [ -d "$script_dir/../cmd/cmesh" ]; then
+    printf '%s' "$script_dir/.."
+    return 0
+  fi
+  return 1
+}
+
 install_from_source() {
-  [ -d "./cmd/cmesh" ] || return 1
+  src=$(source_checkout_dir) || return 1
   need_cmd go
   tmpdir="${TMPDIR:-/tmp}/cmesh-install.$$"
   mkdir -p "$tmpdir"
   trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
-  info "building ./cmd/cmesh"
-  go build -trimpath -o "$tmpdir/cmesh" ./cmd/cmesh
+  info "building cmesh from source in $src"
+  ( cd "$src" && go build -trimpath -o "$tmpdir/cmesh" ./cmd/cmesh )
   install_file "$tmpdir/cmesh" "$install_path"
   return 0
 }
@@ -83,15 +101,22 @@ download() {
   fi
 }
 
+# latest_version prints the newest release tag for $repo, or returns non-zero on
+# failure. It must NOT call die: it runs in a $(...) subshell, so die would only
+# exit the subshell and leave an EMPTY version that builds a broken
+# .../download//cmesh_... URL. The caller checks the exit status instead.
 latest_version() {
   repo=$1
   need_cmd sed
   url="https://api.github.com/repos/$repo/releases/latest"
   tmp="${TMPDIR:-/tmp}/cmesh-latest.$$"
-  download "$url" "$tmp"
+  if ! download "$url" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
   version=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp" | head -n 1)
   rm -f "$tmp"
-  [ -n "$version" ] || die "could not determine latest release for $repo"
+  [ -n "$version" ] || return 1
   printf '%s' "$version"
 }
 
@@ -104,13 +129,21 @@ latest_version() {
 #   CMESH_VERSION=v1.2.3        # or "latest" (default)
 # When get.cmesh.dev is live this script ships with CMESH_REPO baked in.
 install_from_release() {
-  : "${CMESH_REPO:=cmesh/cmesh}" # PLACEHOLDER public repo; override via env.
+  # No public release repo is published yet. Skip this source entirely unless the
+  # caller explicitly points at one (CMESH_REPO), rather than emitting confusing
+  # 404s against the placeholder. When get.cmesh.dev is live this default is
+  # replaced with the real owner/repo and this guard is removed.
+  if [ -z "${CMESH_REPO:-}" ]; then
+    return 1
+  fi
   need_cmd tar
   os=$(detect_os)
   arch=$(detect_arch)
   version=${CMESH_VERSION:-}
   if [ -z "$version" ] || [ "$version" = "latest" ]; then
-    version=$(latest_version "$CMESH_REPO")
+    if ! version=$(latest_version "$CMESH_REPO"); then
+      die "could not determine the latest release for $CMESH_REPO (set CMESH_VERSION=vX.Y.Z, CMESH_BIN=/path/to/cmesh, or run from a source checkout)"
+    fi
   fi
   asset="cmesh_${os}_${arch}.tar.gz"
   url="https://github.com/$CMESH_REPO/releases/download/$version/$asset"
@@ -118,7 +151,7 @@ install_from_release() {
   mkdir -p "$tmpdir"
   trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
   info "downloading $url"
-  download "$url" "$tmpdir/$asset"
+  download "$url" "$tmpdir/$asset" || die "download failed: $url"
   tar -xzf "$tmpdir/$asset" -C "$tmpdir"
   [ -f "$tmpdir/cmesh" ] || die "release archive did not contain cmesh binary"
   install_file "$tmpdir/cmesh" "$install_path"
@@ -143,7 +176,13 @@ elif install_from_source; then
 elif install_from_release; then
   info "installed $install_path from GitHub release"
 else
-  die "no install source found; set CMESH_BIN, run from a source checkout containing ./cmd/cmesh, or set CMESH_REPO=owner/repo"
+  printf '%s\n' "cmesh install: no install source found." >&2
+  printf '%s\n' "  Most likely you ran this from the scripts/ directory. Run it from the repo root:" >&2
+  printf '%s\n' "    cd \"\$(dirname \"\$0\")/..\" && sh scripts/install.sh   # or just: cd .. && sh scripts/install.sh" >&2
+  printf '%s\n' "  Or provide a source explicitly:" >&2
+  printf '%s\n' "    CMESH_BIN=/path/to/cmesh sh scripts/install.sh         # install a prebuilt binary" >&2
+  printf '%s\n' "    CMESH_REPO=owner/repo sh scripts/install.sh            # download a published release" >&2
+  exit 1
 fi
 
 # Print the installed version so the user can confirm the binary works.
