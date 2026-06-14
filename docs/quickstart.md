@@ -63,6 +63,8 @@ What the wizard does, in order, on this first machine:
 
 Throughout, the wizard only stops to ask for **consent** to change something (write config, install or start the service, trust a peer). It never asks you to confirm facts it can detect for itself.
 
+Under the hood these steps are cmesh MCP tools (`onboarding_status`, `configure_node`, `start_service`, `link_peer`, `register_gateway`). You normally never call them directly, but [MCP onboarding tools](mcp-onboarding.md) documents each one if you want to follow along or drive a step by hand.
+
 > Codex note: registering the gateway MCP varies by Codex CLI version. If the wizard cannot do it automatically, it prints the exact manual steps instead of failing. Follow those, then continue.
 
 ## 3. Add a second machine (the symmetric handshake)

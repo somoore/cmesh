@@ -153,6 +153,7 @@ Anything beyond removing the MCP is separately consented — each is its own pro
 
 - [Architecture](docs/architecture.md)
 - [Quickstart](docs/quickstart.md)
+- [MCP onboarding tools](docs/mcp-onboarding.md)
 - [Configuration](docs/configuration.md)
 - [Security model](docs/security.md)
 - [Release process](docs/release.md)
