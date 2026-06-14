@@ -2,11 +2,20 @@ package onboard
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"cmesh/internal/config"
+	tsid "cmesh/internal/identity/tailscale"
+	"cmesh/internal/mesh/schema"
+	"cmesh/internal/policy"
 )
 
 func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
@@ -157,6 +166,127 @@ func TestGenerateConfigSanitizesPeerTableNames(t *testing.T) {
 	}
 	if _, err := config.Load(path); err != nil {
 		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+}
+
+// TestGenerateConfigAllowedPeersMatchWhoisIdentity proves the value
+// GenerateConfig writes into policy.allowed_peers is one that the inbound policy
+// engine accepts when a peer authenticates via tailscale whois. Discovery
+// supplies an ephemeral NodeID that does NOT match whois; the generated
+// allowlist must key on the whois-matchable hostname (PeerCandidate.Name).
+func TestGenerateConfigAllowedPeersMatchWhoisIdentity(t *testing.T) {
+	const (
+		hostname     = "homelab"
+		ephemeralID  = "n-ephemeral-12345" // tailscale status --json peer.ID; NOT whois-matchable
+		whoisNodeID  = "nReal67890CNTRL"   // whois Node.ID, distinct from the ephemeral id
+		whoisStable  = "nStableABCDEF"
+		allowedCWD   = "~/code/**"
+	)
+
+	body, err := GenerateConfig(InitOptions{
+		Role:        "worker",
+		Runner:      "codex",
+		AllowedCWDs: []string{allowedCWD},
+	}, Machine{Name: "win11-desktop"}, []RunnerStatus{
+		{Name: "codex", Command: []string{"codex"}, Found: true},
+	}, []PeerCandidate{
+		{Name: hostname, NodeID: ephemeralID, Address: "100.64.10.20", CmeshCapable: true},
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+
+	// The matchable hostname must be written, never the ephemeral discovery id.
+	if !strings.Contains(body, `allowed_peers = ["`+hostname+`"]`) {
+		t.Fatalf("expected allowed_peers to key on whois-matchable hostname %q:\n%s", hostname, body)
+	}
+	if strings.Contains(body, ephemeralID) {
+		t.Fatalf("ephemeral discovery node id %q must not appear in config:\n%s", ephemeralID, body)
+	}
+
+	path := t.TempDir() + "/config.toml"
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+	engine := policy.New(cfg)
+
+	tests := []struct {
+		name       string
+		identity   tsid.Identity
+		wantPeerOK bool
+	}{
+		{
+			name:       "whois identity for the configured hostname is accepted",
+			identity:   tsid.Identity{NodeName: hostname, NodeID: whoisNodeID, StableID: whoisStable},
+			wantPeerOK: true,
+		},
+		{
+			name:       "unknown peer is rejected at inbound policy",
+			identity:   tsid.Identity{NodeName: "stranger", NodeID: "nStranger", StableID: "nStrangerStable"},
+			wantPeerOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := engine.CheckInbound(policy.TaskIntent{
+				PeerName:     tc.identity.NodeName,
+				PeerNodeID:   tc.identity.NodeID,
+				PeerStableID: tc.identity.StableID,
+				PeerTags:     tc.identity.Tags,
+				CWD:          "~/code/example",
+				Profile:      "dev",
+			})
+			// The peer-identity gate runs before the cwd gate. A peer match means
+			// we pass past peer_unauthorized regardless of cwd existence.
+			gotPeerOK := decision.Code != "peer_unauthorized"
+			if gotPeerOK != tc.wantPeerOK {
+				t.Fatalf("peer match = %v (code=%q), want %v", gotPeerOK, decision.Code, tc.wantPeerOK)
+			}
+		})
+	}
+}
+
+func TestCapturePeerIdentityReadsHelloResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/hello" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.HelloResponse{
+			NodeID:   "n-ephemeral-999",
+			NodeName: "homelab",
+			StableID: "nStableABCDEF",
+		})
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	name, stableID, err := CapturePeerIdentity(context.Background(), host, port)
+	if err != nil {
+		t.Fatalf("CapturePeerIdentity: %v", err)
+	}
+	if name != "homelab" {
+		t.Fatalf("node_name = %q, want %q", name, "homelab")
+	}
+	if stableID != "nStableABCDEF" {
+		t.Fatalf("stable_id = %q, want %q", stableID, "nStableABCDEF")
 	}
 }
 

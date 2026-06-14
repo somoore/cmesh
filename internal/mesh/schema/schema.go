@@ -20,6 +20,7 @@ type Error struct {
 type HelloResponse struct {
 	NodeID         string    `json:"node_id"`
 	NodeName       string    `json:"node_name"`
+	StableID       string    `json:"stable_id,omitempty"`
 	SchemaVersions []string  `json:"schema_versions"`
 	Runners        []Runner  `json:"runners"`
 	Capabilities   []string  `json:"capabilities"`

@@ -114,9 +114,14 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		}
 		runners = append(runners, schema.Runner{Name: manifest.Runner, Version: manifest.Version, Profiles: profiles})
 	}
+	stableID := ""
+	if self, err := s.Identity.Self(r.Context()); err == nil {
+		stableID = self.StableID
+	}
 	writeJSON(w, http.StatusOK, schema.HelloResponse{
 		NodeID:         s.Config.Node.ID,
 		NodeName:       s.Config.Node.Name,
+		StableID:       stableID,
 		SchemaVersions: []string{schema.Version},
 		Runners:        runners,
 		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status", "peer_smoke"},
