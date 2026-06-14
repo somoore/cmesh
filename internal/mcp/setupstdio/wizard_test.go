@@ -10,8 +10,72 @@ import (
 	"testing"
 
 	"cmesh/internal/config"
+	"cmesh/internal/onboard"
 	"cmesh/internal/service"
+	"cmesh/internal/task"
 )
+
+// TestSmokeResultFromReportScopesPolicyDenialToForwardLeg locks the correctness
+// fix: a policy denial (cwd_denied/profile_denied) only means "fix the REMOTE
+// node" when it came from the FORWARD leg (the remote rejected our task). A
+// reverse-leg denial runs with THIS node as the worker, so it is a LOCAL policy
+// fix and must NOT be reported as peer_policy_denied. The report's FailCode is the
+// seam: bidirectionalSmoke populates it only from the forward leg, so a reverse
+// denial leaves FailCode empty and the result is reachable-but-not-policy-denied.
+func TestSmokeResultFromReportScopesPolicyDenialToForwardLeg(t *testing.T) {
+	tests := []struct {
+		name             string
+		report           smokeReport
+		wantOK           bool
+		wantReachable    bool
+		wantPolicyDenied bool
+	}{
+		{
+			name:          "passing smoke",
+			report:        smokeReport{OK: true, Reachable: true},
+			wantOK:        true,
+			wantReachable: true,
+		},
+		{
+			name:          "unreachable peer is not policy-denied",
+			report:        smokeReport{Reachable: false, FailCode: task.ErrorPeerUnreachable},
+			wantReachable: false,
+		},
+		{
+			// Forward leg: remote rejected OUR task on its policy -> remote fix.
+			name:             "forward cwd_denied is policy-denied",
+			report:           smokeReport{Reachable: true, FailCode: task.ErrorCWDDenied},
+			wantReachable:    true,
+			wantPolicyDenied: true,
+		},
+		{
+			// Reverse leg failure leaves FailCode empty (bidirectionalSmoke does not
+			// map reverse errors into FailCode) -> reachable but NOT policy-denied.
+			name:          "reverse-leg failure stays untrusted, not policy-denied",
+			report:        smokeReport{Reachable: true, FailCode: "", Detail: "reverse smoke failed: cwd_denied"},
+			wantReachable: true,
+		},
+		{
+			name:             "forward profile_denied is policy-denied",
+			report:           smokeReport{Reachable: true, FailCode: task.ErrorProfileDenied},
+			wantReachable:    true,
+			wantPolicyDenied: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := smokeResultFromReport(tc.report)
+			if got.OK != tc.wantOK || got.Reachable != tc.wantReachable || got.PolicyDenied != tc.wantPolicyDenied {
+				t.Fatalf("smokeResultFromReport(%+v) = {OK:%v Reachable:%v PolicyDenied:%v}, want {OK:%v Reachable:%v PolicyDenied:%v}",
+					tc.report, got.OK, got.Reachable, got.PolicyDenied, tc.wantOK, tc.wantReachable, tc.wantPolicyDenied)
+			}
+		})
+	}
+}
+
+// TestReadySmokeFnReturnsSmokeResult guards that the production seam wired into the
+// deriver has the SmokeFunc shape (compile-time + a basic invocation guard).
+var _ onboard.SmokeFunc = readySmokeFn
 
 // TestStartServiceEmitsNothingToStdout is the critical C1 test: start_service
 // must never write to the real os.Stdout (the MCP JSON-RPC channel), even when

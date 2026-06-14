@@ -33,10 +33,37 @@ const (
 	// StatePeerUntrusted means a cmesh peer is discovered but not yet linked
 	// (missing [peers.X] / outbound allow), so a smoke would fail one direction.
 	StatePeerUntrusted OnboardingState = "peer_untrusted"
+	// StatePeerPolicyDenied means a linked cmesh peer was REACHED but rejected the
+	// smoke task on policy (e.g. the remote's allowed_cwds or denied_profiles). The
+	// mesh path works; the fix is on the OTHER node's config, not local trust.
+	StatePeerPolicyDenied OnboardingState = "peer_policy_denied"
 	// StateReady means the local node is configured, the daemon is up, and at least
 	// one cmesh peer is linked and reachable.
 	StateReady OnboardingState = "ready"
 )
+
+// SmokeResult is the rich outcome of a bidirectional smoke against a linked peer.
+// It carries enough to distinguish failure modes that need DIFFERENT fixes:
+// unreachable (peer down / not on tailnet), policy-denied (reached but the remote
+// rejected the task on policy), and untrusted (reached but auth/trust failed).
+// The category is a plain string so this package stays free of a task dependency;
+// callers map their structured error codes onto Reason.
+type SmokeResult struct {
+	// OK is true only when the smoke passed in both directions.
+	OK bool
+	// Reachable is true once the peer answered /hello, even if a later step failed.
+	Reachable bool
+	// PolicyDenied is true when the peer was reached but rejected the task on policy
+	// (cwd_denied, profile_denied, and similar remote-config rejections).
+	PolicyDenied bool
+	// Detail is a human-readable explanation of the outcome.
+	Detail string
+}
+
+// SmokeFunc runs a bidirectional smoke against a linked peer and reports the rich
+// outcome. It is injected into DeriveOnboardingState so the round-trip stays
+// testable; a nil SmokeFunc means "cannot verify".
+type SmokeFunc func(ctx context.Context, peer PeerCandidate) SmokeResult
 
 // OnboardingStatus is the structured result of DeriveOnboardingState. It carries
 // the verify-then-confirm narration the wizard surfaces to the user.
@@ -69,7 +96,7 @@ var (
 // is never returned without an actual passing smoke.
 //
 // States are evaluated in table order; the first matching state wins.
-func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealthy func(ctx context.Context, mcpPort int) bool, smokeFn func(ctx context.Context, peer PeerCandidate) bool) OnboardingStatus {
+func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealthy func(ctx context.Context, mcpPort int) bool, smokeFn SmokeFunc) OnboardingStatus {
 	if configPath == "" {
 		configPath = config.DefaultPath()
 	}
@@ -145,11 +172,35 @@ func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealth
 	// returned above without it. A nil smokeFn or a failing smoke yields
 	// peer_untrusted, never a false ready. (J3: do NOT relax this for worker/both.)
 	originOnly := strings.EqualFold(strings.TrimSpace(cfg.Node.Role), "origin")
-	if !originOnly && (smokeFn == nil || !anyPeerSmokePasses(ctx, smokeFn, linked)) {
-		status.State = StatePeerUntrusted
-		status.NextStep = "On THIS origin node, call link_peer again to re-establish trust with the linked cmesh peer (the bidirectional smoke did not pass). Confirm the OTHER node has run configure_node + start_service and is reachable on the tailnet."
-		status.Detail = fmt.Sprintf("%d cmesh peer(s) linked in config, but the bidirectional smoke did not pass — the peer may be down, unreachable, or not trusting this node yet.", len(linked))
-		return status
+	if !originOnly {
+		smoke := bestPeerSmoke(ctx, smokeFn, linked)
+		if !smoke.OK {
+			// Three-way split: a reachable-but-policy-denied peer needs a fix on the
+			// OTHER node's config (allowed_cwds / denied_profiles), not local trust,
+			// so it gets its own state and next step. Reachable-but-not-OK without a
+			// policy signal is an auth/trust gap; unreachable is a connectivity gap.
+			switch {
+			case smoke.PolicyDenied:
+				status.State = StatePeerPolicyDenied
+				status.NextStep = "The peer was REACHED but rejected the task on its own policy. Fix it on the OTHER node: add the worker cwd to its policy.allowed_cwds (and confirm the requested profile is not in denied_profiles), then restart its service. Re-run link_peer from here to confirm."
+				status.Detail = fmt.Sprintf("%d cmesh peer(s) linked and reachable, but the smoke task was policy-denied by the remote: %s", len(linked), smoke.Detail)
+			case smoke.Reachable:
+				// Reached but the smoke did not complete both ways, with no forward
+				// policy signal. Cause is genuinely ambiguous: it can be a trust gap on
+				// the OTHER node (it does not list this node in allowed_peers), OR a
+				// LOCAL limit on this node's reverse smoke (the reverse leg runs this
+				// node as the worker against cwd "~", which this node's allowed_cwds may
+				// not permit). Name both so the user checks the right machine.
+				status.State = StatePeerUntrusted
+				status.NextStep = "The peer was reached but the bidirectional smoke did not complete both ways. This can be a trust gap on the OTHER node (it must list THIS node in policy.allowed_peers and have run configure_node + start_service), OR a LOCAL policy limit (this node's reverse smoke runs in cwd \"~\" — ensure that is within THIS node's policy.allowed_cwds). Check both, then call link_peer again from here."
+				status.Detail = fmt.Sprintf("%d cmesh peer(s) linked and reachable, but the bidirectional smoke did not complete: %s", len(linked), smoke.Detail)
+			default:
+				status.State = StatePeerUntrusted
+				status.NextStep = "On THIS origin node, call link_peer again to re-establish trust with the linked cmesh peer (the bidirectional smoke did not pass). Confirm the OTHER node has run configure_node + start_service and is reachable on the tailnet."
+				status.Detail = fmt.Sprintf("%d cmesh peer(s) linked in config, but the linked peer could not be reached: %s", len(linked), smoke.Detail)
+			}
+			return status
+		}
 	}
 
 	status.State = StateReady
@@ -158,16 +209,41 @@ func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealth
 	return status
 }
 
-// anyPeerSmokePasses returns true as soon as one linked peer's bidirectional smoke
-// passes. Linked peers are typically a single consented peer, so this is one
-// round-trip in the common case.
-func anyPeerSmokePasses(ctx context.Context, smokeFn func(ctx context.Context, peer PeerCandidate) bool, linked []PeerCandidate) bool {
+// bestPeerSmoke runs the smoke against each linked peer and returns the most
+// informative result. A passing smoke short-circuits immediately (linked peers are
+// typically a single consented peer, so this is one round-trip in the common case).
+// When none pass, it keeps the result that gives the user the most actionable next
+// step, ranked: policy-denied (fix the remote's policy) > reachable (fix trust) >
+// unreachable (fix connectivity). A nil smokeFn means "cannot verify" and yields a
+// not-OK, unreachable result so the caller falls back to peer_untrusted.
+func bestPeerSmoke(ctx context.Context, smokeFn SmokeFunc, linked []PeerCandidate) SmokeResult {
+	if smokeFn == nil {
+		return SmokeResult{Detail: "smoke not available (cannot verify trust)"}
+	}
+	var best SmokeResult
 	for _, peer := range linked {
-		if smokeFn(ctx, peer) {
-			return true
+		res := smokeFn(ctx, peer)
+		if res.OK {
+			return res
+		}
+		if smokeRank(res) > smokeRank(best) {
+			best = res
 		}
 	}
-	return false
+	return best
+}
+
+// smokeRank orders non-passing smoke results by how actionable they are, so
+// bestPeerSmoke surfaces the result that points at the real fix.
+func smokeRank(r SmokeResult) int {
+	switch {
+	case r.PolicyDenied:
+		return 2
+	case r.Reachable:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // ReadyPayoff builds the Part-5 post-onboarding narration shown when the mesh is

@@ -55,6 +55,55 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	}
 }
 
+// TestGenerateConfigDefaultProfileMatchesExposedProfiles guards the bug where the
+// generator hard-coded default_profile = "dev" regardless of which profiles were
+// exposed. A readonly-only node then defaulted its runner to a profile it never
+// defined, crashing preflight with "profile_unavailable". The default must always
+// name an exposed profile: prefer dev when present, otherwise the first exposed.
+func TestGenerateConfigDefaultProfileMatchesExposedProfiles(t *testing.T) {
+	machine := Machine{Name: "homelab-vm", NodeID: "homelab-vm"}
+	runners := []RunnerStatus{{Name: "claude-code", Command: []string{"claude", "-p"}, Found: true}}
+
+	cases := []struct {
+		name     string
+		profiles []string
+		want     string
+	}{
+		{"readonly only", []string{"readonly"}, "readonly"},
+		{"readonly and dev prefers dev", []string{"readonly", "dev"}, "dev"},
+		{"network only", []string{"network"}, "network"},
+		{"default both profiles prefer dev", nil, "dev"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:         "both",
+				AllowedPeers: []string{"mac-studio"},
+				AllowedCWDs:  []string{"~/code/**"},
+				Runner:       "claude-code",
+				Profiles:     tc.profiles,
+			}, machine, runners, nil)
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+			want := "default_profile = \"" + tc.want + "\""
+			if !strings.Contains(body, want) {
+				t.Fatalf("expected %q in generated config:\n%s", want, body)
+			}
+			// The generated config must load and validate: the default_profile
+			// guard in config.Validate would reject a default naming an undefined
+			// profile, so a passing Load proves the default is actually exposed.
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			if _, err := config.Load(path); err != nil {
+				t.Fatalf("generated config should load and validate: %v\n%s", err, body)
+			}
+		})
+	}
+}
+
 // TestGenerateConfigRoleRoundTrips proves node.role written by GenerateConfig
 // survives config.Load for every valid role, and that an omitted role (default
 // "both") also round-trips. This is what lets DeriveOnboardingState re-derive an

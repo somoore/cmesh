@@ -43,8 +43,18 @@ func TestDeriveOnboardingState(t *testing.T) {
 	}
 	cfgMissing := func(string) (*config.Config, error) { return nil, os.ErrNotExist }
 
-	smokePass := func(context.Context, PeerCandidate) bool { return true }
-	smokeFail := func(context.Context, PeerCandidate) bool { return false }
+	smokePass := func(context.Context, PeerCandidate) SmokeResult { return SmokeResult{OK: true, Reachable: true} }
+	// smokeFail models an unreachable peer (the bare "did not pass" failure).
+	smokeFail := func(context.Context, PeerCandidate) SmokeResult { return SmokeResult{Detail: "peer unreachable"} }
+	// smokeDenied models a peer that was REACHED but rejected the task on policy.
+	smokeDenied := func(context.Context, PeerCandidate) SmokeResult {
+		return SmokeResult{Reachable: true, PolicyDenied: true, Detail: "forward task failed: cwd_denied"}
+	}
+	// smokeReachableUntrusted models a peer reached but failing the smoke without a
+	// policy signal (an auth/trust gap rather than a connectivity one).
+	smokeReachableUntrusted := func(context.Context, PeerCandidate) SmokeResult {
+		return SmokeResult{Reachable: true, Detail: "reverse smoke failed"}
+	}
 
 	tests := []struct {
 		name    string
@@ -52,7 +62,7 @@ func TestDeriveOnboardingState(t *testing.T) {
 		peers   []PeerCandidate
 		health  func(context.Context, int) bool
 		load    func(string) (*config.Config, error)
-		smoke   func(context.Context, PeerCandidate) bool
+		smoke   SmokeFunc
 		want    OnboardingState
 	}{
 		{"tailscale_down", downMachine, nil, healthy, cfgPresent, smokePass, StateTailscaleDown},
@@ -61,9 +71,13 @@ func TestDeriveOnboardingState(t *testing.T) {
 		{"daemon_down", upMachine, []PeerCandidate{onlinePeer}, unhealthy, cfgPresent, smokePass, StateDaemonDown},
 		{"no_cmesh_peer", upMachine, []PeerCandidate{onlinePeer}, healthy, cfgPresent, smokePass, StateNoCmeshPeer},
 		{"peer_untrusted_not_linked", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgPresent, smokePass, StatePeerUntrusted},
-		// J3: peer is linked in config but the bidirectional smoke FAILS -> must NOT
-		// be ready; it must report peer_untrusted with an actionable next_step.
+		// J3: peer is linked in config but the bidirectional smoke FAILS (unreachable)
+		// -> must NOT be ready; it must report peer_untrusted with an actionable step.
 		{"peer_untrusted_smoke_fails", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokeFail, StatePeerUntrusted},
+		// Reached but failing without a policy signal -> still peer_untrusted (trust).
+		{"peer_untrusted_reachable", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokeReachableUntrusted, StatePeerUntrusted},
+		// Reached but rejected on policy -> peer_policy_denied (fix the REMOTE config).
+		{"peer_policy_denied", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, smokeDenied, StatePeerPolicyDenied},
 		// J3: a nil smokeFn cannot verify -> never a false ready.
 		{"peer_untrusted_no_smoke_fn", upMachine, []PeerCandidate{cmeshPeer}, healthy, cfgLinked, nil, StatePeerUntrusted},
 		// ready requires an actual passing smoke for worker/both (default, empty role).
@@ -109,7 +123,7 @@ func TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples(t *testing.T) {
 
 	got := DeriveOnboardingState(context.Background(), "/tmp/x.toml",
 		func(context.Context, int) bool { return true },
-		func(context.Context, PeerCandidate) bool { return true })
+		func(context.Context, PeerCandidate) SmokeResult { return SmokeResult{OK: true, Reachable: true} })
 
 	if got.State != StateReady {
 		t.Fatalf("state = %q, want ready (detail: %s)", got.State, got.Detail)
@@ -154,7 +168,7 @@ func TestOriginOnlyReachesReadyWithoutReverseSmoke(t *testing.T) {
 
 	got := DeriveOnboardingState(context.Background(), "/tmp/x.toml",
 		func(context.Context, int) bool { return true },
-		func(context.Context, PeerCandidate) bool { return false }) // reverse smoke FAILS
+		func(context.Context, PeerCandidate) SmokeResult { return SmokeResult{Detail: "reverse smoke FAILS"} }) // reverse smoke FAILS
 
 	if got.State != StateReady {
 		t.Fatalf("origin-only node must reach ready without the reverse smoke; got %q (detail: %s)", got.State, got.Detail)

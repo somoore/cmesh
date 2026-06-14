@@ -18,6 +18,7 @@ import (
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/onboard"
 	"cmesh/internal/service"
+	"cmesh/internal/task"
 )
 
 // Indirection seams so the C1 stdout test (and others) can inject fakes without a
@@ -44,12 +45,38 @@ var (
 )
 
 // readySmoke runs a short, fail-fast bidirectional smoke against a linked peer to
-// gate the 'ready' state. It returns true only when trust is verified in BOTH
-// directions.
-func readySmoke(ctx context.Context, peer onboard.PeerCandidate) bool {
+// gate the 'ready' state. It maps the smoke report into an onboard.SmokeResult so
+// the deriver can distinguish reachable-but-policy-denied (fix the remote's policy)
+// from unreachable/untrusted (fix connectivity/trust).
+func readySmoke(ctx context.Context, peer onboard.PeerCandidate) onboard.SmokeResult {
 	ctx, cancel := context.WithTimeout(ctx, readySmokeBudget)
 	defer cancel()
-	return bidirectionalSmoke(ctx, peer).OK
+	return smokeResultFromReport(bidirectionalSmoke(ctx, peer))
+}
+
+// smokeResultFromReport maps a smokeReport into the deriver's onboard.SmokeResult.
+// PolicyDenied is set only when the peer was reachable AND the FAILING leg carried
+// a policy-denial code. report.FailCode is populated solely from the forward leg
+// (Hello + our CreateTask against the remote), so a reverse-leg denial — which is a
+// LOCAL policy fix, since this node is the worker there — never sets PolicyDenied.
+func smokeResultFromReport(report smokeReport) onboard.SmokeResult {
+	return onboard.SmokeResult{
+		OK:           report.OK,
+		Reachable:    report.Reachable,
+		PolicyDenied: report.Reachable && isPolicyDenialCode(report.FailCode),
+		Detail:       report.Detail,
+	}
+}
+
+// isPolicyDenialCode reports whether a task error code means "the peer was reached
+// but rejected the task on its own policy" — a remote-config fix, not a local one.
+func isPolicyDenialCode(code task.ErrorCode) bool {
+	switch code {
+	case task.ErrorCWDDenied, task.ErrorProfileDenied, task.ErrorProfileUnavailable:
+		return true
+	default:
+		return false
+	}
 }
 
 // gatewayHealthy reports whether the local cmesh gateway answers GET /health.
@@ -334,6 +361,12 @@ type smokeReport struct {
 	Reverse map[string]any `json:"reverse"`
 	OK      bool           `json:"ok"`
 	Detail  string         `json:"detail,omitempty"`
+	// Reachable is true once the peer answered Hello, even if a later leg failed.
+	Reachable bool `json:"-"`
+	// FailCode is the structured task error code of the first failing leg (e.g.
+	// cwd_denied, profile_denied, peer_unauthorized), when the peer surfaced one.
+	// Empty when the failure carried no structured code (e.g. a transport error).
+	FailCode task.ErrorCode `json:"-"`
 }
 
 func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeReport {
@@ -353,8 +386,10 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	if err != nil {
 		report.Forward["reachable"] = false
 		report.Detail = "peer unreachable: " + err.Error()
+		report.FailCode = meshrpc.CodeOf(err)
 		return report
 	}
+	report.Reachable = true
 	report.Forward["reachable"] = true
 	report.Forward["node_name"] = firstNonEmpty(hello.NodeName, hello.NodeID)
 
@@ -377,6 +412,7 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	if err != nil {
 		report.Forward["task_ok"] = false
 		report.Detail = "forward task failed: " + err.Error()
+		report.FailCode = meshrpc.CodeOf(err)
 		return report
 	}
 	report.Forward["task_id"] = createResp.TaskID
@@ -395,6 +431,11 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	report.Reverse["node_name"] = firstNonEmpty(reverse.NodeName, reverse.NodeID, reverse.Peer)
 	if reverse.Error != nil {
 		report.Reverse["error"] = reverse.Error.Detail
+		// Deliberately NOT mapped to FailCode/PolicyDenied: the reverse leg runs with
+		// THIS node as the worker (the remote asks us to run the smoke against it), so
+		// a reverse cwd_denied/profile_denied is a LOCAL policy fix. Only the forward
+		// leg — the remote rejecting OUR task — is a remote-policy denial. Surfacing a
+		// reverse denial as peer_policy_denied would point the user at the wrong node.
 	}
 
 	report.OK = forwardOK && reverseOK

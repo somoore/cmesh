@@ -205,7 +205,11 @@ func (c *Config) ApplyDefaults(configDir string) error {
 	}
 	for name, runner := range c.Runners {
 		if runner.DefaultProfile == "" {
-			runner.DefaultProfile = "dev"
+			// Default to a profile this config actually defines, or Validate (and
+			// later preflight) rejects it. Prefer dev (the historical default), then
+			// readonly, then the lexically-first defined profile for determinism.
+			// Empty only when no profiles exist, which Validate reports separately.
+			runner.DefaultProfile = pickDefaultProfile(c.Profiles)
 		}
 		if runner.ManifestPath != "" && !filepath.IsAbs(runner.ManifestPath) {
 			runner.ManifestPath = filepath.Join(configDir, runner.ManifestPath)
@@ -213,6 +217,26 @@ func (c *Config) ApplyDefaults(configDir string) error {
 		c.Runners[name] = runner
 	}
 	return nil
+}
+
+// pickDefaultProfile chooses a runner's default profile from the defined profiles
+// when the config omits default_profile. It prefers the conventional safe defaults
+// (dev, then readonly), then falls back to the lexically-first defined profile so
+// the choice is deterministic regardless of map iteration order. Returns "" only
+// when no profiles are defined, which Validate reports as its own error.
+func pickDefaultProfile(profiles map[string]ProfileConfig) string {
+	for _, preferred := range []string{"dev", "readonly"} {
+		if _, ok := profiles[preferred]; ok {
+			return preferred
+		}
+	}
+	first := ""
+	for name := range profiles {
+		if first == "" || name < first {
+			first = name
+		}
+	}
+	return first
 }
 
 func (c *Config) Validate() error {
@@ -261,6 +285,14 @@ func (c *Config) Validate() error {
 	for name, runner := range c.Runners {
 		if len(runner.Command) == 0 {
 			return fmt.Errorf("runners.%s.command is required", name)
+		}
+		// default_profile must name a profile this config actually defines, or the
+		// runner fails at task time with "profile_unavailable". Catch it here so a
+		// bad config is rejected by validate_config instead of crashing preflight.
+		if runner.DefaultProfile != "" {
+			if _, ok := c.Profiles[runner.DefaultProfile]; !ok {
+				return fmt.Errorf("runners.%s.default_profile references undefined profile %q", name, runner.DefaultProfile)
+			}
 		}
 	}
 	return nil

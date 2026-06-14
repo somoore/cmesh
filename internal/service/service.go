@@ -150,9 +150,12 @@ func Restart() error {
 	case "linux":
 		return runServiceCommand("systemctl", "--user", "restart", "cmesh.service")
 	case "darwin":
-		if err := Stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "stop warning: %v\n", err)
-		}
+		// Delegate to Start, which bootstraps the job if it is not loaded and then
+		// runs `launchctl kickstart -k` to atomically kill+relaunch the running
+		// instance (re-exec'ing a rebuilt binary from the plist). Do NOT bootout
+		// first: unloading the job races the old process's socket teardown, so the
+		// relaunch can hit "address already in use", and a failed re-bootstrap left
+		// the job unloaded entirely. kickstart -k makes the bootout unnecessary.
 		return Start()
 	case "windows":
 		if err := Stop(); err != nil {

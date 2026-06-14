@@ -165,7 +165,8 @@ and human-readable narration:
 | `needs_config` | peers exist, no cmesh config here | call `configure_node` |
 | `daemon_down` | config exists, gateway `/health` fails | call `start_service` |
 | `no_cmesh_peer` | daemon up, no cmesh-capable peer | "Install cmesh on the other node; there run: *continue helping me configure cmesh for this new node*" |
-| `peer_untrusted` | cmesh peer found but smoke fails one direction | call `link_peer` / fix allowlist |
+| `peer_untrusted` | cmesh peer found but not linked, or reached and smoke fails without a policy signal (trust/connectivity gap) | call `link_peer` / fix allowlist |
+| `peer_policy_denied` | peer reached, but it rejected the forward smoke task on its own policy (`cwd_denied`/`profile_denied`) | fix the **other** node's `allowed_cwds`/`denied_profiles`, restart its service, re-`link_peer` |
 | `ready` | bidirectional smoke passes | print example prompts + profiles |
 
 `detail` carries the verify-then-confirm narration (R3 below).

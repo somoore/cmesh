@@ -281,7 +281,17 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	}
 	writeSection(&b, "runners."+runnerName)
 	writeArray(&b, "command", runnerCommand)
-	writeKV(&b, "default_profile", "dev")
+	// default_profile must name a profile this node actually exposes, or preflight
+	// fails ("profile_unavailable"). Prefer dev when exposed (the historical default),
+	// otherwise fall back to the first exposed profile. profiles is non-empty here.
+	defaultProfile := profiles[0]
+	for _, p := range profiles {
+		if p == "dev" {
+			defaultProfile = "dev"
+			break
+		}
+	}
+	writeKV(&b, "default_profile", defaultProfile)
 	writeInt(&b, "concurrency", 1)
 	writeSection(&b, "gateway")
 	writeKV(&b, "host_token", hostToken)

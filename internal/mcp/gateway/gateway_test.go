@@ -26,19 +26,54 @@ func TestHardenLocalRequiresHostTokenWhenConfigured(t *testing.T) {
 	})
 	handler := hardenLocal(next, "secret")
 
-	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/health", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", nil)
 	res := httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusForbidden {
 		t.Fatalf("status without token = %d, want forbidden", res.Code)
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1/health", nil)
+	req = httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", nil)
 	req.Header.Set("X-Cmesh-Host-Token", "secret")
 	res = httptest.NewRecorder()
 	handler.ServeHTTP(res, req)
 	if res.Code != http.StatusNoContent {
 		t.Fatalf("status with token = %d, want no content", res.Code)
+	}
+}
+
+// GET /health is a liveness probe and must answer unauthenticated even when a
+// host token is configured. Regression guard: it was previously swept under the
+// token gate, so a healthy daemon returned 403 and onboarding reported it down.
+func TestHardenLocalHealthIsUnauthenticated(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := hardenLocal(next, "secret")
+
+	// Without a token: still reaches the handler.
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/health", nil)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("/health without token = %d, want no content", res.Code)
+	}
+
+	// With a token: also fine.
+	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1/health", nil)
+	req.Header.Set("X-Cmesh-Host-Token", "secret")
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("/health with token = %d, want no content", res.Code)
+	}
+
+	// Loopback hardening still applies: a non-loopback Host is rejected.
+	req = httptest.NewRequest(http.MethodGet, "http://evil.example/health", nil)
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("/health with non-loopback Host = %d, want forbidden", res.Code)
 	}
 }
 
