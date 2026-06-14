@@ -213,10 +213,19 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 			allowedPeers = append(allowedPeers, matchableIdentity(peer))
 		}
 	}
+	// B-SEC1: peer identities are self-reported (tailscale HostName/DNSName).
+	// A peer advertising a glob metachar (e.g. "*" or "[a-z]*") would become a
+	// wildcard once policy.matchesAny feeds it to filepath.Match, granting
+	// inbound/outbound trust to unrelated identities across the tailnet. Drop
+	// any identity carrying glob metacharacters from every allowlist before it
+	// can reach the generated config. Done before the empty-check fallback so a
+	// fully-rejected list safely degrades to self-only trust.
+	allowedPeers = dropGlobMetachars(allowedPeers)
 	if len(allowedPeers) == 0 {
 		allowedPeers = []string{firstNonEmpty(machine.NodeID, machine.Name, "self")}
 	}
-	profileAllowedPeers := profilePeerScope(role, allowedPeers, peerNames(selectedPeers))
+	outboundPeers := dropGlobMetachars(peerNames(selectedPeers))
+	profileAllowedPeers := profilePeerScope(role, allowedPeers, outboundPeers)
 	profiles := opts.Profiles
 	if len(profiles) == 0 {
 		profiles = []string{"readonly", "dev"}
@@ -249,7 +258,7 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	if role == "worker" {
 		writeArray(&b, "allowed_peers", nil)
 	} else {
-		writeArray(&b, "allowed_peers", peerNames(selectedPeers))
+		writeArray(&b, "allowed_peers", outboundPeers)
 	}
 	writeArray(&b, "denied_profiles", []string{"network", "interactive", "git_push"})
 	writeBool(&b, "allow_subdelegation", false)
@@ -405,6 +414,23 @@ func profilePeerScope(role string, allowedPeers, outboundPeers []string) []strin
 	default:
 		return uniqueNonEmpty(append(append([]string(nil), allowedPeers...), outboundPeers...))
 	}
+}
+
+// dropGlobMetachars drops any value containing a filepath.Match metacharacter
+// (* ? [ ]). Such values must never reach an allowlist that policy.matchesAny
+// evaluates with filepath.Match, since they would match unrelated peer
+// identities. Rejecting (rather than escaping) keeps setup output predictable:
+// an operator can see the entry was dropped, and policy still does an exact
+// `contains` check for legitimate literal identities.
+func dropGlobMetachars(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.ContainsAny(value, "*?[]") {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
 }
 
 func uniqueNonEmpty(values []string) []string {

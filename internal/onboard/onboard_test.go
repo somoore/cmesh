@@ -250,6 +250,70 @@ func TestGenerateConfigAllowedPeersMatchWhoisIdentity(t *testing.T) {
 	}
 }
 
+// TestGenerateConfigRejectsGlobMetacharPeerIdentities is the B-SEC1 regression
+// guard. A tailnet peer self-reports its hostname; if GenerateConfig wrote a
+// glob metacharacter ("*", "[a-z]*", "a?b") into policy.allowed_peers, the real
+// policy.Engine would use filepath.Match to authorize unrelated identities,
+// granting inbound trust to the entire tailnet. We assert via the real engine
+// that an unrelated victim identity is denied with peer_unauthorized. Asserting
+// on the code (not just !Allowed) keeps the test non-vacuous: pre-fix the glob
+// matches the victim, the peer check passes, and the code is NEVER
+// peer_unauthorized.
+func TestGenerateConfigRejectsGlobMetacharPeerIdentities(t *testing.T) {
+	cases := []struct {
+		name   string
+		glob   string
+		victim string
+	}{
+		{name: "star", glob: "*", victim: "evil-node"},
+		{name: "char-class", glob: "[a-z]*", victim: "evil-node"},
+		{name: "question", glob: "a?b", victim: "azb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:        "worker",
+				Runner:      "codex",
+				AllowedCWDs: []string{"~/code/**"},
+				PeerNames:   []string{tc.glob},
+			}, Machine{Name: "homelab-vm", NodeID: "homelab-vm"}, []RunnerStatus{
+				{Name: "codex", Command: []string{"codex"}, Found: true},
+			}, []PeerCandidate{
+				{Name: tc.glob, NodeID: tc.glob, Address: "100.64.10.20", CmeshCapable: true},
+			})
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+
+			// The glob identity must never appear verbatim in the inbound allowlist.
+			if strings.Contains(body, `allowed_peers = ["`+tc.glob+`"]`) {
+				t.Fatalf("glob identity %q leaked into an allowlist:\n%s", tc.glob, body)
+			}
+
+			path := t.TempDir() + "/config.toml"
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("generated config should load: %v\n%s", err, body)
+			}
+
+			engine := policy.New(cfg)
+			decision := engine.CheckInbound(policy.TaskIntent{
+				PeerName: tc.victim,
+				CWD:      "~/code",
+				Runner:   "codex",
+				Profile:  "dev",
+			})
+			if decision.Code != "peer_unauthorized" {
+				t.Fatalf("victim %q should be peer_unauthorized, got allowed=%v code=%q detail=%q\nallowlist from config: %v\n%s",
+					tc.victim, decision.Allowed, decision.Code, decision.Detail, cfg.Policy.AllowedPeers, body)
+			}
+		})
+	}
+}
+
 func TestCapturePeerIdentityReadsHelloResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/hello" {
