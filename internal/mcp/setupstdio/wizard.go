@@ -363,6 +363,69 @@ func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 	}}
 }
 
+type repairPeersRequest struct {
+	Confirmed bool `json:"confirmed,omitempty"`
+}
+
+// repairPeers lets a user say "fix my peer entries" to the agent instead of editing
+// TOML or knowing to re-run link_peer. It delegates to onboard.DiagnosePeers /
+// ApplyPeerRepairs (the trust anchor is tailscale whois, not the peer's
+// self-reported /v1/hello name; see those for the security rationale). Without
+// confirmed=true it returns a per-peer diff and changes nothing; with confirmed=true
+// it rewrites the fixable entries, preserving this node's inbound trust posture.
+//
+// This runs in the onboarding stdio server, a SEPARATE process from the daemon, so
+// the written config takes effect on the next daemon (re)start as usual.
+func repairPeers(ctx context.Context, args json.RawMessage) ToolResponse {
+	var req repairPeersRequest
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+	}
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return failure("config_load_failed", err.Error())
+	}
+	if len(cfg.Peers) == 0 {
+		return ToolResponse{OK: true, Result: map[string]any{
+			"repairs":   []onboard.PeerRepair{},
+			"message":   "No [peers.*] entries are configured; nothing to repair.",
+			"next_step": "If you expected a peer here, run the setup flow to discover and link one.",
+		}}
+	}
+	repairs, err := onboard.DiagnosePeers(ctx, cfg)
+	if err != nil {
+		return failure("tailnet_peers_failed", err.Error())
+	}
+	fixable := onboard.CountRepairs(repairs, onboard.RepairFixable)
+
+	if !req.Confirmed {
+		msg := fmt.Sprintf("Found %d configured peer(s): %d fixable, %d ok.", len(repairs), fixable, onboard.CountRepairs(repairs, onboard.RepairOK))
+		next := "Nothing to fix — all reachable peer entries already match their whois identity."
+		if fixable > 0 {
+			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries to their whois-matchable identity. Conflicts and unreachable peers are left unchanged."
+		}
+		return ToolResponse{OK: true, Result: map[string]any{
+			"requires_confirmation": fixable > 0,
+			"repairs":               repairs,
+			"message":               msg,
+			"next_step":             next,
+		}}
+	}
+
+	fixedNames, err := onboard.ApplyPeerRepairs(config.DefaultPath(), repairs)
+	if err != nil {
+		return failure("repair_failed", err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"repaired":  fixedNames,
+		"repairs":   repairs,
+		"message":   fmt.Sprintf("Repaired %d peer entry(ies): %s.", len(fixedNames), strings.Join(fixedNames, ", ")),
+		"next_step": "Run a bidirectional smoke (or onboarding_status) to confirm the mesh is healthy.",
+	}}
+}
+
 type smokeReport struct {
 	Forward map[string]any `json:"forward"`
 	Reverse map[string]any `json:"reverse"`
