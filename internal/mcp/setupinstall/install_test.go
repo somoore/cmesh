@@ -67,6 +67,42 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 	}
 }
 
+func TestInstallCodexUsesCodexCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "codex.log")
+	markerPath := filepath.Join(dir, "registered")
+	script := "#!/bin/sh\n" +
+		"PATH=/bin:/usr/bin:$PATH\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then [ -e " + shellQuote(markerPath) + " ] && exit 0 || exit 1; fi\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"remove\" ]; then rm -f " + shellQuote(markerPath) + "; exit 0; fi\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"add\" ]; then touch " + shellQuote(markerPath) + "; exit 0; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir)
+
+	result := installCodex(Agent{ID: "codex", Name: "Codex", Found: true}, "/opt/cmesh")
+	if !result.OK {
+		t.Fatalf("installCodex failed: %+v", result)
+	}
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	log := string(body)
+	if !strings.Contains(log, "mcp remove cmesh") {
+		t.Fatalf("codex mcp remove was not called:\n%s", log)
+	}
+	if !strings.Contains(log, "mcp add cmesh -- /opt/cmesh mcp --stdio") {
+		t.Fatalf("codex mcp add was not called correctly:\n%s", log)
+	}
+}
+
 func TestUpsertCodexConfigReplacesExistingCmeshOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	existing := `model = "gpt-5"
