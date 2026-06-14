@@ -445,6 +445,34 @@ func TestRegisterHarnessAdviceUsesHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestRegisterHarnessAdviceIncludesRedactedHostTokenHeader(t *testing.T) {
+	g := newTestGateway(t)
+	g.Config.Node.MCPPort = 7777
+	g.Config.Gateway.HostToken = "secret"
+	resp, err := g.callTool(context.Background(), "register_harness", []byte(`{}`))
+	if err != nil || !resp.OK {
+		t.Fatalf("register_harness returned resp=%+v err=%v", resp, err)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v", resp.Result)
+	}
+	got, ok := result["claude_code_command"].(string)
+	if !ok {
+		t.Fatalf("claude_code_command missing from %#v", result)
+	}
+	want := "claude mcp add --transport http cmesh http://127.0.0.1:7777/mcp --header 'X-Cmesh-Host-Token: <redacted>'"
+	if got != want {
+		t.Fatalf("claude_code_command = %q, want %q", got, want)
+	}
+	if result["claude_code_headers"] != true {
+		t.Fatalf("claude_code_headers = %#v, want true", result["claude_code_headers"])
+	}
+	if strings.Contains(got, "secret") {
+		t.Fatalf("claude_code_command leaked host token: %q", got)
+	}
+}
+
 func TestTaskCatalogIncludesFeedbackRecipes(t *testing.T) {
 	g := newTestGateway(t)
 	resp, err := g.callTool(context.Background(), "task_catalog", []byte(`{}`))
@@ -482,6 +510,25 @@ func TestTaskCatalogIncludesFeedbackRecipes(t *testing.T) {
 	}
 	if !foundTool {
 		t.Fatal("task_catalog is not advertised in MCP tools")
+	}
+}
+
+func TestMCPToolSchemasUseArrayRequired(t *testing.T) {
+	for _, tool := range mcpTools() {
+		schema, ok := tool["inputSchema"].(map[string]any)
+		if !ok {
+			t.Fatalf("tool %q inputSchema = %#v", tool["name"], tool["inputSchema"])
+		}
+		if _, ok := schema["required"].([]string); !ok {
+			t.Fatalf("tool %q required = %#v, want []string", tool["name"], schema["required"])
+		}
+	}
+	body, err := json.Marshal(mcpTools())
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	if strings.Contains(string(body), `"required":null`) {
+		t.Fatalf("tool schemas contain null required: %s", body)
 	}
 }
 

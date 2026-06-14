@@ -41,11 +41,43 @@ func Install(agent Agent, cmeshPath string) Result {
 	}
 }
 
-func ClaudeHTTPAddArgs(serverName, gatewayURL string) []string {
+func ClaudeHTTPAddArgs(serverName, gatewayURL, hostToken string) []string {
 	if serverName == "" {
 		serverName = ServerName
 	}
-	return []string{"mcp", "add", "--transport", "http", serverName, gatewayURL}
+	args := []string{"mcp", "add", "--transport", "http", serverName, gatewayURL}
+	if strings.TrimSpace(hostToken) != "" {
+		args = append(args, "--header", "X-Cmesh-Host-Token: "+strings.TrimSpace(hostToken))
+	}
+	return args
+}
+
+func RedactClaudeHTTPAddArgs(args []string) []string {
+	redacted := append([]string(nil), args...)
+	for i, arg := range redacted {
+		if strings.HasPrefix(arg, "X-Cmesh-Host-Token: ") {
+			redacted[i] = "X-Cmesh-Host-Token: <redacted>"
+		}
+	}
+	return redacted
+}
+
+func ShellCommand(args []string) string {
+	quoted := make([]string, 0, len(args))
+	for _, arg := range args {
+		quoted = append(quoted, shellQuote(arg))
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(value, " \t\n'\"\\$`!|&;<>(){}[]*?~#") {
+		return value
+	}
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func UpsertCodexConfig(path, cmeshPath string) error {

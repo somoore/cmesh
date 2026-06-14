@@ -1235,8 +1235,9 @@ func cmdConnect(args []string) error {
 	}
 	fmt.Printf("Local cmesh gateway: http://127.0.0.1:%d\n", cfg.Node.MCPPort)
 	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Node.MCPPort)
+	claudeArgs := setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL, cfg.Gateway.HostToken)
 	if claude, err := exec.LookPath("claude"); err == nil {
-		cmd := exec.Command(claude, setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL)...)
+		cmd := exec.Command(claude, claudeArgs...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -1245,7 +1246,8 @@ func cmdConnect(args []string) error {
 		fmt.Println("Claude Code MCP registration updated.")
 	} else {
 		fmt.Println("Claude Code not found on PATH; register manually with:")
-		fmt.Printf("  claude %s\n", strings.Join(setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL), " "))
+		claudeCommand := append([]string{"claude"}, setupinstall.RedactClaudeHTTPAddArgs(claudeArgs)...)
+		fmt.Printf("  %s\n", setupinstall.ShellCommand(claudeCommand))
 	}
 	fmt.Println("Codex MCP registration varies by installed CLI version; add a local HTTP MCP server named cmesh at:")
 	fmt.Printf("  %s\n", gatewayURL)

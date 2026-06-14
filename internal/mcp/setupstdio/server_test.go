@@ -65,6 +65,25 @@ func TestWriteConfigRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestToolSchemasUseArrayRequired(t *testing.T) {
+	for _, tool := range tools() {
+		schema, ok := tool["inputSchema"].(map[string]any)
+		if !ok {
+			t.Fatalf("tool %q inputSchema = %#v", tool["name"], tool["inputSchema"])
+		}
+		if _, ok := schema["required"].([]string); !ok {
+			t.Fatalf("tool %q required = %#v, want []string", tool["name"], schema["required"])
+		}
+	}
+	body, err := json.Marshal(tools())
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	if strings.Contains(string(body), `"required":null`) {
+		t.Fatalf("tool schemas contain null required: %s", body)
+	}
+}
+
 func frame(body string) string {
 	return "Content-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body
 }
