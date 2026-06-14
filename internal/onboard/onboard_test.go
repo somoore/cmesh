@@ -176,11 +176,11 @@ func TestGenerateConfigSanitizesPeerTableNames(t *testing.T) {
 // allowlist must key on the whois-matchable hostname (PeerCandidate.Name).
 func TestGenerateConfigAllowedPeersMatchWhoisIdentity(t *testing.T) {
 	const (
-		hostname     = "homelab"
-		ephemeralID  = "n-ephemeral-12345" // tailscale status --json peer.ID; NOT whois-matchable
-		whoisNodeID  = "nReal67890CNTRL"   // whois Node.ID, distinct from the ephemeral id
-		whoisStable  = "nStableABCDEF"
-		allowedCWD   = "~/code/**"
+		hostname    = "homelab"
+		ephemeralID = "n-ephemeral-12345" // tailscale status --json peer.ID; NOT whois-matchable
+		whoisNodeID = "nReal67890CNTRL"   // whois Node.ID, distinct from the ephemeral id
+		whoisStable = "nStableABCDEF"
+		allowedCWD  = "~/code/**"
 	)
 
 	body, err := GenerateConfig(InitOptions{
