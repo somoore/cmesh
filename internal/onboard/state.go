@@ -274,8 +274,8 @@ func ReadyPayoff(cfg *config.Config, originOnly bool, linked []PeerCandidate) st
 		b.WriteString("Bidirectional smoke passed — the mesh is verified ready. ")
 	}
 	b.WriteString(fmt.Sprintf("Linked peer(s): %s.\n\n", strings.Join(names, ", ")))
-	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Anything past dev is real authority — switch by passing profile in a delegate call ", defaultProfile))
-	b.WriteString("(profile menu: readonly, dev, network, interactive, git_push).\n\n")
+	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Query is deterministic probes with no shell and no writes; switch by passing profile in a delegate call ", defaultProfile))
+	b.WriteString("(profile menu: query, query-shell, readonly-agent, repo-dev, network, interactive, git_push).\n\n")
 	b.WriteString("Example prompts:\n")
 	for _, ex := range readyExamplePrompts(primary) {
 		b.WriteString("  - ")
@@ -286,7 +286,7 @@ func ReadyPayoff(cfg *config.Config, originOnly bool, linked []PeerCandidate) st
 }
 
 // defaultRunnerProfile reads the default profile configured for a runner
-// (runners.<r>.default_profile, typically dev). Falls back to "dev". Runner names
+// (runners.<r>.default_profile, typically query). Falls back to "query". Runner names
 // are visited in sorted order so the result is deterministic when more than one
 // runner is configured (the common case is a single runner).
 func defaultRunnerProfile(cfg *config.Config) string {
@@ -300,7 +300,7 @@ func defaultRunnerProfile(cfg *config.Config) string {
 			return p
 		}
 	}
-	return "dev"
+	return "query"
 }
 
 // readyExamplePrompts returns example delegation prompts templated with the real
@@ -310,15 +310,14 @@ func defaultRunnerProfile(cfg *config.Config) string {
 // prompts are kept in sync here.
 func readyExamplePrompts(peer string) []string {
 	return []string{
-		fmt.Sprintf("Use cmesh to ask %s to report disk usage for / (readonly).", peer),
-		fmt.Sprintf("Use cmesh to ask %s for repository status in ~/code/myapp (readonly).", peer),
-		fmt.Sprintf("Use cmesh to ask %s to run the native build in ~/code/myapp (dev).", peer),
-		fmt.Sprintf("Use cmesh to ask %s to summarize recent logs for a service (readonly).", peer),
-		fmt.Sprintf("Use cmesh to ask %s to run the test suite in ~/code/myapp (dev).", peer),
-		fmt.Sprintf("Use cmesh to ask %s to continue work on a branch in ~/code/myapp (dev).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to report disk usage for / (query).", peer),
+		fmt.Sprintf("Use cmesh to ask %s for repository status in ~/code/myapp (query).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to summarize recent logs for a service (query-shell).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to run the native build in ~/code/myapp (repo-dev).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to run the test suite in ~/code/myapp (repo-dev).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to continue work on a branch in ~/code/myapp (repo-dev).", peer),
 	}
 }
-
 func onlinePeers(peers []PeerCandidate) []PeerCandidate {
 	var out []PeerCandidate
 	for _, p := range peers {

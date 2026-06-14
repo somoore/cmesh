@@ -30,8 +30,8 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateConfig: %v", err)
 	}
-	if !strings.Contains(body, `[profiles.readonly]`) || !strings.Contains(body, `[profiles.dev]`) {
-		t.Fatalf("expected readonly and dev profiles:\n%s", body)
+	if !strings.Contains(body, `[profiles.query]`) || strings.Contains(body, `[profiles.repo-dev]`) {
+		t.Fatalf("expected query-only default profile:\n%s", body)
 	}
 	path := t.TempDir() + "/config.toml"
 	if err := WriteConfig(path, body, false); err != nil {
@@ -44,22 +44,51 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	if cfg.Node.Name != "homelab-vm" {
 		t.Fatalf("node name = %q", cfg.Node.Name)
 	}
-	if cfg.Profiles["dev"].Runner != "codex" {
-		t.Fatalf("dev runner = %q", cfg.Profiles["dev"].Runner)
+	if cfg.Profiles["query"].Runner != "probe" {
+		t.Fatalf("query runner = %q", cfg.Profiles["query"].Runner)
 	}
-	if cfg.Profiles["readonly"].Bare {
-		t.Fatal("readonly profile should use the configured runner credentials by default")
+	if cfg.Profiles["query"].Writes != "deny" || cfg.Profiles["query"].Shell != "deny" {
+		t.Fatalf("query must deny writes and shell, got writes=%q shell=%q", cfg.Profiles["query"].Writes, cfg.Profiles["query"].Shell)
 	}
 	if _, ok := cfg.Profiles["interactive"]; ok {
 		t.Fatal("interactive profile should not be enabled by default")
 	}
 }
 
+func TestGenerateConfigQueryShellDoesNotRequireAgentRunner(t *testing.T) {
+	body, err := GenerateConfig(InitOptions{
+		Role:         "worker",
+		AllowedPeers: []string{"mac-studio"},
+		AllowedCWDs:  []string{"~/code/**"},
+		Profiles:     []string{"query-shell"},
+	}, Machine{Name: "homelab-vm", NodeID: "homelab-vm"}, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+	for _, want := range []string{`[profiles.query-shell]`, `runner = "shell"`, `[profiles.query-shell.shell_policy.windows]`, `[runners.shell]`, `default_profile = "query-shell"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("generated query-shell config missing %q:\n%s", want, body)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+	if cfg.Profiles["query-shell"].Shell != "allowlisted" || cfg.Profiles["query-shell"].Writes != "deny" {
+		t.Fatalf("query-shell profile = %+v", cfg.Profiles["query-shell"])
+	}
+}
+
 // TestGenerateConfigDefaultProfileMatchesExposedProfiles guards the bug where the
 // generator hard-coded default_profile = "dev" regardless of which profiles were
-// exposed. A readonly-only node then defaulted its runner to a profile it never
+// exposed. A query-only node then defaulted its runner to a profile it never
 // defined, crashing preflight with "profile_unavailable". The default must always
-// name an exposed profile: prefer dev when present, otherwise the first exposed.
+// name an exposed profile: prefer query for probe, repo-dev for agent-backed work,
+// otherwise the first exposed.
 func TestGenerateConfigDefaultProfileMatchesExposedProfiles(t *testing.T) {
 	machine := Machine{Name: "homelab-vm", NodeID: "homelab-vm"}
 	runners := []RunnerStatus{{Name: "claude-code", Command: []string{"claude", "-p"}, Found: true}}
@@ -69,10 +98,14 @@ func TestGenerateConfigDefaultProfileMatchesExposedProfiles(t *testing.T) {
 		profiles []string
 		want     string
 	}{
+		{"query only", []string{"query"}, "query"},
+		{"query-network only", []string{"query-network"}, "query-network"},
+		{"query-shell only", []string{"query-shell"}, "query-shell"},
 		{"readonly only", []string{"readonly"}, "readonly"},
-		{"readonly and dev prefers dev", []string{"readonly", "dev"}, "dev"},
+		{"readonly-agent only", []string{"readonly-agent"}, "readonly-agent"},
+		{"readonly and repo-dev prefers repo-dev", []string{"readonly", "repo-dev"}, "repo-dev"},
 		{"network only", []string{"network"}, "network"},
-		{"default both profiles prefer dev", nil, "dev"},
+		{"default profile is query", nil, "query"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +126,35 @@ func TestGenerateConfigDefaultProfileMatchesExposedProfiles(t *testing.T) {
 			// The generated config must load and validate: the default_profile
 			// guard in config.Validate would reject a default naming an undefined
 			// profile, so a passing Load proves the default is actually exposed.
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			if _, err := config.Load(path); err != nil {
+				t.Fatalf("generated config should load and validate: %v\n%s", err, body)
+			}
+		})
+	}
+}
+
+func TestGenerateConfigSupportsAllBuiltInProfileNames(t *testing.T) {
+	machine := Machine{Name: "homelab-vm", NodeID: "homelab-vm"}
+	runners := []RunnerStatus{{Name: "claude-code", Command: []string{"claude", "-p"}, Found: true}}
+	for _, profileName := range []string{"query", "query-network", "query-shell", "readonly-agent", "repo-dev", "desktop-control", "system-change"} {
+		t.Run(profileName, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:         "both",
+				AllowedPeers: []string{"mac-studio"},
+				AllowedCWDs:  []string{"~/code/**"},
+				Runner:       "claude-code",
+				Profiles:     []string{profileName},
+			}, machine, runners, nil)
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+			if !strings.Contains(body, "[profiles."+profileName+"]") {
+				t.Fatalf("generated config missing profile %q:\n%s", profileName, body)
+			}
 			path := filepath.Join(t.TempDir(), "config.toml")
 			if err := WriteConfig(path, body, false); err != nil {
 				t.Fatalf("WriteConfig: %v", err)

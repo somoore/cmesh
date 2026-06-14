@@ -65,6 +65,26 @@ func TestWriteConfigRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestProfilePreviewAndWriteConfigTools(t *testing.T) {
+	preview := (&Server{}).CallTool(context.Background(), "profile_preview_config", []byte(`{"role":"worker","allowed_peers":["mac"],"allowed_cwds":["~/code/**"],"profiles":["query"]}`))
+	if !preview.OK {
+		t.Fatalf("profile_preview_config failed: %+v", preview)
+	}
+	encoded, _ := json.Marshal(preview.Result)
+	if !strings.Contains(string(encoded), "[profiles.query]") {
+		t.Fatalf("preview missing query profile: %s", encoded)
+	}
+
+	write := (&Server{}).CallTool(context.Background(), "profile_write_config", []byte(`{"role":"worker"}`))
+	if !write.OK {
+		t.Fatalf("profile_write_config preflight should be ok: %+v", write)
+	}
+	encoded, _ = json.Marshal(write.Result)
+	if !strings.Contains(string(encoded), "requires_confirmation") {
+		t.Fatalf("expected confirmation preflight, got %s", encoded)
+	}
+}
+
 func TestToolSchemasUseArrayRequired(t *testing.T) {
 	for _, tool := range tools() {
 		schema, ok := tool["inputSchema"].(map[string]any)

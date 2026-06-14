@@ -14,6 +14,7 @@ import (
 	"cmesh/internal/doctor"
 	"cmesh/internal/gitx"
 	"cmesh/internal/mcp/setupinstall"
+	"cmesh/internal/runner/claudecode"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/testutil"
@@ -29,6 +30,48 @@ func TestActiveRunnerNamesUsesProfileReferencesOnly(t *testing.T) {
 	got := strings.Join(activeRunnerNames(cfg), ",")
 	if got != "claude-code,codex" {
 		t.Fatalf("activeRunnerNames = %q, want claude-code,codex", got)
+	}
+}
+
+func TestCodexSandboxForProfileKeepsDenyWriteReadOnlyOnWindows(t *testing.T) {
+	got := codexSandboxForProfile(config.ProfileConfig{Writes: "deny"}, "windows")
+	if got != "read-only" {
+		t.Fatalf("deny-write Windows Codex profile sandbox = %q, want read-only", got)
+	}
+	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows")
+	if got != "danger-full-access" {
+		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want danger-full-access", got)
+	}
+}
+
+func TestClaudeProfileForDenyWriteDisallowsWriteAndShellTools(t *testing.T) {
+	cfg := &config.Config{
+		Profiles: map[string]config.ProfileConfig{
+			"readonly": {
+				Runner:                claudecode.Name,
+				Claims:                []string{"read_files"},
+				Writes:                "deny",
+				Shell:                 "deny",
+				EnforcementConfidence: "medium",
+			},
+		},
+		Runners: map[string]config.RunnerConfig{
+			claudecode.Name: {Command: []string{"claude"}, DefaultProfile: "readonly"},
+		},
+	}
+	reg, err := buildRunners(cfg)
+	if err != nil {
+		t.Fatalf("buildRunners: %v", err)
+	}
+	run, ok := reg.Get(claudecode.Name)
+	if !ok {
+		t.Fatal("claude-code runner not registered")
+	}
+	flags := strings.Join(run.Manifest().Profiles["readonly"].NativeFlags, " ")
+	for _, want := range []string{"--permission-mode plan", "--disallowedTools", "Bash", "Write", "Edit"} {
+		if !strings.Contains(flags, want) {
+			t.Fatalf("native flags %q missing %q", flags, want)
+		}
 	}
 }
 
@@ -168,19 +211,19 @@ func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
 }
 
 func TestSmokeResultMatchesExpectedResponse(t *testing.T) {
-	if !smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 0, Stdout: "cmesh smoke ok\n"}}) {
+	if !smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 0, Stdout: "cmesh smoke ok\n"}}, "readonly") {
 		t.Fatal("expected raw command artifact to match")
 	}
-	if smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 1, Stdout: "cmesh smoke ok\n"}}) {
+	if smokeResultMatches(&task.ResultEnvelope{CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 1, Stdout: "cmesh smoke ok\n"}}, "readonly") {
 		t.Fatal("non-zero command artifact must not pass smoke validation")
 	}
-	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}) {
+	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "cmesh smoke ok\n"}, "readonly") {
 		t.Fatal("model summary without command_output must not pass smoke validation")
 	}
-	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "What would you like me to work on?"}) {
+	if smokeResultMatches(&task.ResultEnvelope{WorkerSummaryUntrusted: "What would you like me to work on?"}, "readonly") {
 		t.Fatal("generic worker response must not pass smoke validation")
 	}
-	if smokeResultMatches(nil) {
+	if smokeResultMatches(nil, "readonly") {
 		t.Fatal("nil result must not pass smoke validation")
 	}
 }

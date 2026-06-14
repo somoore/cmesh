@@ -104,6 +104,8 @@ type RunRequest struct {
 	LogDir      string
 	Metadata    TaskMetadata
 	OutputLimit int64
+	QueryKind   string
+	QueryParams map[string]any
 }
 
 type TaskMetadata struct {

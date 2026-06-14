@@ -54,27 +54,41 @@ type Provenance struct {
 }
 
 type CreateTaskRequest struct {
-	TaskID             string     `json:"task_id"`
-	OriginNodeID       string     `json:"origin_node_id"`
-	OriginSessionID    string     `json:"origin_session_id"`
-	Prompt             string     `json:"prompt"`
-	CWD                string     `json:"cwd"`
-	Runner             string     `json:"runner,omitempty"`
-	Profile            string     `json:"profile,omitempty"`
-	TimeoutSeconds     int        `json:"timeout_s,omitempty"`
-	Wait               bool       `json:"wait,omitempty"`
-	AllowDirty         bool       `json:"allow_dirty,omitempty"`
-	FollowupTaskID     string     `json:"followup_task_id,omitempty"`
-	FollowupBaseCommit string     `json:"followup_base_commit,omitempty"`
-	ResumeSessionID    string     `json:"resume_session_id,omitempty"`
-	Provenance         Provenance `json:"provenance"`
+	TaskID             string        `json:"task_id"`
+	OriginNodeID       string        `json:"origin_node_id"`
+	OriginSessionID    string        `json:"origin_session_id"`
+	TaskKind           string        `json:"task_kind,omitempty"`
+	Query              *QueryRequest `json:"query,omitempty"`
+	Prompt             string        `json:"prompt"`
+	CWD                string        `json:"cwd"`
+	Runner             string        `json:"runner,omitempty"`
+	Profile            string        `json:"profile,omitempty"`
+	ProfileSource      string        `json:"profile_source,omitempty"`
+	ProfileContextID   string        `json:"profile_context_id,omitempty"`
+	TimeoutSeconds     int           `json:"timeout_s,omitempty"`
+	Wait               bool          `json:"wait,omitempty"`
+	AllowDirty         bool          `json:"allow_dirty,omitempty"`
+	FollowupTaskID     string        `json:"followup_task_id,omitempty"`
+	FollowupBaseCommit string        `json:"followup_base_commit,omitempty"`
+	ResumeSessionID    string        `json:"resume_session_id,omitempty"`
+	Provenance         Provenance    `json:"provenance"`
+}
+
+type QueryRequest struct {
+	Kind   string         `json:"kind"`
+	Params map[string]any `json:"params,omitempty"`
+	CWD    string         `json:"cwd,omitempty"`
 }
 
 type CreateTaskResponse struct {
-	TaskID   string     `json:"task_id"`
-	State    task.State `json:"state"`
-	Replayed bool       `json:"replayed"`
-	Error    *Error     `json:"error,omitempty"`
+	TaskID           string     `json:"task_id"`
+	State            task.State `json:"state"`
+	Replayed         bool       `json:"replayed"`
+	RequestedProfile string     `json:"requested_profile,omitempty"`
+	EffectiveProfile string     `json:"effective_profile,omitempty"`
+	ProfileSource    string     `json:"profile_source,omitempty"`
+	ProfileContextID string     `json:"profile_context_id,omitempty"`
+	Error            *Error     `json:"error,omitempty"`
 }
 
 type TaskStatusResponse struct {

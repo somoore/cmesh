@@ -28,7 +28,7 @@ func TestDeriveOnboardingState(t *testing.T) {
 		return &config.Config{
 			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort},
 			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
-			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
+			Runners: map[string]config.RunnerConfig{"probe": {DefaultProfile: "query"}},
 		}, nil
 	}
 	// cfgOriginLinked mirrors cfgLinked but the node is origin-only (role="origin").
@@ -38,7 +38,7 @@ func TestDeriveOnboardingState(t *testing.T) {
 		return &config.Config{
 			Node:    config.NodeConfig{MCPPort: config.DefaultMCPPort, Role: "origin"},
 			Peers:   map[string]config.PeerConfig{"node-b": {Name: "node-b", Address: "100.64.0.2"}},
-			Runners: map[string]config.RunnerConfig{"claude-code": {DefaultProfile: "dev"}},
+			Runners: map[string]config.RunnerConfig{"probe": {DefaultProfile: "query"}},
 		}, nil
 	}
 	cfgMissing := func(string) (*config.Config, error) { return nil, os.ErrNotExist }
@@ -139,11 +139,11 @@ func TestReadyPayoffRoutesToRegisterGatewayAndShowsExamples(t *testing.T) {
 		t.Fatalf("payoff must include example prompts from the recipe set: %s", got.Detail)
 	}
 	// Payoff: the per-peer default profile (read from runners.<r>.default_profile).
-	if !strings.Contains(got.Detail, "dev") {
-		t.Fatalf("payoff must include the default profile dev: %s", got.Detail)
+	if !strings.Contains(got.Detail, "query") {
+		t.Fatalf("payoff must include the default profile query: %s", got.Detail)
 	}
-	if !strings.Contains(strings.ToLower(got.Detail), "readonly") {
-		t.Fatalf("payoff must mention how to switch profiles (readonly): %s", got.Detail)
+	if !strings.Contains(strings.ToLower(got.Detail), "repo-dev") {
+		t.Fatalf("payoff must mention how to switch profiles (repo-dev): %s", got.Detail)
 	}
 }
 
@@ -439,11 +439,11 @@ func TestTwoSidedTrustPolicyAccepts(t *testing.T) {
 	engineB := policy.New(cfgB)
 
 	// Intent describing "the other node B" as A would see it (whois identity node-b).
-	fromB := policy.TaskIntent{PeerName: "node-b", PeerStableID: "stable-b", CWD: cwd, Profile: "dev"}
+	fromB := policy.TaskIntent{PeerName: "node-b", PeerStableID: "stable-b", CWD: cwd, Profile: "query"}
 	// Intent describing "the other node A" as B would see it (whois identity node-a).
-	fromA := policy.TaskIntent{PeerName: "node-a", PeerStableID: "stable-a", CWD: cwd, Profile: "dev"}
+	fromA := policy.TaskIntent{PeerName: "node-a", PeerStableID: "stable-a", CWD: cwd, Profile: "query"}
 	// A third, unrelated node C — must be rejected everywhere.
-	fromC := policy.TaskIntent{PeerName: "node-c", PeerStableID: "stable-c", CWD: cwd, Profile: "dev"}
+	fromC := policy.TaskIntent{PeerName: "node-c", PeerStableID: "stable-c", CWD: cwd, Profile: "query"}
 
 	mustAllow := func(label string, d policy.Decision) {
 		t.Helper()

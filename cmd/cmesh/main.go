@@ -31,9 +31,12 @@ import (
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/onboard"
 	"cmesh/internal/policy"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
 	"cmesh/internal/runner/codex"
+	"cmesh/internal/runner/probe"
+	"cmesh/internal/runner/shell"
 	svcpkg "cmesh/internal/service"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
@@ -71,6 +74,8 @@ func run(args []string) error {
 		return cmdDoctor(args[1:])
 	case "peers":
 		return cmdPeers(args[1:])
+	case "profile":
+		return cmdProfile(args[1:])
 	case "version":
 		return cmdVersion(args[1:])
 	case "_service":
@@ -234,7 +239,7 @@ func cmdInit(args []string) error {
 	fs.Var(&allowPeer, "allow-peer", "peer node/name allowed to delegate here; repeatable")
 	fs.Var(&allowCWD, "allow-cwd", "directory glob workers may use here; repeatable")
 	fs.Var(&peer, "peer", "peer to configure for outbound delegation; repeatable")
-	fs.Var(&profile, "profile", "profile to expose: readonly, dev, network, interactive, git_push; repeatable")
+	fs.Var(&profile, "profile", "profile to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases; repeatable")
 	runnerName := fs.String("runner", "auto", "runner to use: auto, claude-code, or codex")
 	yes := fs.Bool("yes", false, "accept safe defaults without prompting")
 	force := fs.Bool("force", false, "overwrite an existing config")
@@ -409,14 +414,31 @@ func cmdDoctor(args []string) error {
 		} else {
 			for _, manifest := range reg.Manifests() {
 				run, _ := reg.Get(manifest.Runner)
-				err := run.Check("")
-				check := doctor.Check{Name: "runner." + manifest.Runner, OK: err == nil}
-				if err != nil {
-					check.Err = err.Error()
-				} else {
-					check.Detail = "available"
+				profileChecked := false
+				for profileName, pcfg := range cfg.Profiles {
+					if pcfg.Runner != manifest.Runner {
+						continue
+					}
+					profileChecked = true
+					err := run.Check(profileName)
+					check := doctor.Check{Name: "runner." + manifest.Runner + "." + profileName, OK: err == nil}
+					if err != nil {
+						check.Err = err.Error()
+					} else {
+						check.Detail = "available"
+					}
+					runnerChecks = append(runnerChecks, check)
 				}
-				runnerChecks = append(runnerChecks, check)
+				if !profileChecked {
+					err := run.Check("")
+					check := doctor.Check{Name: "runner." + manifest.Runner, OK: err == nil}
+					if err != nil {
+						check.Err = err.Error()
+					} else {
+						check.Detail = "available"
+					}
+					runnerChecks = append(runnerChecks, check)
+				}
 			}
 		}
 	}
@@ -524,6 +546,12 @@ func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.
 			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".command", OK: false, Err: "runner command is empty"})
 			continue
 		}
+		if runnerName == probe.Name {
+			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".executable", OK: true, Detail: "builtin"})
+			checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+			checks = append(checks, runnerSmokeCheck(ctx, reg, runnerName, 60*time.Second, filepath.Join(cfg.Node.DataDir, "preflight")))
+			continue
+		}
 		exe := rcfg.Command[0]
 		resolved, err := exec.LookPath(exe)
 		if err != nil {
@@ -582,6 +610,24 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	}
 	if len(rcfg.Command) == 0 {
 		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: false, Err: "runner command is empty"})
+		return checks
+	}
+	if runnerName == probe.Name {
+		reg, err := buildRunners(cfg)
+		if err != nil {
+			checks = append(checks, doctor.Check{Name: "runner auth works", OK: false, Err: err.Error()})
+			return checks
+		}
+		checks = append(checks,
+			doctor.Check{Name: "runner executable exists", OK: true, Detail: "builtin"},
+			doctor.Check{Name: "runner executable absolute", OK: true, Detail: "builtin"},
+		)
+		checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+		checks = append(checks,
+			doctor.Check{Name: "runner auth works", OK: true, Detail: "not required"},
+			doctor.Check{Name: "prompt via stdin works", OK: true, Detail: "not applicable"},
+			doctor.Check{Name: "smoke response verified", OK: true, Detail: "builtin deterministic probes"},
+		)
 		return checks
 	}
 	exe := rcfg.Command[0]
@@ -662,6 +708,9 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 	run, ok := reg.Get(runnerName)
 	if !ok {
 		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: "runner not registered"}
+	}
+	if runnerName == probe.Name {
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: true, Detail: "builtin deterministic probes; prompt smoke not applicable"}
 	}
 	result, err := run.Run(runner.RunRequest{
 		Context:     ctx,
@@ -843,7 +892,7 @@ func cmdService(args []string) error {
 		password := fs.String("password", "", "Windows service account password; prefer --prompt-password or --password-env")
 		passwordEnv := fs.String("password-env", "", "environment variable containing the Windows service account password")
 		promptPassword := fs.Bool("prompt-password", false, "prompt for the Windows service account password")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
 			return err
 		}
 		return serviceInstall(serviceInstallOptions{
@@ -1153,7 +1202,7 @@ func cmdTest(args []string) error {
 	// conservatively-scoped allowlist and, across a cross-OS mesh, names a path
 	// that may not exist on the worker. Pass --cwd to target a specific directory.
 	cwd := fs.String("cwd", "", "worker cwd for the smoke task (empty: the worker picks an allowed dir)")
-	profile := fs.String("profile", "readonly", "profile to request")
+	profile := fs.String("profile", "", "profile to request (default: query when available, otherwise readonly)")
 	wait := fs.Bool("wait", true, "wait for the smoke task to finish")
 	timeoutSeconds := fs.Int("timeout", 60, "smoke task timeout in seconds")
 	bidirectional := fs.Bool("bidirectional", false, "also ask the peer daemon to run a direct smoke task back to this machine")
@@ -1198,21 +1247,31 @@ func cmdTest(args []string) error {
 		return err
 	}
 	printCheck("peer reachable", true, firstNonEmpty(hello.NodeName, hello.NodeID))
+	smokeProfile := strings.TrimSpace(*profile)
+	if smokeProfile == "" {
+		if helloSupportsProfile(hello, profiledefs.Query) {
+			smokeProfile = profiledefs.Query
+		} else {
+			smokeProfile = "readonly"
+		}
+	}
 	chain := []string{cfg.Node.ID}
 	decision := policy.New(cfg).CheckOutbound(policy.TaskIntent{
 		PeerName:     firstNonEmpty(peer.Name, peerName),
 		PeerNodeID:   peer.NodeID,
 		CWD:          *cwd,
-		Profile:      *profile,
+		Profile:      smokeProfile,
 		Chain:        chain,
 		OriginNodeID: cfg.Node.ID,
+		TaskKind:     taskKindForSmoke(smokeProfile),
+		Capability:   capabilityForSmoke(smokeProfile),
 	})
 	if !decision.Allowed {
 		printCheck("policy allowed", false, decision.Detail)
 		return fmt.Errorf("%s: %s", decision.Code, decision.Detail)
 	}
 	printCheck("policy allowed", true, decision.EffectiveProfile)
-	resp, err := client.CreateTask(ctx, schemaSmokeRequest(cfg, peerName, *cwd, *profile, *wait, *timeoutSeconds))
+	resp, err := client.CreateTask(ctx, schemaSmokeRequest(cfg, peerName, *cwd, smokeProfile, *wait, *timeoutSeconds))
 	if err != nil {
 		printCheck("inbound policy / runner", false, err.Error())
 		return err
@@ -1268,17 +1327,17 @@ func cmdTest(args []string) error {
 			if !runnerInvoked {
 				return fmt.Errorf("smoke task did not return a command_output command")
 			}
-			promptReceived := smokeResultMatches(result.Result)
+			promptReceived := smokeResultMatches(result.Result, smokeProfile)
 			if !promptReceived {
 				detail := "missing expected smoke response"
 				if result.Result != nil && strings.TrimSpace(result.Result.WorkerSummaryUntrusted) != "" {
 					detail = oneLine(result.Result.WorkerSummaryUntrusted)
 				}
 				printCheck("prompt received", false, detail)
-				return fmt.Errorf("smoke task did not return %q", smokeExpectedResponse)
+				return fmt.Errorf("smoke task did not return %q", smokeExpectedForProfile(smokeProfile))
 			}
-			printCheck("prompt received", true, smokeExpectedResponse)
-			printCheck("smoke response verified", true, smokeExpectedResponse)
+			printCheck("prompt received", true, smokeExpectedForProfile(smokeProfile))
+			printCheck("smoke response verified", true, smokeExpectedForProfile(smokeProfile))
 		} else {
 			printCheck("task queued", true, resp.TaskID)
 		}
@@ -1294,7 +1353,7 @@ func cmdTest(args []string) error {
 		fmt.Println()
 		fmt.Println("reverse cmesh test")
 		fmt.Println()
-		reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{CWD: cwdBack, Profile: *profile, TimeoutSeconds: *timeoutSeconds})
+		reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{CWD: cwdBack, Profile: smokeProfile, TimeoutSeconds: *timeoutSeconds})
 		if err != nil {
 			printCheck("reverse smoke requested", false, err.Error())
 			return err
@@ -1308,14 +1367,24 @@ func cmdTest(args []string) error {
 
 const smokeExpectedResponse = "cmesh smoke ok"
 
-func smokeResultMatches(result *task.ResultEnvelope) bool {
+func smokeResultMatches(result *task.ResultEnvelope, profile string) bool {
 	if result == nil {
 		return false
 	}
 	if result.CommandOutput.Command == "" {
 		return false
 	}
+	if profile == profiledefs.Query {
+		return result.CommandOutput.ExitCode == 0 && result.CommandOutput.Command == "probe:"+profiledefs.CapSystemInfo && strings.Contains(result.CommandOutput.Stdout, `"kind":"system_info"`)
+	}
 	return result.CommandOutput.ExitCode == 0 && rawOutputContainsSmoke(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+}
+
+func smokeExpectedForProfile(profile string) string {
+	if profile == profiledefs.Query {
+		return "probe:" + profiledefs.CapSystemInfo
+	}
+	return smokeExpectedResponse
 }
 
 func printPeerSmokeResponse(resp schema.PeerSmokeResponse) error {
@@ -1587,16 +1656,16 @@ func promptInit(opts *onboard.InitOptions, peers []onboard.PeerCandidate) error 
 	if len(opts.Profiles) == 0 {
 		fmt.Println()
 		fmt.Println("Profiles to expose:")
-		fmt.Println("[x] readonly")
-		fmt.Println("[x] dev")
+		fmt.Println("[x] query      - deterministic probes, no shell, no writes")
+		fmt.Println("[ ] repo-dev   - agent edits/tests inside allowed cwd, explicit")
 		fmt.Println("[ ] network")
 		fmt.Println("[ ] interactive")
 		fmt.Println("[ ] git_push")
-		value, err := prompt(reader, "Extra profiles, comma-separated (empty for readonly,dev): ")
+		value, err := prompt(reader, "Extra profiles, comma-separated (empty for query only): ")
 		if err != nil {
 			return err
 		}
-		opts.Profiles = append([]string{"readonly", "dev"}, splitCSV(value)...)
+		opts.Profiles = append([]string{"query"}, splitCSV(value)...)
 	}
 	return nil
 }
@@ -1637,6 +1706,10 @@ func displayRunner(name string) string {
 		return "Claude Code"
 	case codex.Name:
 		return "Codex"
+	case probe.Name:
+		return "Probe"
+	case shell.Name:
+		return "Shell"
 	default:
 		return name
 	}
@@ -1679,7 +1752,7 @@ func configuredPeers(cfg *config.Config) []map[string]any {
 
 func schemaSmokeRequest(cfg *config.Config, peerName, cwd, profile string, wait bool, timeoutSeconds int) schema.CreateTaskRequest {
 	_ = peerName
-	return schema.CreateTaskRequest{
+	req := schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-cli-smoke",
 		Prompt:          "Reply with exactly: " + smokeExpectedResponse,
@@ -1694,6 +1767,37 @@ func schemaSmokeRequest(cfg *config.Config, peerName, cwd, profile string, wait 
 			HopCount:        0,
 		},
 	}
+	if profile == profiledefs.Query {
+		req.TaskKind = "query"
+		req.Query = &schema.QueryRequest{Kind: profiledefs.CapSystemInfo, CWD: cwd}
+		req.Prompt = ""
+	}
+	return req
+}
+
+func taskKindForSmoke(profile string) string {
+	if profile == profiledefs.Query {
+		return "query"
+	}
+	return ""
+}
+
+func capabilityForSmoke(profile string) string {
+	if profile == profiledefs.Query {
+		return profiledefs.CapSystemInfo
+	}
+	return ""
+}
+
+func helloSupportsProfile(hello schema.HelloResponse, profile string) bool {
+	for _, runner := range hello.Runners {
+		for _, candidate := range runner.Profiles {
+			if candidate == profile {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func shellQuote(value string) string {
@@ -1755,6 +1859,311 @@ func cmdVersion(args []string) error {
 	return nil
 }
 
+type cliProfileContext struct {
+	DefaultProfile string                    `json:"default_profile"`
+	Peers          map[string]cliProfilePeer `json:"peers"`
+	UpdatedAt      time.Time                 `json:"updated_at"`
+}
+
+type cliProfilePeer struct {
+	Profile   string    `json:"profile"`
+	CWD       string    `json:"cwd,omitempty"`
+	Scope     string    `json:"scope,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	LeaseID   string    `json:"lease_id,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func cmdProfile(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: cmesh profile templates|generate|validate|write|current|use|reset")
+	}
+	switch args[0] {
+	case "templates":
+		fs := flag.NewFlagSet("profile templates", flag.ExitOnError)
+		jsonOut := fs.Bool("json", false, "print JSON")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		templates := profiledefs.Builtins()
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"templates": templates})
+		}
+		for _, tmpl := range templates {
+			fmt.Printf("%-16s %-6s %s\n", tmpl.Name, tmpl.EnforcementConfidence, tmpl.Description)
+		}
+		return nil
+	case "generate":
+		fs := flag.NewFlagSet("profile generate", flag.ExitOnError)
+		name := fs.String("name", "", "generated profile name")
+		runnerName := fs.String("runner", "", "runner override for agent-backed profiles")
+		osName := fs.String("os", "", "shell policy OS filter: windows, darwin, or linux")
+		caps := multiFlag{}
+		jsonOut := fs.Bool("json", false, "print JSON")
+		fs.Var(&caps, "cap", "capability override; repeatable")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		templateName := profiledefs.Query
+		if fs.NArg() > 0 {
+			templateName = fs.Arg(0)
+		}
+		tmpl, err := profiledefs.Generate(templateName, profiledefs.GenerateOptions{Name: *name, Runner: *runnerName, Capabilities: caps, OS: *osName})
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"template": tmpl, "toml": profiledefs.RenderTOML(tmpl)})
+		}
+		fmt.Print(profiledefs.RenderTOML(tmpl))
+		return nil
+	case "validate":
+		fs := flag.NewFlagSet("profile validate", flag.ExitOnError)
+		name := fs.String("name", "custom", "profile name")
+		runnerName := fs.String("runner", "", "runner name")
+		writes := fs.String("writes", "", "write mode: deny, repo_only, or allow")
+		shellMode := fs.String("shell", "", "shell mode: deny, allowlisted, or allow")
+		network := fs.Bool("network", false, "network access")
+		gitPush := fs.Bool("git-push", false, "git push capability is enabled")
+		requireExplicit := fs.Bool("require-explicit", false, "profile requires explicit selection")
+		confidence := fs.String("confidence", "", "enforcement confidence")
+		caps := multiFlag{}
+		fs.Var(&caps, "cap", "capability; repeatable")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		if *runnerName == "" {
+			return fmt.Errorf("--runner is required")
+		}
+		if err := profiledefs.ValidateSemantics(*name, *runnerName, profiledefs.NormalizeCapabilities(caps, nil), *writes, *shellMode, *network, *gitPush, *requireExplicit, *confidence); err != nil {
+			return err
+		}
+		fmt.Println("valid")
+		return nil
+	case "write":
+		fs := flag.NewFlagSet("profile write", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		name := fs.String("name", "", "generated profile name")
+		runnerName := fs.String("runner", "", "runner override for agent-backed profiles")
+		osName := fs.String("os", "", "shell policy OS filter: windows, darwin, or linux")
+		confirmed := fs.Bool("confirmed", false, "write the generated profile to the config")
+		force := fs.Bool("force", false, "allow appending even when profile/runner names already appear in the config text")
+		caps := multiFlag{}
+		fs.Var(&caps, "cap", "capability override; repeatable")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		templateName := profiledefs.Query
+		if fs.NArg() > 0 {
+			templateName = fs.Arg(0)
+		}
+		tmpl, err := profiledefs.Generate(templateName, profiledefs.GenerateOptions{Name: *name, Runner: *runnerName, Capabilities: caps, OS: *osName})
+		if err != nil {
+			return err
+		}
+		body := profiledefs.RenderTOML(tmpl)
+		if !*confirmed {
+			fmt.Print(body)
+			return fmt.Errorf("profile write requires --confirmed to modify %s", *configPath)
+		}
+		if err := appendProfileToConfig(*configPath, tmpl, body, *force); err != nil {
+			return err
+		}
+		fmt.Printf("wrote profile %s to %s\n", tmpl.Name, *configPath)
+		return nil
+	case "current":
+		fs := flag.NewFlagSet("profile current", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		ctxFile, err := readCLIProfileContext(cfg)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(ctxFile)
+	case "use":
+		fs := flag.NewFlagSet("profile use", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		cwd := fs.String("cwd", "", "optional cwd scope note")
+		ttlText := fs.String("ttl", "", "optional lease TTL such as 30m; required for profiles with require_lease=true")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 2 {
+			return fmt.Errorf("usage: cmesh profile use <peer> <profile> [--cwd path] [--ttl 30m]")
+		}
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		peerName, profileName := fs.Arg(0), fs.Arg(1)
+		if _, ok := cfg.Peers[peerName]; !ok {
+			return fmt.Errorf("unknown peer %q", peerName)
+		}
+		prof, ok := cfg.Profiles[profileName]
+		if !ok {
+			return fmt.Errorf("profile %q is not configured", profileName)
+		}
+		var ttl time.Duration
+		if strings.TrimSpace(*ttlText) != "" {
+			ttl, err = time.ParseDuration(strings.TrimSpace(*ttlText))
+			if err != nil || ttl <= 0 {
+				return fmt.Errorf("--ttl must be a positive duration like 30m")
+			}
+		}
+		if prof.RequireLease && ttl <= 0 {
+			return fmt.Errorf("profile %q requires --ttl to create an active lease", profileName)
+		}
+		ctxFile, err := readCLIProfileContext(cfg)
+		if err != nil {
+			return err
+		}
+		if ctxFile.Peers == nil {
+			ctxFile.Peers = map[string]cliProfilePeer{}
+		}
+		now := time.Now().UTC()
+		entry := cliProfilePeer{Profile: profileName, CWD: strings.TrimSpace(*cwd), Scope: "global", UpdatedAt: now}
+		if ttl > 0 {
+			entry.Scope = "session"
+			entry.ExpiresAt = now.Add(ttl)
+			entry.LeaseID = cliLeaseID(peerName, profileName, now)
+		}
+		ctxFile.Peers[peerName] = entry
+		ctxFile.UpdatedAt = now
+		if err := writeCLIProfileContext(cfg, ctxFile); err != nil {
+			return err
+		}
+		if entry.LeaseID != "" {
+			fmt.Printf("%s -> %s (%s, expires %s)\n", peerName, profileName, entry.LeaseID, entry.ExpiresAt.Format(time.RFC3339))
+		} else {
+			fmt.Printf("%s -> %s\n", peerName, profileName)
+		}
+		return nil
+	case "reset":
+		fs := flag.NewFlagSet("profile reset", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		cfg, err := config.Load(*configPath)
+		if err != nil {
+			return err
+		}
+		ctxFile, err := readCLIProfileContext(cfg)
+		if err != nil {
+			return err
+		}
+		if fs.NArg() == 0 {
+			ctxFile.Peers = map[string]cliProfilePeer{}
+		} else {
+			delete(ctxFile.Peers, fs.Arg(0))
+		}
+		ctxFile.UpdatedAt = time.Now().UTC()
+		if err := writeCLIProfileContext(cfg, ctxFile); err != nil {
+			return err
+		}
+		fmt.Println("reset")
+		return nil
+	default:
+		return fmt.Errorf("unknown profile command %q", args[0])
+	}
+}
+
+func readCLIProfileContext(cfg *config.Config) (cliProfileContext, error) {
+	ctxFile := cliProfileContext{DefaultProfile: profiledefs.Query, Peers: map[string]cliProfilePeer{}}
+	path := profileContextPath(cfg)
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ctxFile, nil
+	}
+	if err != nil {
+		return ctxFile, err
+	}
+	if err := json.Unmarshal(body, &ctxFile); err != nil {
+		return ctxFile, err
+	}
+	if ctxFile.DefaultProfile == "" {
+		ctxFile.DefaultProfile = profiledefs.Query
+	}
+	if ctxFile.Peers == nil {
+		ctxFile.Peers = map[string]cliProfilePeer{}
+	}
+	return ctxFile, nil
+}
+
+func writeCLIProfileContext(cfg *config.Config, ctxFile cliProfileContext) error {
+	path := profileContextPath(cfg)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(ctxFile, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(body, '\n'), 0o600)
+}
+
+func profileContextPath(cfg *config.Config) string {
+	return filepath.Join(cfg.Node.DataDir, "profile-context.json")
+}
+
+func cliLeaseID(peer, profileName string, now time.Time) string {
+	sum := task.SHA256Hex([]byte(strings.Join([]string{peer, profileName, now.Format(time.RFC3339Nano)}, "\x00")))
+	if len(sum) > 24 {
+		sum = sum[:24]
+	}
+	return "lease_" + sum
+}
+
+func appendProfileToConfig(path string, tmpl profiledefs.Template, snippet string, force bool) error {
+	if path == "" {
+		path = config.DefaultPath()
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(body)
+	for _, section := range []string{"[profiles." + tmpl.Name + "]", "[runners." + tmpl.Runner + "]"} {
+		if !force && strings.Contains(text, section) {
+			return fmt.Errorf("%s already exists in %s; pass --force to append anyway", section, path)
+		}
+	}
+	next := strings.TrimRight(text, "\r\n") + "\n\n" + strings.TrimSpace(snippet) + "\n"
+	tmp, err := os.CreateTemp(filepath.Dir(path), "cmesh-profile-*.toml")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.WriteString(next); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if _, err := config.Load(tmpPath); err != nil {
+		return fmt.Errorf("generated config would not validate: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
+		return err
+	}
+	cleanup = false
+	_ = os.Remove(tmpPath)
+	return nil
+}
+
 func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	reg := runner.NewRegistry()
 	for name, rcfg := range cfg.Runners {
@@ -1765,7 +2174,21 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Runner != name {
 					continue
 				}
-				profiles[pname] = claudecode.ProfileConfig{Claims: pcfg.Claims, Bare: pcfg.Bare, OutputFormat: "json"}
+				ccfg := claudecode.ProfileConfig{
+					Claims:       pcfg.Claims,
+					Bare:         pcfg.Bare,
+					OutputFormat: "json",
+					Confidence:   pcfg.EnforcementConfidence,
+					KnownGaps:    pcfg.KnownGaps,
+				}
+				if pcfg.Writes == profiledefs.WritesDeny {
+					ccfg.PermissionMode = "plan"
+					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Edit", "MultiEdit", "Write", "NotebookEdit")
+				}
+				if pcfg.Shell == profiledefs.ShellDeny {
+					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash")
+				}
+				profiles[pname] = ccfg
 			}
 			run := claudecode.New(claudecode.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
 			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
@@ -1795,6 +2218,54 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 			if err := reg.Register(wrapped); err != nil {
 				return nil, err
 			}
+		case probe.Name:
+			profiles := map[string]probe.ProfileConfig{}
+			for pname, pcfg := range cfg.Profiles {
+				if pcfg.Runner != name {
+					continue
+				}
+				profiles[pname] = probe.ProfileConfig{
+					Capabilities:          pcfg.Capabilities,
+					MaxOutputBytes:        pcfg.MaxOutputBytes,
+					EnforcementConfidence: pcfg.EnforcementConfidence,
+				}
+			}
+			if err := reg.Register(probe.New(profiles)); err != nil {
+				return nil, err
+			}
+		case shell.Name:
+			profiles := map[string]shell.ProfileConfig{}
+			for pname, pcfg := range cfg.Profiles {
+				if pcfg.Runner != name {
+					continue
+				}
+				allowed := map[string][]string{}
+				for key, values := range pcfg.ShellPolicy.AllowedCommands {
+					allowed[key] = append([]string(nil), values...)
+				}
+				if len(pcfg.ShellPolicy.Windows.AllowedCommands) > 0 {
+					allowed["windows"] = append([]string(nil), pcfg.ShellPolicy.Windows.AllowedCommands...)
+				}
+				if len(pcfg.ShellPolicy.Darwin.AllowedCommands) > 0 {
+					allowed["darwin"] = append([]string(nil), pcfg.ShellPolicy.Darwin.AllowedCommands...)
+				}
+				if len(pcfg.ShellPolicy.Linux.AllowedCommands) > 0 {
+					allowed["linux"] = append([]string(nil), pcfg.ShellPolicy.Linux.AllowedCommands...)
+				}
+				profiles[pname] = shell.ProfileConfig{
+					Capabilities:          pcfg.Capabilities,
+					MaxOutputBytes:        pcfg.MaxOutputBytes,
+					EnforcementConfidence: pcfg.EnforcementConfidence,
+					ShellPolicy: shell.ShellPolicy{
+						Mode:            pcfg.ShellPolicy.Mode,
+						AllowedCommands: allowed,
+						DeniedPatterns:  pcfg.ShellPolicy.DeniedPatterns,
+					},
+				}
+			}
+			if err := reg.Register(shell.New(profiles)); err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("unknown runner %q", name)
 		}
@@ -1802,11 +2273,29 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	return reg, nil
 }
 
-func codexSandboxForProfile(_ config.ProfileConfig, goos string) string {
+func codexSandboxForProfile(profile config.ProfileConfig, goos string) string {
+	if profile.Writes == "deny" {
+		return "read-only"
+	}
 	if goos == "windows" {
 		return "danger-full-access"
 	}
 	return "workspace-write"
+}
+
+func appendUnique(values []string, more ...string) []string {
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		seen[value] = struct{}{}
+	}
+	for _, value := range more {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }
 
 type manifestOverrideRunner struct {
@@ -1993,7 +2482,7 @@ func firstNonEmpty(values ...string) string {
 }
 
 func usage() {
-	fmt.Println("usage: cmesh <install|uninstall|up|doctor|peers|mcp>")
+	fmt.Println("usage: cmesh <install|uninstall|up|doctor|peers|profile|mcp>")
 	fmt.Println()
 	fmt.Println("The only real install is the cmesh binary + the MCP. After that,")
 	fmt.Println("drive everything from your AI coding agent via the cmesh MCP.")
@@ -2010,5 +2499,6 @@ func usage() {
 	fmt.Println("  cmesh doctor                  check Tailscale, config, runners, and the gateway")
 	fmt.Println("  cmesh peers                   list configured and discovered peers")
 	fmt.Println("  cmesh peers test <peer> --cwd <peer-cwd> --bidirectional")
+	fmt.Println("  cmesh profile templates       list built-in permission profile templates")
 	fmt.Println("  cmesh mcp --stdio             serve the onboarding MCP over stdio (agents launch this)")
 }

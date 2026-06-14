@@ -23,6 +23,7 @@ import (
 	tsid "cmesh/internal/identity/tailscale"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/policy"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/runner"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
@@ -221,6 +222,8 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 		Profile:      profile,
 		Chain:        chain,
 		OriginNodeID: s.Config.Node.ID,
+		TaskKind:     taskKindForSmoke(profile),
+		Capability:   capabilityForSmoke(profile),
 	})
 	checks["policy_allowed"] = decision.Allowed
 	if !decision.Allowed {
@@ -256,7 +259,7 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 	resp.Result = result.Result
 	checks["result_envelope_parsed"] = result.Result != nil && task.State(result.Result.Status) == task.StateDone
 	checks["runner_invoked"] = result.Result != nil && result.Result.CommandOutput.Command != ""
-	verified := rpcSmokeResultMatches(result.Result)
+	verified := rpcSmokeResultMatches(result.Result, decision.EffectiveProfile)
 	checks["prompt_received"] = verified
 	checks["smoke_response_verified"] = verified
 	if !verified {
@@ -285,7 +288,7 @@ func (s *Server) peerForIdentity(identity tsid.Identity) (string, config.PeerCon
 const rpcSmokeExpectedResponse = "cmesh smoke ok"
 
 func smokeCreateTaskRequest(cfg *config.Config, cwd, profile string, timeoutSeconds int) schema.CreateTaskRequest {
-	return schema.CreateTaskRequest{
+	req := schema.CreateTaskRequest{
 		TaskID:          task.DeterministicID(cfg.Node.ID, "cmesh-rpc-smoke", cwd+"\x00"+profile+"\x00"+strconv.Itoa(timeoutSeconds)+"\x00"+time.Now().UTC().Format(time.RFC3339Nano)),
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-rpc-smoke",
@@ -301,6 +304,26 @@ func smokeCreateTaskRequest(cfg *config.Config, cwd, profile string, timeoutSeco
 			HopCount:        0,
 		},
 	}
+	if profile == profiledefs.Query {
+		req.TaskKind = "query"
+		req.Query = &schema.QueryRequest{Kind: profiledefs.CapSystemInfo, CWD: cwd}
+		req.Prompt = ""
+	}
+	return req
+}
+
+func taskKindForSmoke(profile string) string {
+	if profile == profiledefs.Query {
+		return "query"
+	}
+	return ""
+}
+
+func capabilityForSmoke(profile string) string {
+	if profile == profiledefs.Query {
+		return profiledefs.CapSystemInfo
+	}
+	return ""
 }
 
 // isSmokeOriginSession reports whether any of the candidate origin-session IDs
@@ -318,12 +341,15 @@ func isSmokeOriginSession(candidates ...string) bool {
 	return false
 }
 
-func rpcSmokeResultMatches(result *task.ResultEnvelope) bool {
+func rpcSmokeResultMatches(result *task.ResultEnvelope, profile string) bool {
 	if result == nil {
 		return false
 	}
 	if result.CommandOutput.Command == "" || result.CommandOutput.ExitCode != 0 {
 		return false
+	}
+	if profile == profiledefs.Query {
+		return result.CommandOutput.Command == "probe:"+profiledefs.CapSystemInfo && strings.Contains(result.CommandOutput.Stdout, `"kind":"system_info"`)
 	}
 	return strings.Contains(result.CommandOutput.Stdout, rpcSmokeExpectedResponse) || strings.Contains(result.CommandOutput.Stderr, rpcSmokeExpectedResponse)
 }
@@ -373,30 +399,49 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Provenance.WorkerNodeID = s.Config.Node.ID
 	req.Provenance.PromptHash = task.PromptHash(req.Prompt)
+	if req.TaskKind == "query" {
+		if req.Query == nil || strings.TrimSpace(req.Query.Kind) == "" {
+			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "query.kind is required")
+			return
+		}
+		if req.Profile == "" {
+			req.Profile = profiledefs.Query
+		}
+		if req.Query.CWD != "" {
+			req.CWD = req.Query.CWD
+		}
+		if strings.TrimSpace(req.Prompt) == "" {
+			req.Prompt = "Run cmesh deterministic query: " + req.Query.Kind
+			req.Provenance.PromptHash = task.PromptHash(req.Prompt)
+		}
+	}
 
 	// A smoke task with no cwd self-selects one this worker's policy accepts. The
 	// smoke verifies the runner round-trips; the delegator can't know a cwd that
 	// exists on this worker (especially cross-OS), so the worker — the node that
 	// runs the task and enforces allowed_cwds — picks it. Non-smoke tasks keep
 	// their existing empty-cwd behavior; only smoke is auto-filled.
-	if strings.TrimSpace(req.CWD) == "" && isSmokeOriginSession(req.Provenance.OriginSessionID, req.OriginSessionID) {
+	if strings.TrimSpace(req.CWD) == "" && (isSmokeOriginSession(req.Provenance.OriginSessionID, req.OriginSessionID) || req.TaskKind == "query") {
 		if cwd := policy.SmokeCWD(s.Config); cwd != "" {
 			req.CWD = cwd
 		}
 	}
 
 	intent := policy.TaskIntent{
-		PeerName:     identity.NodeName,
-		PeerNodeID:   identity.NodeID,
-		PeerStableID: identity.StableID,
-		PeerTags:     append([]string(nil), identity.Tags...),
-		CWD:          req.CWD,
-		Runner:       req.Runner,
-		Profile:      req.Profile,
-		HopCount:     req.Provenance.HopCount,
-		Chain:        req.Provenance.DelegationChain,
-		OriginNodeID: req.Provenance.OriginNodeID,
-		AllowDirty:   req.AllowDirty,
+		PeerName:         identity.NodeName,
+		PeerNodeID:       identity.NodeID,
+		PeerStableID:     identity.StableID,
+		PeerTags:         append([]string(nil), identity.Tags...),
+		CWD:              req.CWD,
+		Runner:           req.Runner,
+		Profile:          req.Profile,
+		HopCount:         req.Provenance.HopCount,
+		Chain:            req.Provenance.DelegationChain,
+		OriginNodeID:     req.Provenance.OriginNodeID,
+		AllowDirty:       req.AllowDirty,
+		TaskKind:         req.TaskKind,
+		Capability:       queryCapability(req),
+		ProfileContextID: req.ProfileContextID,
 	}
 	decision := s.Policy.CheckInbound(intent)
 	rec := task.Record{
@@ -407,7 +452,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		State:            task.StateQueued,
 		CWD:              req.CWD,
 		Runner:           firstNonEmpty(req.Runner, runnerFromProfile(s.Config, req.Profile)),
-		ProfileRequested: firstNonEmpty(req.Profile, "dev"),
+		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
 		AllowDirty:       req.AllowDirty,
@@ -426,7 +471,15 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if outcome.Replayed {
-		writeJSON(w, http.StatusOK, schema.CreateTaskResponse{TaskID: outcome.Task.ID, State: outcome.Task.State, Replayed: true})
+		writeJSON(w, http.StatusOK, schema.CreateTaskResponse{
+			TaskID:           outcome.Task.ID,
+			State:            outcome.Task.State,
+			Replayed:         true,
+			RequestedProfile: outcome.Task.ProfileRequested,
+			EffectiveProfile: outcome.Task.ProfileEffective,
+			ProfileSource:    req.ProfileSource,
+			ProfileContextID: req.ProfileContextID,
+		})
 		return
 	}
 	if !decision.Allowed {
@@ -445,9 +498,13 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			ErrorDetail:    decision.Detail,
 		})
 		writeJSON(w, http.StatusForbidden, schema.CreateTaskResponse{
-			TaskID: outcome.Task.ID,
-			State:  task.StateDenied,
-			Error:  &schema.Error{Code: task.ErrorCode(decision.Code), Detail: decision.Detail},
+			TaskID:           outcome.Task.ID,
+			State:            task.StateDenied,
+			RequestedProfile: rec.ProfileRequested,
+			EffectiveProfile: decision.EffectiveProfile,
+			ProfileSource:    req.ProfileSource,
+			ProfileContextID: req.ProfileContextID,
+			Error:            &schema.Error{Code: task.ErrorCode(decision.Code), Detail: decision.Detail},
 		})
 		return
 	}
@@ -471,10 +528,17 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		s.runTask(runCtx, outcome.Task, req)
 	}()
 	if req.Wait {
-		s.waitForTask(w, r, outcome.Task.ID, time.Duration(req.TimeoutSeconds)*time.Second)
+		s.waitForTask(w, r, outcome.Task.ID, time.Duration(req.TimeoutSeconds)*time.Second, req)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, schema.CreateTaskResponse{TaskID: outcome.Task.ID, State: task.StateQueued})
+	writeJSON(w, http.StatusAccepted, schema.CreateTaskResponse{
+		TaskID:           outcome.Task.ID,
+		State:            task.StateQueued,
+		RequestedProfile: rec.ProfileRequested,
+		EffectiveProfile: decision.EffectiveProfile,
+		ProfileSource:    req.ProfileSource,
+		ProfileContextID: req.ProfileContextID,
+	})
 }
 
 func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.CreateTaskRequest) {
@@ -580,6 +644,8 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		LogDir:      logDir,
 		Metadata:    metadata,
 		OutputLimit: runner.DefaultOutputLimit,
+		QueryKind:   queryCapability(req),
+		QueryParams: queryParams(req),
 	})
 	if ctx.Err() != nil && err == nil {
 		err = runner.E(runner.ErrCancelled, "run command", ctx.Err())
@@ -975,7 +1041,7 @@ func newTaskToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 
-func (s *Server) waitForTask(w http.ResponseWriter, r *http.Request, taskID string, timeout time.Duration) {
+func (s *Server) waitForTask(w http.ResponseWriter, r *http.Request, taskID string, timeout time.Duration, req schema.CreateTaskRequest) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
@@ -986,7 +1052,19 @@ func (s *Server) waitForTask(w http.ResponseWriter, r *http.Request, taskID stri
 	for {
 		select {
 		case <-deadline.C:
-			writeJSON(w, http.StatusAccepted, schema.CreateTaskResponse{TaskID: taskID, State: task.StateRunning})
+			rec, err := s.Store.GetTask(r.Context(), taskID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusAccepted, schema.CreateTaskResponse{
+				TaskID:           taskID,
+				State:            task.StateRunning,
+				RequestedProfile: rec.ProfileRequested,
+				EffectiveProfile: rec.ProfileEffective,
+				ProfileSource:    req.ProfileSource,
+				ProfileContextID: req.ProfileContextID,
+			})
 			return
 		case <-ticker.C:
 			rec, err := s.Store.GetTask(r.Context(), taskID)
@@ -995,7 +1073,14 @@ func (s *Server) waitForTask(w http.ResponseWriter, r *http.Request, taskID stri
 				return
 			}
 			if rec.State.Terminal() {
-				writeJSON(w, http.StatusOK, schema.CreateTaskResponse{TaskID: taskID, State: rec.State})
+				writeJSON(w, http.StatusOK, schema.CreateTaskResponse{
+					TaskID:           taskID,
+					State:            rec.State,
+					RequestedProfile: rec.ProfileRequested,
+					EffectiveProfile: rec.ProfileEffective,
+					ProfileSource:    req.ProfileSource,
+					ProfileContextID: req.ProfileContextID,
+				})
 				return
 			}
 		case <-r.Context().Done():
@@ -1522,6 +1607,27 @@ func runnerFromProfile(cfg *config.Config, profileName string) string {
 		return profile.Runner
 	}
 	return ""
+}
+
+func defaultProfileForTask(kind string) string {
+	if kind == "query" {
+		return profiledefs.Query
+	}
+	return "dev"
+}
+
+func queryCapability(req schema.CreateTaskRequest) string {
+	if req.TaskKind != "query" || req.Query == nil {
+		return ""
+	}
+	return strings.TrimSpace(req.Query.Kind)
+}
+
+func queryParams(req schema.CreateTaskRequest) map[string]any {
+	if req.TaskKind != "query" || req.Query == nil {
+		return nil
+	}
+	return req.Query.Params
 }
 
 func firstNonEmpty(values ...string) string {

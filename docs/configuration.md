@@ -109,21 +109,24 @@ allow_subdelegation = false
 
 ## Profiles
 
-Profiles are model-facing permission bundles:
+Profiles are permission bundles. The generated default is `query`, which uses
+the built-in probe runner rather than Claude Code or Codex:
 
 ```toml
-[profiles.readonly]
-runner = "claude-code"
-claims = ["read_files"]
-bare = true
+[profiles.query]
+runner = "probe"
+intents = ["query"]
+capabilities = ["disk_info", "system_info", "repo_status"]
+writes = "deny"
+shell = "deny"
 network = false
-git_push = false
-max_runtime = "30m"
+max_runtime = "30s"
+enforcement_confidence = "high"
 ```
 
 Runner manifests declare what those claims mean for a specific harness.
 
-Defaults expose only `readonly` and `dev`. High-risk profiles such as `network`, `interactive`, and `git_push` must be added explicitly and requested by name. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
+Defaults expose `query`; agent-backed profiles such as `repo-dev` must be added explicitly and requested by name. High-risk profiles such as `desktop-control`, `system-change`, `network`, `interactive`, and `git_push` must also be explicit. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
 
 ```toml
 [profiles.interactive]

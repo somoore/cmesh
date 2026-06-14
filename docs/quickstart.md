@@ -2,7 +2,7 @@
 
 cmesh lets the coding agent on this machine ask the coding agent on another machine to do work.
 
-> Experimental: cmesh can cause real changes on real machines. Do not use it on anything you love: machines, repos, credentials, or data you cannot afford to lose. Start on trusted private networks with narrow peer allowlists, narrow cwd allowlists, and `readonly` profiles.
+> Experimental: cmesh can cause real changes on real machines. Do not use it on anything you love: machines, repos, credentials, or data you cannot afford to lose. Start on trusted private networks with narrow peer allowlists, narrow cwd allowlists, and the `query` profile.
 
 The only thing you install by hand is the cmesh binary and the MCP registration. After that, you set up everything else by talking to your AI coding agent. The cmesh MCP is a stateless onboarding wizard: it detects rather than interrogates, confirms before it changes anything, and walks you all the way to a working two-machine mesh.
 
@@ -95,31 +95,32 @@ When a link reaches `ready`, the wizard prints the per-peer default profile and 
 
 ### Profiles
 
-Each peer exposes a set of profiles. The default for delegated work is `dev`. You select a different profile per task by naming it in your request:
+Each peer exposes a set of profiles. The generated default is `query`: deterministic cmesh probes with no shell, no writes, and no arbitrary agent execution. You select a different profile per task by naming it in your request:
 
 ```text
-Use cmesh to ask homelab to report disk usage for / (readonly).
-Use cmesh to ask homelab to run the test suite in ~/code/myapp (dev).
+Use cmesh to ask homelab to report disk usage for / (query).
+Use cmesh to ask homelab to run the test suite in ~/code/myapp (repo-dev).
 ```
 
-From an agent delegate call you pass it explicitly, for example `profile: "readonly"`.
+From an agent delegate call you pass it explicitly, for example `profile: "query"` or `profile: "repo-dev"`.
 
 The profile menu, from least to most authority:
 
-- `readonly` — read files only.
-- `dev` — read, edit a repo, and run repo commands. This is the default.
-- `network` — adds outbound network access.
-- `interactive` — adds interactive runner capability.
-- `git_push` — can push commits.
+- `query` - deterministic cmesh probes, no shell, no writes, no arbitrary agent execution. This is the default.
+- `query-network` - deterministic probes plus bounded typed network checks.
+- `query-shell` - allowlisted read-oriented diagnostic commands, no writes.
+- `readonly-agent` / `readonly` - agent-assisted read-only inspection; prefer `query` when a typed probe is enough.
+- `repo-dev` / `dev` - agent edits/tests inside allowed cwd, explicit and lease-gated.
+- `desktop-control`, `system-change`, `network`, `interactive`, `git_push` - elevated profiles for desktop/session, system, network, or push authority.
 
-> Security note: `readonly` and `dev` are the safe defaults. Anything past `dev` (`network`, `interactive`, `git_push`) is real authority on the worker machine. Grant it only to peers you trust, and scope it to that peer.
+> Security note: `query` is the safe default. Agent-backed and elevated profiles are real authority on the worker machine. Grant them only to peers you trust, and scope them to that peer.
 
 ### Example prompts
 
 ```text
 Use cmesh to ask homelab to summarize ~/code/myapp.
-Use cmesh to ask homelab to check git status in ~/code/myapp (readonly).
-Use cmesh to ask homelab to run the native build in ~/builds/app (dev).
+Use cmesh to ask homelab to check git status in ~/code/myapp (query).
+Use cmesh to ask homelab to run the native build in ~/builds/app (repo-dev).
 ```
 
 Your local agent keeps running on your machine. The work runs on the peer, and the result comes back to your session.

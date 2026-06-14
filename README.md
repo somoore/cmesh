@@ -120,10 +120,21 @@ help me setup cmesh
 
 From there the cmesh MCP wizard drives everything: it detects Tailscale and peers (verify, don't ask), writes config after you confirm, installs and starts the daemon, registers the local gateway, and walks the two-machine handshake. There is no shared session between machines — each machine configures itself to trust and reach the other, and cmesh discovers the rest over the tailnet. To bring a second machine into the mesh, install cmesh there and, in a new session, say `continue helping me configure cmesh for this new node`.
 
-Once a link is `ready`, ask your agent to delegate work:
+Once a link is `ready`, start with deterministic query work:
 
 ```text
-Use cmesh to ask homelab to run the test suite in ~/code/myapp (dev).
+Use cmesh to ask homelab for system_info with the query profile.
+```
+
+The default generated profile is `query`: cmesh runs built-in probes, not Claude
+Code or Codex, and the profile denies shell and writes. Use agent-backed profiles
+only when deterministic probes are not enough.
+
+For repo work, ask your agent to delegate with an explicit higher-authority
+profile:
+
+```text
+Use cmesh to ask homelab to run the test suite in ~/code/myapp (repo-dev).
 ```
 
 If a peer ever stops authenticating or an entry looks wrong, you fix it the same

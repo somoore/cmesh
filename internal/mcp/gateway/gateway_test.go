@@ -16,6 +16,7 @@ import (
 	"cmesh/internal/config"
 	"cmesh/internal/mesh/schema"
 	"cmesh/internal/policy"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 )
@@ -269,6 +270,78 @@ func TestDelegateRejectsUnknownPeer(t *testing.T) {
 	}
 }
 
+func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	cwd := t.TempDir()
+	g.Config.Profiles["repo-dev"] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Claims:          []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Writes:          profiledefs.WritesRepoOnly,
+		Shell:           profiledefs.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	g.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "readonly"}
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: "127.0.0.1", Port: 1}}
+
+	denied, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd})
+	if denied.OK || denied.Error == nil || denied.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("profile_use without ttl should be denied, got %+v", denied)
+	}
+
+	var got schema.CreateTaskRequest
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode task: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: "remote-1", State: task.StateQueued})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
+
+	used, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: cwd, TTL: "30m"})
+	if !used.OK {
+		t.Fatalf("profile_use with ttl failed: %+v", used)
+	}
+	resp, err := g.delegateCall(ctx, DelegateRequest{Peer: "worker", Prompt: "run tests"})
+	if err != nil || !resp.OK {
+		t.Fatalf("delegate with active context resp=%+v err=%v", resp, err)
+	}
+	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID == "" || got.CWD != cwd {
+		t.Fatalf("delegated request did not inherit context: %+v", got)
+	}
+	local := resp.Result.(schema.CreateTaskResponse)
+	if local.RequestedProfile != "repo-dev" || local.ProfileSource != "active_context" || local.ProfileContextID == "" {
+		t.Fatalf("local response missing profile metadata: %+v", local)
+	}
+}
+
+func TestProfileDescribeReturnsConfiguredContract(t *testing.T) {
+	g := newTestGateway(t)
+	g.Config.Profiles[profiledefs.Query] = config.ProfileConfig{
+		Runner:                profiledefs.RunnerProbe,
+		Capabilities:          []string{profiledefs.CapDiskInfo},
+		Writes:                profiledefs.WritesDeny,
+		Shell:                 profiledefs.ShellDeny,
+		EnforcementConfidence: "high",
+	}
+	resp, err := g.profileDescribeCall(profiledefs.Query)
+	if err != nil || !resp.OK {
+		t.Fatalf("profileDescribeCall resp=%+v err=%v", resp, err)
+	}
+	result := resp.Result.(map[string]any)
+	caps := result["capabilities"].([]string)
+	if len(caps) != 1 || caps[0] != profiledefs.CapDiskInfo || result["writes"] != profiledefs.WritesDeny {
+		t.Fatalf("profile description = %#v", result)
+	}
+}
+
 func TestDelegateFanoutReturnsPeerKeyedResults(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
@@ -409,12 +482,12 @@ func splitTestServerAddr(t *testing.T, rawURL string) (string, int) {
 func TestGatewaySmokeRequiresCommandOutput(t *testing.T) {
 	if !gatewaySmokeResultMatches(&task.ResultEnvelope{
 		CommandOutput: task.CommandOutput{Command: "runner", ExitCode: 0, Stdout: gatewaySmokeExpectedResponse + "\n"},
-	}) {
+	}, "readonly") {
 		t.Fatal("raw command artifact should pass smoke verification")
 	}
 	if gatewaySmokeResultMatches(&task.ResultEnvelope{
 		WorkerSummaryUntrusted: gatewaySmokeExpectedResponse,
-	}) {
+	}, "readonly") {
 		t.Fatal("summary-only smoke response must not pass verification")
 	}
 }

@@ -14,6 +14,7 @@ import (
 
 	"cmesh/internal/config"
 	"cmesh/internal/onboard"
+	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/version"
 )
 
@@ -159,6 +160,20 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}
 	case "detect_runners":
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}
+	case "profile_templates":
+		return ToolResponse{OK: true, Result: map[string]any{"templates": profiledefs.Builtins()}}
+	case "profile_generate":
+		var req profileGenerateRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+		return profileGenerate(req)
+	case "profile_validate":
+		var req profileValidateRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+		return profileValidate(req)
 	case "list_tailnet_peers":
 		peers, err := onboard.TailnetPeers(ctx, config.DefaultMeshPort, true)
 		if err != nil {
@@ -173,6 +188,16 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 		body, err := suggestedConfig(ctx, opts)
 		if err != nil {
 			return failure("suggest_config_failed", err.Error())
+		}
+		return ToolResponse{OK: true, Result: map[string]string{"path": config.DefaultPath(), "toml": body}}
+	case "profile_preview_config":
+		opts, err := decodeInitOptions(args)
+		if err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+		body, err := suggestedConfig(ctx, opts)
+		if err != nil {
+			return failure("profile_preview_config_failed", err.Error())
 		}
 		return ToolResponse{OK: true, Result: map[string]string{"path": config.DefaultPath(), "toml": body}}
 	case "validate_config":
@@ -225,6 +250,39 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			"next_step":   "Run cmesh up, or register http://127.0.0.1:7777/mcp after the daemon is running.",
 			"gateway_url": "http://127.0.0.1:7777/mcp",
 		}}
+	case "profile_write_config":
+		var req writeConfigRequest
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+		if !req.Confirmed {
+			return ToolResponse{OK: true, Result: map[string]any{
+				"requires_confirmation": true,
+				"message":               "Call profile_write_config again with confirmed=true to write the cmesh config file.",
+				"path":                  firstNonEmpty(req.Path, config.DefaultPath()),
+			}}
+		}
+		body := req.TOML
+		var err error
+		if strings.TrimSpace(body) == "" {
+			body, err = suggestedConfig(ctx, req.options())
+			if err != nil {
+				return failure("profile_preview_config_failed", err.Error())
+			}
+		}
+		path := firstNonEmpty(req.Path, config.DefaultPath())
+		if err := onboard.WriteConfig(path, body, req.Force); err != nil {
+			return failure("profile_write_config_failed", err.Error())
+		}
+		if err := onboard.ValidateConfig(path); err != nil {
+			return failure("invalid_written_config", err.Error())
+		}
+		return ToolResponse{OK: true, Result: map[string]string{
+			"path":        path,
+			"status":      "written",
+			"next_step":   "Run cmesh up, or register http://127.0.0.1:7777/mcp after the daemon is running.",
+			"gateway_url": "http://127.0.0.1:7777/mcp",
+		}}
 	case "gateway_info":
 		cfg, err := config.Load(config.DefaultPath())
 		if err != nil {
@@ -265,6 +323,27 @@ type writeConfigRequest struct {
 	Confirmed bool   `json:"confirmed,omitempty"`
 }
 
+type profileGenerateRequest struct {
+	Template     string   `json:"template"`
+	Name         string   `json:"name,omitempty"`
+	Runner       string   `json:"runner,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	OS           string   `json:"os,omitempty"`
+}
+
+type profileValidateRequest struct {
+	Name                  string   `json:"name"`
+	Runner                string   `json:"runner"`
+	Capabilities          []string `json:"capabilities"`
+	Claims                []string `json:"claims,omitempty"`
+	Writes                string   `json:"writes,omitempty"`
+	Shell                 string   `json:"shell,omitempty"`
+	Network               bool     `json:"network,omitempty"`
+	GitPush               bool     `json:"git_push,omitempty"`
+	RequireExplicit       bool     `json:"require_explicit,omitempty"`
+	EnforcementConfidence string   `json:"enforcement_confidence,omitempty"`
+}
+
 type initOptionsRequest struct {
 	Role         string   `json:"role,omitempty"`
 	AllowedPeers []string `json:"allowed_peers,omitempty"`
@@ -272,6 +351,38 @@ type initOptionsRequest struct {
 	PeerNames    []string `json:"peer_names,omitempty"`
 	Runner       string   `json:"runner,omitempty"`
 	Profiles     []string `json:"profiles,omitempty"`
+}
+
+func profileGenerate(req profileGenerateRequest) ToolResponse {
+	templateName := strings.TrimSpace(req.Template)
+	if templateName == "" {
+		templateName = profiledefs.Query
+	}
+	tmpl, err := profiledefs.Generate(templateName, profiledefs.GenerateOptions{
+		Name:         req.Name,
+		Runner:       req.Runner,
+		Capabilities: req.Capabilities,
+		OS:           req.OS,
+	})
+	if err != nil {
+		return failure("profile_generate_failed", err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"template": tmpl,
+		"toml":     profiledefs.RenderTOML(tmpl),
+	}}
+}
+
+func profileValidate(req profileValidateRequest) ToolResponse {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		name = "custom"
+	}
+	capabilities := profiledefs.NormalizeCapabilities(req.Capabilities, req.Claims)
+	if err := profiledefs.ValidateSemantics(name, strings.TrimSpace(req.Runner), capabilities, req.Writes, req.Shell, req.Network, req.GitPush, req.RequireExplicit, req.EnforcementConfidence); err != nil {
+		return failure("profile_denied", err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{"status": "valid", "name": name, "capabilities": capabilities}}
 }
 
 func (r initOptionsRequest) options() onboard.InitOptions {
@@ -411,6 +522,38 @@ func tools() []map[string]any {
 			"inputSchema": objectSchema(nil, nil),
 		},
 		{
+			"name":        "profile_templates",
+			"description": "List built-in cmesh profile templates. The default query template is enforced by the builtin probe runner: no shell, no writes, no arbitrary agent execution.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "profile_generate",
+			"description": "Generate a built-in profile template preview and TOML snippet without writing config.",
+			"inputSchema": objectSchema(map[string]any{
+				"template":     stringSchema("Built-in template name such as query, query-shell, readonly-agent, or repo-dev."),
+				"name":         stringSchema("Optional generated profile name override."),
+				"runner":       stringSchema("Optional runner override."),
+				"capabilities": arraySchema(stringSchema("Optional capability override list.")),
+				"os":           stringSchema("Optional shell policy OS filter: windows, darwin, or linux."),
+			}, nil),
+		},
+		{
+			"name":        "profile_validate",
+			"description": "Validate one profile capability contract and reject unsafe contradictions such as writes=deny with edit_repo.",
+			"inputSchema": objectSchema(map[string]any{
+				"name":                   stringSchema("Profile name used in validation messages."),
+				"runner":                 stringSchema("Runner name."),
+				"capabilities":           arraySchema(stringSchema("Capability names.")),
+				"claims":                 arraySchema(stringSchema("Compatibility alias for capabilities.")),
+				"writes":                 stringSchema("Write mode: deny, repo_only, or allow."),
+				"shell":                  stringSchema("Shell mode: deny, allowlisted, or allow."),
+				"network":                map[string]any{"type": "boolean"},
+				"git_push":               map[string]any{"type": "boolean"},
+				"require_explicit":       map[string]any{"type": "boolean"},
+				"enforcement_confidence": stringSchema("Enforcement confidence, such as high or medium."),
+			}, []string{"runner"}),
+		},
+		{
 			"name":        "list_tailnet_peers",
 			"description": "List Tailscale peer candidates and probe which ones appear to expose cmesh.",
 			"inputSchema": objectSchema(nil, nil),
@@ -418,6 +561,11 @@ func tools() []map[string]any {
 		{
 			"name":        "suggest_config",
 			"description": "Generate an opinionated cmesh config TOML from human setup intent. Does not write files.",
+			"inputSchema": initOptionsSchema(),
+		},
+		{
+			"name":        "profile_preview_config",
+			"description": "Preview cmesh config TOML for selected profile templates. Does not write files.",
 			"inputSchema": initOptionsSchema(),
 		},
 		{
@@ -441,7 +589,23 @@ func tools() []map[string]any {
 				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
 				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
 				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
-				"profiles":      arraySchema(stringSchema("Profiles to expose: readonly, dev, network, interactive, git_push.")),
+				"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
+			}, nil),
+		},
+		{
+			"name":        "profile_write_config",
+			"description": "Write a cmesh config from provided TOML or selected profile templates. Requires confirmed=true.",
+			"inputSchema": objectSchema(map[string]any{
+				"path":          stringSchema("Optional config file path. Defaults to the cmesh config path."),
+				"toml":          stringSchema("Optional TOML content to write. If omitted, setup intent is used to generate TOML."),
+				"force":         map[string]any{"type": "boolean"},
+				"confirmed":     map[string]any{"type": "boolean"},
+				"role":          stringSchema("Machine role: origin, worker, or both."),
+				"allowed_peers": arraySchema(stringSchema("Peer node/name allowed to delegate to this worker.")),
+				"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
+				"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
+				"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
+				"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
 			}, nil),
 		},
 		{
@@ -461,7 +625,7 @@ func tools() []map[string]any {
 				"role":         stringSchema("Machine role: origin, worker, or both."),
 				"allowed_cwds": arraySchema(stringSchema("Directory glob workers may use on this machine.")),
 				"peer_names":   arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
-				"profiles":     arraySchema(stringSchema("Profiles to expose: readonly, dev, network, interactive, git_push.")),
+				"profiles":     arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
 				"confirmed":    map[string]any{"type": "boolean", "description": "Set true to write the config after the user consents (always overwrites an existing config, preserving only the gateway host token)."},
 			}, nil),
 		},
@@ -505,7 +669,7 @@ func initOptionsSchema() map[string]any {
 		"allowed_cwds":  arraySchema(stringSchema("Directory glob workers may use on this machine.")),
 		"peer_names":    arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
 		"runner":        stringSchema("Runner to use: auto, claude-code, or codex."),
-		"profiles":      arraySchema(stringSchema("Profiles to expose: readonly, dev, network, interactive, git_push.")),
+		"profiles":      arraySchema(stringSchema("Profiles to expose: query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change, or legacy aliases.")),
 	}, nil)
 }
 

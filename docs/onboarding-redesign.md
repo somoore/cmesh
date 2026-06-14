@@ -260,15 +260,16 @@ matchable identity** of the other, not a discovery-only ephemeral id.
 
 When `ready`, the wizard prints:
 - **Per-peer default profile** (read from each side's config:
-  `runners.<r>.default_profile`, today `dev`) and how to switch
-  (`profile: "readonly"` in a delegate call; the profile menu: readonly/dev/
-  network/interactive/git_push, with the security note that anything past `dev`
-  is real authority).
+  `runners.<r>.default_profile`, now `query`) and how to switch
+  (`profile: "query"` or `profile: "repo-dev"` in a delegate call; the
+  profile menu: query/query-shell/readonly-agent/repo-dev/network/interactive/
+  git_push, with the security note that agent-backed and elevated profiles are
+  real authority).
 - **Example prompts**, drawn from `taskRecipes()` (disk check, repo status,
   native build, service logs, test runner, branch handoff), templated with the
   real peer name:
-  > Use cmesh to ask **B** to report disk usage for / (readonly).
-  > Use cmesh to ask **B** to run the test suite in ~/code/myapp (dev).
+  > Use cmesh to ask **B** to report disk usage for / (query).
+  > Use cmesh to ask **B** to run the test suite in ~/code/myapp (repo-dev).
 
 ## Part 6 — CLI restructure + migration (decision: restructure commands)
 
