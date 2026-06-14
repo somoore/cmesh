@@ -58,6 +58,10 @@ type InitOptions struct {
 	PeerNames    []string
 	Runner       string
 	Profiles     []string
+	// HostToken, when set, is written verbatim into [gateway].host_token. Leave
+	// empty to mint a fresh token. Callers re-running configure_node must read the
+	// existing config's token and pass it here so the user is not locked out.
+	HostToken string
 }
 
 type Status struct {
@@ -219,9 +223,13 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	}
 	nodeName := cleanName(firstNonEmpty(machine.Name, "cmesh-node"))
 	nodeID := firstNonEmpty(machine.NodeID, nodeName)
-	hostToken, err := randomToken()
-	if err != nil {
-		return "", err
+	hostToken := strings.TrimSpace(opts.HostToken)
+	if hostToken == "" {
+		var err error
+		hostToken, err = randomToken()
+		if err != nil {
+			return "", err
+		}
 	}
 	var b strings.Builder
 	writeSection(&b, "node")
