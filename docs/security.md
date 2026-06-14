@@ -73,7 +73,7 @@ Task lookup operations are scoped the same way: the original origin can fetch it
 
 ### A worker trying to forge delegation provenance
 
-Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and writes a task-scoped MCP config with `Authorization: Bearer <task-token>`. The Claude Code runner loads that file with `--mcp-config` and `--strict-mcp-config`, so MCP calls from the worker carry the token structurally even when the gateway requires `host_token`.
+Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and registers a task-scoped cmesh MCP gateway for supported agent runners. Claude Code loads a strict task MCP config file; Codex ignores ambient user MCP config for that invocation and injects the local cmesh gateway with `bearer_token_env_var = "CMESH_TASK_TOKEN"`. MCP calls from the worker therefore carry the token structurally even when the gateway requires `host_token`.
 
 Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. They are ignored when a task token is present, and they are not authoritative for subdelegation policy. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance.
 

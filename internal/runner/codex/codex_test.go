@@ -2,6 +2,7 @@ package codex
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -92,5 +93,37 @@ func TestArgvDoesNotDuplicateSkipGitRepoCheck(t *testing.T) {
 	want := []string{"codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvInjectsTaskScopedMCPWithoutLeakingToken(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write", Approval: "never"},
+		},
+		DefaultProfile: "dev",
+	})
+
+	got := run.argv(runner.RunRequest{
+		Profile: "dev",
+		Metadata: runner.TaskMetadata{
+			MCPURL:    "http://127.0.0.1:8888/mcp",
+			TaskToken: "secret-task-token",
+		},
+	}, run.cfg.Profiles["dev"])
+
+	for _, want := range []string{
+		"--ignore-user-config",
+		"mcp_servers.cmesh.url=\"http://127.0.0.1:8888/mcp\"",
+		"mcp_servers.cmesh.bearer_token_env_var=\"CMESH_TASK_TOKEN\"",
+		"mcp_servers.cmesh.startup_timeout_sec=120",
+	} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("argv missing %q: %#v", want, got)
+		}
+	}
+	if strings.Contains(strings.Join(got, " "), "secret-task-token") {
+		t.Fatalf("argv leaked task token: %#v", got)
 	}
 }

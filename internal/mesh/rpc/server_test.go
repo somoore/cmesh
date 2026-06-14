@@ -81,6 +81,7 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 	if rec.State != task.StateCancelled {
 		t.Fatalf("state = %q, want cancelled", rec.State)
 	}
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-1")
 }
 
 func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
@@ -449,6 +450,8 @@ func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
 	if strings.TrimSpace(rec.CWD) == "" {
 		t.Fatalf("expected a self-selected cwd on the smoke record, got empty")
 	}
+	waitForTerminalTask(t, server, "task-smoke-empty-cwd")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-smoke-empty-cwd")
 }
 
 // TestCreateTaskNonSmokeEmptyCWDNotSelfSelected proves the self-select is gated to
@@ -631,6 +634,28 @@ func waitForTerminalTask(t *testing.T, server *Server, taskID string) {
 	t.Fatalf("task %s did not reach terminal state, got %s", taskID, rec.State)
 }
 
+func waitForTaskSecretsRemoved(t *testing.T, dataDir, taskID string) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		contextPath := filepath.Join(dataDir, taskContextDirName, taskID+".json")
+		mcpPath := filepath.Join(dataDir, taskMCPConfigDir, taskID+".json")
+		contextGone := pathMissing(contextPath)
+		mcpGone := pathMissing(mcpPath)
+		tokenMatches, _ := filepath.Glob(filepath.Join(dataDir, taskTokenDirName, "*.json"))
+		if contextGone && mcpGone && len(tokenMatches) == 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("task secrets for %s were not removed from %s", taskID, dataDir)
+}
+
+func pathMissing(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 func splitHostPort(t *testing.T, rawURL string) (string, int) {
 	t.Helper()
 	host, portText, err := net.SplitHostPort(strings.TrimPrefix(rawURL, "http://"))
@@ -758,6 +783,45 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 		t.Fatalf("result status = %d, body = %s", resultRes.Code, resultRes.Body.String())
 	}
 	assertAuditContains(t, auditPath, `"type":"task.failed"`, `"error_code":"worker_failed"`)
+}
+
+func TestCreateTaskPassesTaskScopedMCPURLToRunner(t *testing.T) {
+	root := t.TempDir()
+	run := &captureRequestRunner{requests: make(chan runner.RunRequest, 1)}
+	server := newTestServer(t, root, run)
+	server.Config.Node.MCPPort = 8888
+
+	createBody := `{
+		"task_id":"task-mcp-url",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+
+	select {
+	case req := <-run.requests:
+		if req.Metadata.MCPURL != "http://127.0.0.1:8888/mcp" {
+			t.Fatalf("MCPURL = %q", req.Metadata.MCPURL)
+		}
+		if req.Metadata.TaskToken == "" || req.Env["CMESH_TASK_TOKEN"] == "" {
+			t.Fatalf("task token missing from metadata/env: metadata=%q env=%q", req.Metadata.TaskToken, req.Env["CMESH_TASK_TOKEN"])
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner was not invoked")
+	}
+	waitForTerminalTask(t, server, "task-mcp-url")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-mcp-url")
 }
 
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
@@ -1005,6 +1069,33 @@ func (r *countingRunner) Check(profile string) error {
 
 func (r *countingRunner) Run(req runner.RunRequest) (runner.Result, error) {
 	r.calls++
+	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
+}
+
+type captureRequestRunner struct {
+	requests chan runner.RunRequest
+}
+
+func (r *captureRequestRunner) Name() string {
+	return "fake"
+}
+
+func (r *captureRequestRunner) Manifest() runner.CapabilityManifest {
+	return runner.CapabilityManifest{
+		SchemaVersion: "runner_manifest.v1",
+		Runner:        "fake",
+		Profiles: map[string]runner.ProfileManifest{
+			"dev": {Claims: []string{"read_files", "edit_repo"}, EnforcementConfidence: "high"},
+		},
+	}
+}
+
+func (r *captureRequestRunner) Check(profile string) error {
+	return nil
+}
+
+func (r *captureRequestRunner) Run(req runner.RunRequest) (runner.Result, error) {
+	r.requests <- req
 	return runner.Result{WorkerSummaryUntrusted: "done"}, nil
 }
 

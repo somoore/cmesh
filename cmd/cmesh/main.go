@@ -348,7 +348,7 @@ func runDaemon(ctx context.Context, configPath string, preflight bool) error {
 	warnCleanup(cleanupRetainedTaskArtifacts(ctx, cfg, st))
 	resolver := tsid.NewResolver()
 	mesh := &meshrpc.Server{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine, Identity: resolver, Runners: registry}
-	local := &gateway.Gateway{Config: cfg, Store: st, Audit: auditWriter, Policy: policyEngine}
+	local := &gateway.Gateway{Config: cfg, ConfigPath: configPath, Store: st, Audit: auditWriter, Policy: policyEngine}
 	errCh := make(chan error, 2)
 	go func() { errCh <- mesh.ListenAndServe(ctx) }()
 	go func() { errCh <- local.ListenAndServe(ctx) }()
@@ -1922,7 +1922,7 @@ type cliProfilePeer struct {
 
 func cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: cmesh profile templates|generate|validate|write|current|use|reset")
+		return fmt.Errorf("usage: cmesh profile templates|generate|validate|write|configure|current|use|reset")
 	}
 	switch args[0] {
 	case "templates":
@@ -2016,6 +2016,53 @@ func cmdProfile(args []string) error {
 			return err
 		}
 		fmt.Printf("wrote profile %s to %s\n", tmpl.Name, *configPath)
+		return nil
+	case "configure":
+		fs := flag.NewFlagSet("profile configure", flag.ExitOnError)
+		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		name := fs.String("name", "", "generated profile name")
+		runnerName := fs.String("runner", "", "runner override for agent-backed profiles")
+		peerName := fs.String("peer", "", "peer name to allow on this profile")
+		confirmed := fs.Bool("confirmed", false, "write the profile to the config")
+		force := fs.Bool("force", false, "append sections even when they already appear in the config")
+		jsonOut := fs.Bool("json", false, "print JSON")
+		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
+			return err
+		}
+		templateName := profiledefs.RepoDev
+		if fs.NArg() > 0 {
+			templateName = fs.Arg(0)
+		}
+		allowedPeers := []string{}
+		if strings.TrimSpace(*peerName) != "" {
+			allowedPeers = append(allowedPeers, strings.TrimSpace(*peerName))
+		}
+		result, err := onboard.ConfigureProfile(*configPath, onboard.ProfileConfigureOptions{
+			Template:     templateName,
+			Name:         *name,
+			Runner:       *runnerName,
+			AllowedPeers: allowedPeers,
+			Force:        *force,
+		}, *confirmed)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(result)
+		}
+		if !*confirmed {
+			fmt.Print(result.PreviewTOML)
+			if result.PreviewTOML != "" {
+				fmt.Println()
+			}
+			return fmt.Errorf("profile configure requires --confirmed to modify %s", *configPath)
+		}
+		if result.AlreadyConfigured && !result.ProfileAdded && !result.RunnerAdded {
+			fmt.Printf("profile %s already configured in %s\n", result.Profile, result.Path)
+		} else {
+			fmt.Printf("configured profile %s in %s\n", result.Profile, result.Path)
+		}
+		fmt.Println(result.NextStep)
 		return nil
 	case "current":
 		fs := flag.NewFlagSet("profile current", flag.ExitOnError)
@@ -2546,5 +2593,6 @@ func usage() {
 	fmt.Println("  cmesh peers                   list configured and discovered peers")
 	fmt.Println("  cmesh peers test <peer> --cwd <peer-cwd> --bidirectional")
 	fmt.Println("  cmesh profile templates       list built-in permission profile templates")
+	fmt.Println("  cmesh profile configure       add a built-in profile to the local config")
 	fmt.Println("  cmesh mcp --stdio             serve the onboarding MCP over stdio (agents launch this)")
 }

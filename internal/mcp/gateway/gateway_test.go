@@ -326,6 +326,159 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	if local.RequestedProfile != "repo-dev" || local.ProfileSource != "active_context" || local.ProfileContextID == "" {
 		t.Fatalf("local response missing profile metadata: %+v", local)
 	}
+
+	got = schema.CreateTaskRequest{}
+	resp, err = g.delegateCall(ctx, DelegateRequest{Peer: "worker", Profile: "repo-dev", Prompt: "run tests explicitly"})
+	if err != nil || !resp.OK {
+		t.Fatalf("delegate with explicit active profile resp=%+v err=%v", resp, err)
+	}
+	if got.Profile != "repo-dev" || got.ProfileSource != "active_context" || got.ProfileContextID == "" || got.CWD != cwd {
+		t.Fatalf("explicit delegated request did not attach active lease: %+v", got)
+	}
+
+	otherCWD := t.TempDir()
+	deniedDelegate, _ := g.delegateCall(ctx, DelegateRequest{Peer: "worker", Profile: "repo-dev", CWD: otherCWD, Prompt: "run tests elsewhere"})
+	if deniedDelegate.OK || deniedDelegate.Error == nil || deniedDelegate.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("explicit delegate with mismatched lease cwd = %+v", deniedDelegate)
+	}
+	deniedDelegate, _ = g.delegateCall(ctx, DelegateRequest{Peer: "worker", CWD: otherCWD, Prompt: "run tests elsewhere"})
+	if deniedDelegate.OK || deniedDelegate.Error == nil || deniedDelegate.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("implicit delegate with mismatched lease cwd = %+v", deniedDelegate)
+	}
+}
+
+func TestProfileConfigureAddsMissingProfileAndReloadsGateway(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	body := `[node]
+id = "origin"
+name = "origin"
+role = "origin"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = "` + filepath.ToSlash(filepath.Join(root, "data")) + `"
+
+[policy]
+allowed_peers = ["worker"]
+allowed_cwds = ["` + filepath.ToSlash(root) + `"]
+
+[profiles.query]
+runner = "probe"
+capabilities = ["disk_info", "system_info", "repo_status"]
+writes = "deny"
+shell = "deny"
+
+[runners.probe]
+command = ["builtin"]
+default_profile = "query"
+
+[peers.worker]
+name = "worker"
+node_id = "worker-node"
+address = "127.0.0.1"
+port = 1
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	st, err := store.OpenContext(ctx, filepath.Join(root, "store.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	g := &Gateway{
+		Config:     cfg,
+		ConfigPath: configPath,
+		Store:      st,
+		Audit:      audit.NewWriter(filepath.Join(root, "audit.jsonl"), cfg.Node.ID),
+		Policy:     policy.New(cfg),
+	}
+
+	denied, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", TTL: "30m"})
+	if denied.OK || denied.Error == nil || denied.Error.Code != task.ErrorProfileUnavailable {
+		t.Fatalf("profile_use before configure = %+v", denied)
+	}
+
+	preview, err := g.profileConfigureCall(ProfileConfigureRequest{Template: "repo-dev", Runner: "codex", Peer: "worker"})
+	if err != nil || !preview.OK {
+		t.Fatalf("profile_configure preview resp=%+v err=%v", preview, err)
+	}
+	previewResult := preview.Result.(map[string]any)
+	previewTOML, _ := previewResult["preview_toml"].(string)
+	if !strings.Contains(previewTOML, "[profiles.repo-dev]") || !strings.Contains(previewTOML, `allowed_peers = ["worker"]`) {
+		t.Fatalf("preview missing repo-dev peer-scoped TOML: %s", previewTOML)
+	}
+
+	configured, err := g.profileConfigureCall(ProfileConfigureRequest{Template: "repo-dev", Runner: "codex", Peer: "worker", Confirmed: true})
+	if err != nil || !configured.OK {
+		t.Fatalf("profile_configure confirmed resp=%+v err=%v", configured, err)
+	}
+	if _, ok := g.Config.Profiles["repo-dev"]; !ok {
+		t.Fatalf("gateway config did not reload repo-dev: %#v", g.Config.Profiles)
+	}
+	ack := profiledefs.ProfileAcknowledgement{Profile: "repo-dev", Writes: profiledefs.WritesRepoOnly, Shell: profiledefs.ShellAllow, Network: false, TTL: "30m", AllowedCWDScope: root}
+	used, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", CWD: root, TTL: "30m", ProfileAcknowledgement: ack})
+	if !used.OK {
+		t.Fatalf("profile_use after configure failed: %+v", used)
+	}
+}
+
+func TestProfileConfigureMCPToolIsCallable(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	body := `[node]
+id = "origin"
+name = "origin"
+role = "origin"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = "` + filepath.ToSlash(filepath.Join(root, "data")) + `"
+
+[policy]
+allowed_peers = ["worker"]
+allowed_cwds = ["` + filepath.ToSlash(root) + `"]
+
+[profiles.query]
+runner = "probe"
+capabilities = ["disk_info", "system_info", "repo_status"]
+writes = "deny"
+shell = "deny"
+
+[runners.probe]
+command = ["builtin"]
+default_profile = "query"
+
+[peers.worker]
+name = "worker"
+node_id = "worker-node"
+address = "127.0.0.1"
+port = 1
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	g := newTestGateway(t)
+	g.Config = cfg
+	g.ConfigPath = configPath
+	g.Policy = policy.New(cfg)
+
+	resp, err := g.callTool(context.Background(), "profile_configure", []byte(`{"template":"repo-dev","runner":"codex","peer":"worker"}`))
+	if err != nil || !resp.OK {
+		t.Fatalf("profile_configure callTool resp=%+v err=%v", resp, err)
+	}
+	bodyJSON, _ := json.Marshal(resp.Result)
+	if !strings.Contains(string(bodyJSON), "preview_toml") || !strings.Contains(string(bodyJSON), "repo-dev") {
+		t.Fatalf("profile_configure result missing preview: %s", bodyJSON)
+	}
 }
 
 func TestGatewayProfileGuideAndRecommendTools(t *testing.T) {
