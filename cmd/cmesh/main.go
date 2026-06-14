@@ -34,6 +34,7 @@ import (
 	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
 	"cmesh/internal/runner/codex"
+	svcpkg "cmesh/internal/service"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/version"
@@ -54,30 +55,48 @@ func run(args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "init":
-		return cmdInit(args[1:])
-	case "_service":
-		return cmdServiceRun(args[1:])
+	// Primary surface: the only real install is the binary + MCP. Everything
+	// else (config, discovery, linking) is driven from the AI agent via the MCP.
+	case "install", "setup":
+		return cmdInstall(args[1:])
+	case "uninstall":
+		return cmdUninstall(args[1:])
+	case "self-install":
+		return cmdSelfInstall(args[1:])
+	case "mcp":
+		return cmdMCP(args[1:])
 	case "up":
 		return cmdUp(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
 	case "peers":
 		return cmdPeers(args[1:])
-	case "mcp":
-		return cmdMCP(args[1:])
+	case "version":
+		return cmdVersion(args[1:])
+	case "_service":
+		return cmdServiceRun(args[1:])
+
+	// Headless config generation, retained for CI/scripted setup. The
+	// interactive path is now the agent picker (`cmesh install`) plus the
+	// MCP onboarding wizard.
+	case "init":
+		return cmdInit(args[1:])
+
+	// Compatibility aliases retained for scripts. The intended path is small:
+	// install / mcp / up / doctor / peers / uninstall.
 	case "test":
 		return cmdTest(args[1:])
-	case "connect":
-		return cmdConnect(args[1:])
 	case "status":
 		return cmdStatus(args[1:])
 	case "log":
 		return cmdLog(args[1:])
 	case "hello":
 		return cmdHello(args[1:])
-	case "version":
-		return cmdVersion(args[1:])
+	case "connect":
+		fmt.Fprintln(os.Stderr, "note: `cmesh connect` is superseded. Register the gateway from your agent")
+		fmt.Fprintln(os.Stderr, "      via the cmesh MCP (\"help me setup cmesh\"). Running it anyway:")
+		return cmdConnect(args[1:])
+
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -89,14 +108,30 @@ func run(args []string) error {
 
 func cmdMCP(args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
-	stdio := fs.Bool("stdio", false, "run the setup MCP server over stdio")
-	install := fs.Bool("install", false, "install the setup MCP server into a detected AI coding agent")
+	stdio := fs.Bool("stdio", false, "run the onboarding MCP server over stdio")
+	install := fs.Bool("install", false, "register the cmesh MCP into a detected AI coding agent")
 	agent := fs.String("agent", "", "agent to install into with --install: claude-code, codex, or all")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *install || (!*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout)) {
+	// `--install` keeps working for scripts, but the intended path is the
+	// interactive picker `cmesh install`.
+	if *install {
 		return cmdMCPInstall(*agent)
+	}
+	// Agents launch `cmesh mcp --stdio` over pipes (no TTY) — serve the wizard.
+	// A human running bare `cmesh mcp` in a terminal almost certainly wants the
+	// installer; point them there instead of silently blocking on stdin.
+	if !*stdio && isTerminal(os.Stdin) && isTerminal(os.Stdout) {
+		fmt.Println("cmesh mcp serves the onboarding MCP over stdio for your AI coding agent.")
+		fmt.Println()
+		fmt.Println("To register cmesh with your agent, run:")
+		fmt.Println("  cmesh install")
+		fmt.Println()
+		fmt.Println("Then open a new agent session and say: help me setup cmesh")
+		fmt.Println()
+		fmt.Println("(To serve the stdio MCP directly anyway, run: cmesh mcp --stdio)")
+		return nil
 	}
 	return (&setupstdio.Server{}).Serve(context.Background())
 }
@@ -759,9 +794,9 @@ func windowsServiceUserChecks() []doctor.Check {
 	if runtime.GOOS != "windows" {
 		return []doctor.Check{{Name: "service user", OK: true, Detail: "not windows"}}
 	}
-	serviceUser, err := windowsServiceStartName()
+	serviceUser, err := svcpkg.WindowsServiceStartName()
 	if err != nil {
-		if isWindowsServiceNotInstalledError(err) {
+		if svcpkg.IsWindowsServiceNotInstalledError(err) {
 			return []doctor.Check{{Name: "service user", OK: true, Detail: "not installed"}}
 		}
 		return []doctor.Check{{Name: "service user", OK: false, Err: err.Error()}}
@@ -773,55 +808,11 @@ func windowsServiceUserChecks() []doctor.Check {
 			{Name: "interactive user mismatch", OK: false, Err: currentErr.Error()},
 		}
 	}
-	mismatch := !sameWindowsUser(serviceUser, current.Username)
+	mismatch := !svcpkg.SameWindowsUser(serviceUser, current.Username)
 	return []doctor.Check{
 		{Name: "service user", OK: true, Detail: serviceUser},
 		{Name: "interactive user mismatch", OK: !mismatch, Detail: yesNo(mismatch)},
 	}
-}
-
-func windowsServiceStartName() (string, error) {
-	out, err := exec.Command("sc.exe", "qc", "cmesh").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("query Windows service cmesh: %s", strings.TrimSpace(string(out)))
-	}
-	return parseWindowsServiceStartName(string(out))
-}
-
-func isWindowsServiceNotInstalledError(err error) bool {
-	if err == nil {
-		return false
-	}
-	text := err.Error()
-	return strings.Contains(text, "FAILED 1060") || strings.Contains(text, "does not exist as an installed service")
-}
-
-func parseWindowsServiceStartName(out string) (string, error) {
-	for _, line := range strings.Split(out, "\n") {
-		if before, after, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(before) == "SERVICE_START_NAME" {
-			value := strings.TrimSpace(after)
-			if value == "" {
-				return "", errors.New("SERVICE_START_NAME is empty")
-			}
-			return value, nil
-		}
-	}
-	return "", errors.New("SERVICE_START_NAME not found")
-}
-
-func sameWindowsUser(a, b string) bool {
-	a = normalizeWindowsUserName(a)
-	b = normalizeWindowsUserName(b)
-	return a != "" && b != "" && a == b
-}
-
-func normalizeWindowsUserName(value string) string {
-	value = strings.TrimSpace(strings.ToLower(value))
-	value = strings.TrimPrefix(value, `.\`)
-	if i := strings.LastIndex(value, `\`); i >= 0 {
-		value = value[i+1:]
-	}
-	return value
 }
 
 func yesNo(value bool) string {
@@ -863,15 +854,15 @@ func cmdService(args []string) error {
 			PromptPassword: *promptPassword,
 		})
 	case "start":
-		return serviceStart()
+		return svcpkg.Start()
 	case "stop":
-		return serviceStop()
+		return svcpkg.Stop()
 	case "restart":
-		return serviceRestart()
+		return svcpkg.Restart()
 	case "status":
-		return serviceStatus()
+		return svcpkg.Status()
 	case "logs":
-		return serviceLogs()
+		return svcpkg.Logs()
 	default:
 		return fmt.Errorf("usage: cmesh up service <install|start|stop|restart|status|logs>")
 	}
@@ -885,8 +876,10 @@ type serviceInstallOptions struct {
 	PromptPassword bool
 }
 
+// serviceInstall resolves the Windows service-account password in the CLI layer
+// (env/prompt/interaction stays here) and delegates the actual install to the
+// shared internal/service package.
 func serviceInstall(opts serviceInstallOptions) error {
-	configPath := firstNonEmpty(opts.ConfigPath, config.DefaultPath())
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -894,96 +887,20 @@ func serviceInstall(opts serviceInstallOptions) error {
 	if runtime.GOOS != "windows" && (opts.User != "" || opts.Password != "" || opts.PasswordEnv != "" || opts.PromptPassword) {
 		return fmt.Errorf("Windows service account options are only supported on Windows")
 	}
-	switch runtime.GOOS {
-	case "linux":
-		unitDir := filepath.Join(userConfigDir(), "systemd", "user")
-		if err := os.MkdirAll(unitDir, 0o755); err != nil {
-			return err
-		}
-		unitPath := filepath.Join(unitDir, "cmesh.service")
-		body := fmt.Sprintf("[Unit]\nDescription=cmesh agent mesh daemon\nAfter=network-online.target\n\n[Service]\nExecStart=%s up --config %s\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n", exe, configPath)
-		if err := os.WriteFile(unitPath, []byte(body), 0o644); err != nil {
-			return err
-		}
-		_ = runServiceCommand("systemctl", "--user", "daemon-reload")
-		if err := runServiceCommand("systemctl", "--user", "enable", "cmesh.service"); err != nil {
-			return err
-		}
-		fmt.Printf("Installed user systemd service: %s\n", unitPath)
-	case "darwin":
-		launchDir := filepath.Join(homeDir(), "Library", "LaunchAgents")
-		if err := os.MkdirAll(launchDir, 0o755); err != nil {
-			return err
-		}
-		plistPath := launchdPlistPath()
-		body := launchdPlistBody(exe, configPath, launchdPATH())
-		if err := os.WriteFile(plistPath, []byte(body), 0o644); err != nil {
-			return err
-		}
-		fmt.Printf("Installed launchd agent: %s\n", plistPath)
-	case "windows":
-		password, err := resolveWindowsServicePassword(opts)
-		if err != nil {
-			return err
-		}
-		cmdLine := serviceCommandLine(exe, configPath)
-		action := "create"
-		if windowsServiceExists() {
-			action = "config"
-		}
-		args := windowsServiceSCArgs(action, cmdLine, opts.User, password)
-		if err := runServiceCommand("sc.exe", args...); err != nil {
-			return err
-		}
-		if opts.User == "" {
-			fmt.Println("Installed Windows service: cmesh")
-			fmt.Println("Warning: service will run as LocalSystem. Runner auth from your interactive user session will not be available.")
-			fmt.Println(`For Claude Code/Codex auth, reinstall with: cmesh up service install --user ".\YOURUSER" --prompt-password`)
-		} else if action == "config" {
-			fmt.Printf("Updated Windows service cmesh to run as %s\n", opts.User)
-		} else {
-			fmt.Printf("Installed Windows service cmesh to run as %s\n", opts.User)
-		}
-	default:
-		return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
+	password, err := resolveWindowsServicePassword(opts)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func serviceCommandLine(exe, configPath string) string {
-	return fmt.Sprintf(`"%s" _service --config "%s"`, exe, configPath)
-}
-
-func launchdPlistBody(exe, configPath, pathValue string) string {
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>Label</key><string>dev.cmesh</string><key>ProgramArguments</key><array><string>%s</string><string>up</string><string>--config</string><string>%s</string></array><key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string></dict><key>RunAtLoad</key><true/><key>KeepAlive</key><true/></dict></plist>
-`, xmlPlistString(exe), xmlPlistString(configPath), xmlPlistString(pathValue))
-}
-
-func launchdPATH() string {
-	parts := []string{"/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
-	for _, part := range strings.Split(os.Getenv("PATH"), ":") {
-		part = strings.TrimSpace(part)
-		if part != "" && !containsString(parts, part) {
-			parts = append(parts, part)
-		}
-	}
-	return strings.Join(parts, ":")
-}
-
-func containsString(values []string, needle string) bool {
-	for _, value := range values {
-		if value == needle {
-			return true
-		}
-	}
-	return false
-}
-
-func xmlPlistString(value string) string {
-	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&apos;")
-	return replacer.Replace(value)
+	return svcpkg.Install(svcpkg.Options{
+		ConfigPath: opts.ConfigPath,
+		ExePath:    exe,
+		Windows: svcpkg.WindowsOptions{
+			User:           opts.User,
+			Password:       password,
+			PasswordEnv:    opts.PasswordEnv,
+			PromptPassword: opts.PromptPassword,
+		},
+	})
 }
 
 func resolveWindowsServicePassword(opts serviceInstallOptions) (string, error) {
@@ -1030,112 +947,6 @@ func resolveWindowsServicePassword(opts serviceInstallOptions) (string, error) {
 		return "", fmt.Errorf("password is empty")
 	}
 	return password, nil
-}
-
-func windowsServiceExists() bool {
-	return exec.Command("sc.exe", "query", "cmesh").Run() == nil
-}
-
-func windowsServiceSCArgs(action, cmdLine, user, password string) []string {
-	args := []string{action, "cmesh", "binPath=", cmdLine, "start=", "auto"}
-	if user != "" {
-		args = append(args, "obj=", user, "password=", password)
-	}
-	return args
-}
-
-func serviceStart() error {
-	switch runtime.GOOS {
-	case "linux":
-		return runServiceCommand("systemctl", "--user", "start", "cmesh.service")
-	case "darwin":
-		domain := launchdDomain()
-		target := domain + "/dev.cmesh"
-		if err := exec.Command("launchctl", "print", target).Run(); err != nil {
-			if err := runServiceCommand("launchctl", "bootstrap", domain, launchdPlistPath()); err != nil {
-				return err
-			}
-		}
-		return runServiceCommand("launchctl", "kickstart", "-k", target)
-	case "windows":
-		return runServiceCommand("sc.exe", "start", "cmesh")
-	default:
-		return fmt.Errorf("service start is not supported on %s", runtime.GOOS)
-	}
-}
-
-func serviceStop() error {
-	switch runtime.GOOS {
-	case "linux":
-		return runServiceCommand("systemctl", "--user", "stop", "cmesh.service")
-	case "darwin":
-		return runServiceCommand("launchctl", "bootout", launchdDomain()+"/dev.cmesh")
-	case "windows":
-		return runServiceCommand("sc.exe", "stop", "cmesh")
-	default:
-		return fmt.Errorf("service stop is not supported on %s", runtime.GOOS)
-	}
-}
-
-func serviceRestart() error {
-	switch runtime.GOOS {
-	case "linux":
-		return runServiceCommand("systemctl", "--user", "restart", "cmesh.service")
-	case "darwin":
-		if err := serviceStop(); err != nil {
-			fmt.Fprintf(os.Stderr, "stop warning: %v\n", err)
-		}
-		return serviceStart()
-	case "windows":
-		if err := serviceStop(); err != nil {
-			return err
-		}
-		time.Sleep(5 * time.Second)
-		return serviceStart()
-	default:
-		return fmt.Errorf("service restart is not supported on %s", runtime.GOOS)
-	}
-}
-
-func serviceStatus() error {
-	switch runtime.GOOS {
-	case "linux":
-		return runServiceCommand("systemctl", "--user", "status", "cmesh.service", "--no-pager")
-	case "darwin":
-		return runServiceCommand("launchctl", "print", "gui/"+fmt.Sprint(os.Getuid())+"/dev.cmesh")
-	case "windows":
-		return runServiceCommand("sc.exe", "query", "cmesh")
-	default:
-		return fmt.Errorf("service status is not supported on %s", runtime.GOOS)
-	}
-}
-
-func serviceLogs() error {
-	switch runtime.GOOS {
-	case "linux":
-		return runServiceCommand("journalctl", "--user", "-u", "cmesh.service", "-n", "100", "--no-pager")
-	case "darwin":
-		return runServiceCommand("log", "show", "--predicate", `process == "cmesh"`, "--last", "1h")
-	case "windows":
-		return runServiceCommand("powershell", "-NoProfile", "-Command", `Get-EventLog -LogName Application -Source cmesh -Newest 100`)
-	default:
-		return fmt.Errorf("service logs are not supported on %s", runtime.GOOS)
-	}
-}
-
-func launchdDomain() string {
-	return "gui/" + fmt.Sprint(os.Getuid())
-}
-
-func launchdPlistPath() string {
-	return filepath.Join(homeDir(), "Library", "LaunchAgents", "dev.cmesh.plist")
-}
-
-func runServiceCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 func homeDir() string {
@@ -2180,13 +1991,22 @@ func firstNonEmpty(values ...string) string {
 }
 
 func usage() {
-	fmt.Println("usage: cmesh <init|doctor|up|peers|test|mcp>")
+	fmt.Println("usage: cmesh <install|uninstall|up|doctor|peers|mcp>")
 	fmt.Println()
-	fmt.Println("common:")
-	fmt.Println("  cmesh init")
-	fmt.Println("  cmesh doctor")
-	fmt.Println("  cmesh up")
-	fmt.Println("  cmesh peers")
+	fmt.Println("The only real install is the cmesh binary + the MCP. After that,")
+	fmt.Println("drive everything from your AI coding agent via the cmesh MCP.")
+	fmt.Println()
+	fmt.Println("get started:")
+	fmt.Println("  cmesh install                 register the cmesh MCP into your AI coding agent(s)")
+	fmt.Println("  # then in a new agent session: \"help me setup cmesh\"")
+	fmt.Println()
+	fmt.Println("commands:")
+	fmt.Println("  cmesh install                 detect agents and register the cmesh MCP (alias: setup)")
+	fmt.Println("  cmesh uninstall               remove the cmesh MCP and optionally clean up")
+	fmt.Println("  cmesh self-install            copy the cmesh binary onto your PATH")
+	fmt.Println("  cmesh up                      run the daemon (or: cmesh up service install)")
+	fmt.Println("  cmesh doctor                  check Tailscale, config, runners, and the gateway")
+	fmt.Println("  cmesh peers                   list configured and discovered peers")
 	fmt.Println("  cmesh peers test <peer> --cwd <peer-cwd> --bidirectional")
-	fmt.Println("  cmesh mcp")
+	fmt.Println("  cmesh mcp --stdio             serve the onboarding MCP over stdio (agents launch this)")
 }

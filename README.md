@@ -71,29 +71,62 @@ The remote MCP surface is never exposed. The only MCP endpoint is local loopback
 
 ## Current status
 
-cmesh is early, but it is structured as a real daemon and CLI, not a mockup. The first useful target is hardened Mac, Windows, and Linux peer delegation over Tailscale with static peers.
+cmesh is early, but it is structured as a real daemon and CLI, not a mockup. The first useful target is Mac, Windows, and Linux peer delegation over Tailscale with static peers.
 
-Implemented surfaces center on four top-level commands: `cmesh init`, `cmesh doctor`, `cmesh up`, and `cmesh peers`. Compatibility aliases such as `connect`, `test`, `status`, `log`, and `hello` remain available for scripts, but the intended developer path stays small.
+The whole point is that you should rarely touch the CLI. The only real install is the cmesh binary plus the MCP registration; from there an agent-driven setup wizard does the rest. The small top-level command surface is:
+
+- `cmesh install` — put the binary on PATH and register the cmesh MCP into your coding agents.
+- `cmesh setup` — re-run the agent picker (for example, after installing a new agent).
+- `cmesh up` — run the daemon, or manage it as a service (`cmesh up service install`).
+- `cmesh doctor` — diagnostics for Tailscale, config, runners, and the local MCP gateway.
+- `cmesh peers` — list and test peers.
+- `cmesh uninstall` — mirror of the installer; remove the MCP and, separately consented, the rest.
+- `cmesh mcp --stdio` — the onboarding MCP itself, launched by your agent (you do not run this by hand).
 
 ## Get started
 
-1. Install and sign in to Tailscale on each machine.
-2. Build cmesh with `go build -o cmesh ./cmd/cmesh`.
-3. Run `./cmesh init` on each node and answer the plain setup questions.
-4. Run `./cmesh doctor` to verify Tailscale, config, runners, and the local MCP gateway.
-5. Start `./cmesh up`, or install it with `./cmesh up service install`.
-6. List and test peers with `./cmesh peers` and `./cmesh peers test <peer> --cwd ~/code/myapp --bidirectional`.
-7. Ask your agent to delegate a self-contained task.
+Two things you do by hand. Everything else, you do by talking to your agent.
 
-Full setup instructions live in [docs/quickstart.md](docs/quickstart.md).
+**1. Install the binary and register the MCP.**
 
-For agent-assisted first-run setup, run the binary MCP installer:
-
-```text
-cmesh mcp
+```bash
+curl -fsSL https://get.cmesh.dev | sh
 ```
 
-It detects installed AI coding agents, lets you choose where to install cmesh, and upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before the daemon is running and exposes discovery/config tools. After `cmesh up` is running, agents should use the local HTTP gateway at `http://127.0.0.1:7777/mcp` for delegation.
+Or build from this repo and run the installer:
+
+```bash
+go build -o cmesh ./cmd/cmesh
+./cmesh install
+```
+
+`cmesh install` puts the binary on PATH and shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. Do this on each machine.
+
+**2. Open a new agent session and say:**
+
+```text
+help me setup cmesh
+```
+
+From there the cmesh MCP wizard drives everything: it detects Tailscale and peers (verify, don't ask), writes config after you confirm, installs and starts the daemon, registers the local gateway, and walks the two-machine handshake. There is no shared session between machines — each machine configures itself to trust and reach the other, and cmesh discovers the rest over the tailnet. To bring a second machine into the mesh, install cmesh there and, in a new session, say `continue helping me configure cmesh for this new node`.
+
+Once a link is `ready`, ask your agent to delegate work:
+
+```text
+Use cmesh to ask homelab to run the test suite in ~/code/myapp (dev).
+```
+
+Full setup instructions, profiles, and example prompts live in [docs/quickstart.md](docs/quickstart.md).
+
+## Uninstall
+
+```bash
+cmesh uninstall
+```
+
+`cmesh uninstall` mirrors the installer. It detects which agents have a cmesh MCP registered, shows only those, lets you choose which to remove, confirms, and removes the MCP entries. Because the only real install is the binary plus the MCP registration, that is the core action.
+
+Anything beyond removing the MCP is separately consented — each is its own prompt, never bundled: stopping and removing the OS service, removing the config file, removing the data directory (database, audit logs, artifacts, worktrees — this deletes audit history), and removing the binary and PATH alias (only if cmesh installed them). The uninstaller is safe to run twice and never deletes anything cmesh did not create.
 
 ## Documentation
 

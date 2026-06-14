@@ -2,11 +2,20 @@ package onboard
 
 import (
 	"context"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"cmesh/internal/config"
+	tsid "cmesh/internal/identity/tailscale"
+	"cmesh/internal/mesh/schema"
+	"cmesh/internal/policy"
 )
 
 func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
@@ -43,6 +52,100 @@ func TestGenerateConfigProducesValidOpinionatedDefaults(t *testing.T) {
 	}
 	if _, ok := cfg.Profiles["interactive"]; ok {
 		t.Fatal("interactive profile should not be enabled by default")
+	}
+}
+
+// TestGenerateConfigDefaultProfileMatchesExposedProfiles guards the bug where the
+// generator hard-coded default_profile = "dev" regardless of which profiles were
+// exposed. A readonly-only node then defaulted its runner to a profile it never
+// defined, crashing preflight with "profile_unavailable". The default must always
+// name an exposed profile: prefer dev when present, otherwise the first exposed.
+func TestGenerateConfigDefaultProfileMatchesExposedProfiles(t *testing.T) {
+	machine := Machine{Name: "homelab-vm", NodeID: "homelab-vm"}
+	runners := []RunnerStatus{{Name: "claude-code", Command: []string{"claude", "-p"}, Found: true}}
+
+	cases := []struct {
+		name     string
+		profiles []string
+		want     string
+	}{
+		{"readonly only", []string{"readonly"}, "readonly"},
+		{"readonly and dev prefers dev", []string{"readonly", "dev"}, "dev"},
+		{"network only", []string{"network"}, "network"},
+		{"default both profiles prefer dev", nil, "dev"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:         "both",
+				AllowedPeers: []string{"mac-studio"},
+				AllowedCWDs:  []string{"~/code/**"},
+				Runner:       "claude-code",
+				Profiles:     tc.profiles,
+			}, machine, runners, nil)
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+			want := "default_profile = \"" + tc.want + "\""
+			if !strings.Contains(body, want) {
+				t.Fatalf("expected %q in generated config:\n%s", want, body)
+			}
+			// The generated config must load and validate: the default_profile
+			// guard in config.Validate would reject a default naming an undefined
+			// profile, so a passing Load proves the default is actually exposed.
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			if _, err := config.Load(path); err != nil {
+				t.Fatalf("generated config should load and validate: %v\n%s", err, body)
+			}
+		})
+	}
+}
+
+// TestGenerateConfigRoleRoundTrips proves node.role written by GenerateConfig
+// survives config.Load for every valid role, and that an omitted role (default
+// "both") also round-trips. This is what lets DeriveOnboardingState re-derive an
+// origin-only node's readiness statelessly.
+func TestGenerateConfigRoleRoundTrips(t *testing.T) {
+	cases := []struct {
+		name string
+		role string
+		want string
+	}{
+		{"origin", "origin", "origin"},
+		{"worker", "worker", "worker"},
+		{"both", "both", "both"},
+		{"empty_defaults_to_both", "", "both"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:        tc.role,
+				Runner:      "codex",
+				AllowedCWDs: []string{"~/code/**"},
+			}, Machine{Name: "homelab-vm", NodeID: "homelab-vm"}, []RunnerStatus{
+				{Name: "codex", Command: []string{"codex"}, Found: true},
+			}, nil)
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+			if !strings.Contains(body, `role = "`+tc.want+`"`) {
+				t.Fatalf("expected role = %q in [node]:\n%s", tc.want, body)
+			}
+			path := t.TempDir() + "/config.toml"
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("generated config should load: %v\n%s", err, body)
+			}
+			if cfg.Node.Role != tc.want {
+				t.Fatalf("node.role = %q, want %q", cfg.Node.Role, tc.want)
+			}
+		})
 	}
 }
 
@@ -157,6 +260,191 @@ func TestGenerateConfigSanitizesPeerTableNames(t *testing.T) {
 	}
 	if _, err := config.Load(path); err != nil {
 		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+}
+
+// TestGenerateConfigAllowedPeersMatchWhoisIdentity proves the value
+// GenerateConfig writes into policy.allowed_peers is one that the inbound policy
+// engine accepts when a peer authenticates via tailscale whois. Discovery
+// supplies an ephemeral NodeID that does NOT match whois; the generated
+// allowlist must key on the whois-matchable hostname (PeerCandidate.Name).
+func TestGenerateConfigAllowedPeersMatchWhoisIdentity(t *testing.T) {
+	const (
+		hostname    = "homelab"
+		ephemeralID = "n-ephemeral-12345" // tailscale status --json peer.ID; NOT whois-matchable
+		whoisNodeID = "nReal67890CNTRL"   // whois Node.ID, distinct from the ephemeral id
+		whoisStable = "nStableABCDEF"
+		allowedCWD  = "~/code/**"
+	)
+
+	body, err := GenerateConfig(InitOptions{
+		Role:        "worker",
+		Runner:      "codex",
+		AllowedCWDs: []string{allowedCWD},
+	}, Machine{Name: "win11-desktop"}, []RunnerStatus{
+		{Name: "codex", Command: []string{"codex"}, Found: true},
+	}, []PeerCandidate{
+		{Name: hostname, NodeID: ephemeralID, Address: "100.64.10.20", CmeshCapable: true},
+	})
+	if err != nil {
+		t.Fatalf("GenerateConfig: %v", err)
+	}
+
+	// The matchable hostname must be written, never the ephemeral discovery id.
+	if !strings.Contains(body, `allowed_peers = ["`+hostname+`"]`) {
+		t.Fatalf("expected allowed_peers to key on whois-matchable hostname %q:\n%s", hostname, body)
+	}
+	if strings.Contains(body, ephemeralID) {
+		t.Fatalf("ephemeral discovery node id %q must not appear in config:\n%s", ephemeralID, body)
+	}
+
+	path := t.TempDir() + "/config.toml"
+	if err := WriteConfig(path, body, false); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("generated config should load: %v\n%s", err, body)
+	}
+	engine := policy.New(cfg)
+
+	tests := []struct {
+		name       string
+		identity   tsid.Identity
+		wantPeerOK bool
+	}{
+		{
+			name:       "whois identity for the configured hostname is accepted",
+			identity:   tsid.Identity{NodeName: hostname, NodeID: whoisNodeID, StableID: whoisStable},
+			wantPeerOK: true,
+		},
+		{
+			name:       "unknown peer is rejected at inbound policy",
+			identity:   tsid.Identity{NodeName: "stranger", NodeID: "nStranger", StableID: "nStrangerStable"},
+			wantPeerOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			decision := engine.CheckInbound(policy.TaskIntent{
+				PeerName:     tc.identity.NodeName,
+				PeerNodeID:   tc.identity.NodeID,
+				PeerStableID: tc.identity.StableID,
+				PeerTags:     tc.identity.Tags,
+				CWD:          "~/code/example",
+				Profile:      "dev",
+			})
+			// The peer-identity gate runs before the cwd gate. A peer match means
+			// we pass past peer_unauthorized regardless of cwd existence.
+			gotPeerOK := decision.Code != "peer_unauthorized"
+			if gotPeerOK != tc.wantPeerOK {
+				t.Fatalf("peer match = %v (code=%q), want %v", gotPeerOK, decision.Code, tc.wantPeerOK)
+			}
+		})
+	}
+}
+
+// TestGenerateConfigRejectsGlobMetacharPeerIdentities is the B-SEC1 regression
+// guard. A tailnet peer self-reports its hostname; if GenerateConfig wrote a
+// glob metacharacter ("*", "[a-z]*", "a?b") into policy.allowed_peers, the real
+// policy.Engine would use filepath.Match to authorize unrelated identities,
+// granting inbound trust to the entire tailnet. We assert via the real engine
+// that an unrelated victim identity is denied with peer_unauthorized. Asserting
+// on the code (not just !Allowed) keeps the test non-vacuous: pre-fix the glob
+// matches the victim, the peer check passes, and the code is NEVER
+// peer_unauthorized.
+func TestGenerateConfigRejectsGlobMetacharPeerIdentities(t *testing.T) {
+	cases := []struct {
+		name   string
+		glob   string
+		victim string
+	}{
+		{name: "star", glob: "*", victim: "evil-node"},
+		{name: "char-class", glob: "[a-z]*", victim: "evil-node"},
+		{name: "question", glob: "a?b", victim: "azb"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := GenerateConfig(InitOptions{
+				Role:        "worker",
+				Runner:      "codex",
+				AllowedCWDs: []string{"~/code/**"},
+				PeerNames:   []string{tc.glob},
+			}, Machine{Name: "homelab-vm", NodeID: "homelab-vm"}, []RunnerStatus{
+				{Name: "codex", Command: []string{"codex"}, Found: true},
+			}, []PeerCandidate{
+				{Name: tc.glob, NodeID: tc.glob, Address: "100.64.10.20", CmeshCapable: true},
+			})
+			if err != nil {
+				t.Fatalf("GenerateConfig: %v", err)
+			}
+
+			// The glob identity must never appear verbatim in the inbound allowlist.
+			if strings.Contains(body, `allowed_peers = ["`+tc.glob+`"]`) {
+				t.Fatalf("glob identity %q leaked into an allowlist:\n%s", tc.glob, body)
+			}
+
+			path := t.TempDir() + "/config.toml"
+			if err := WriteConfig(path, body, false); err != nil {
+				t.Fatalf("WriteConfig: %v", err)
+			}
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("generated config should load: %v\n%s", err, body)
+			}
+
+			engine := policy.New(cfg)
+			decision := engine.CheckInbound(policy.TaskIntent{
+				PeerName: tc.victim,
+				CWD:      "~/code",
+				Runner:   "codex",
+				Profile:  "dev",
+			})
+			if decision.Code != "peer_unauthorized" {
+				t.Fatalf("victim %q should be peer_unauthorized, got allowed=%v code=%q detail=%q\nallowlist from config: %v\n%s",
+					tc.victim, decision.Allowed, decision.Code, decision.Detail, cfg.Policy.AllowedPeers, body)
+			}
+		})
+	}
+}
+
+func TestCapturePeerIdentityReadsHelloResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/hello" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.HelloResponse{
+			NodeID:   "n-ephemeral-999",
+			NodeName: "homelab",
+			StableID: "nStableABCDEF",
+		})
+	}))
+	defer srv.Close()
+
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("parse port: %v", err)
+	}
+
+	name, stableID, err := CapturePeerIdentity(context.Background(), host, port)
+	if err != nil {
+		t.Fatalf("CapturePeerIdentity: %v", err)
+	}
+	if name != "homelab" {
+		t.Fatalf("node_name = %q, want %q", name, "homelab")
+	}
+	if stableID != "nStableABCDEF" {
+		t.Fatalf("stable_id = %q, want %q", stableID, "nStableABCDEF")
 	}
 }
 

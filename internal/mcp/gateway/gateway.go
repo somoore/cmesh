@@ -1091,6 +1091,14 @@ func hardenLocalWithLookup(next http.Handler, hostToken string, lookup func(stri
 				return
 			}
 		}
+		// Liveness probe: GET /health exposes nothing sensitive (just {status:ok})
+		// and must answer unauthenticated so onboarding/monitoring can confirm the
+		// daemon is up without holding the gateway host token. It stays behind the
+		// loopback/forwarded-header hardening above.
+		if r.Method == http.MethodGet && r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		token := requestHostToken(r)
 		if hostToken != "" {
 			if validHostToken(r, hostToken) {
