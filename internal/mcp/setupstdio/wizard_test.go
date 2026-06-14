@@ -188,6 +188,35 @@ func TestInitializeAdvertisesPromptsCapability(t *testing.T) {
 	}
 }
 
+// TestLinkPeerPreviewDisclosesBothDirections covers J2 informed consent: when this
+// node takes the inbound grant, the preview must disclose BOTH directions; an
+// origin-only link discloses only the outbound direction.
+func TestLinkPeerPreviewDisclosesBothDirections(t *testing.T) {
+	both := linkPeerPreview("node-b", true)
+	if !strings.Contains(both, "send work to this machine") || !strings.Contains(both, "this machine can send work to") {
+		t.Fatalf("bidirectional preview must disclose both directions: %q", both)
+	}
+	if !strings.Contains(both, "AND") {
+		t.Fatalf("bidirectional preview must connect both directions with AND: %q", both)
+	}
+
+	originOnly := linkPeerPreview("node-b", false)
+	if strings.Contains(originOnly, "send work to this machine AND") {
+		t.Fatalf("origin-only preview must not claim an inbound grant: %q", originOnly)
+	}
+
+	for _, tc := range []struct {
+		role string
+		want bool
+	}{
+		{"", true}, {"both", true}, {"worker", true}, {"origin", false}, {"ORIGIN", false},
+	} {
+		if got := (linkPeerRequest{Role: tc.role}).grantsInbound(); got != tc.want {
+			t.Fatalf("grantsInbound(role=%q) = %v, want %v", tc.role, got, tc.want)
+		}
+	}
+}
+
 func withConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

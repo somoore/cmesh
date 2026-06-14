@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"cmesh/internal/config"
@@ -59,8 +60,16 @@ var (
 // gatewayHealthy reports whether the local HTTP gateway answers /health for the
 // given mcp port; it is injected so callers (and tests) control the probe.
 //
+// smokeFn, when non-nil, runs a real bidirectional CreateTask round-trip against a
+// linked cmesh peer and reports whether trust is verified in BOTH directions. It is
+// injected (like gatewayHealthy) so the round-trip stays testable and cheap, and is
+// only invoked in the LATE-state branch (config present + daemon up + a cmesh peer
+// linked) so early onboarding_status polls never pay its cost. A nil smokeFn means
+// "cannot verify", which yields peer_untrusted rather than a false ready — 'ready'
+// is never returned without an actual passing smoke.
+//
 // States are evaluated in table order; the first matching state wins.
-func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealthy func(ctx context.Context, mcpPort int) bool) OnboardingStatus {
+func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealthy func(ctx context.Context, mcpPort int) bool, smokeFn func(ctx context.Context, peer PeerCandidate) bool) OnboardingStatus {
 	if configPath == "" {
 		configPath = config.DefaultPath()
 	}
@@ -115,17 +124,107 @@ func DeriveOnboardingState(ctx context.Context, configPath string, gatewayHealth
 		return status
 	}
 
-	if linked := linkedCmeshPeers(cfg, cmeshPeers); len(linked) == 0 {
+	linked := linkedCmeshPeers(cfg, cmeshPeers)
+	if len(linked) == 0 {
 		status.State = StatePeerUntrusted
 		status.NextStep = "Call link_peer to trust and reach the discovered cmesh peer, then verify the bidirectional smoke."
 		status.Detail = fmt.Sprintf("%d cmesh peer(s) discovered but not yet linked in this config.", len(cmeshPeers))
 		return status
 	}
 
+	// 'ready' must reflect a REAL, re-derived bidirectional smoke — not just the
+	// presence of a [peers.X] block (which link_peer writes BEFORE running its
+	// smoke). Only here, in the late-state branch, do we pay for the CreateTask
+	// round-trip; early polls returned above without it. A nil smokeFn or a failing
+	// smoke yields peer_untrusted, never a false ready.
+	if smokeFn == nil || !anyPeerSmokePasses(ctx, smokeFn, linked) {
+		status.State = StatePeerUntrusted
+		status.NextStep = "Call link_peer to verify / re-establish trust with the linked cmesh peer (the bidirectional smoke did not pass)."
+		status.Detail = fmt.Sprintf("%d cmesh peer(s) linked in config, but the bidirectional smoke did not pass — the peer may be down, unreachable, or not trusting this node yet.", len(linked))
+		return status
+	}
+
 	status.State = StateReady
-	status.NextStep = "Setup is complete. Try an example prompt, or switch profiles (readonly/dev/network/interactive/git_push)."
-	status.Detail = "Bidirectional reachability looks good. The mesh is ready."
+	status.NextStep = "Setup is verified. Call register_gateway to switch this agent onto the cmesh HTTP delegation gateway (one session restart); then try an example prompt below."
+	status.Detail = ReadyPayoff(cfg, linked)
 	return status
+}
+
+// anyPeerSmokePasses returns true as soon as one linked peer's bidirectional smoke
+// passes. Linked peers are typically a single consented peer, so this is one
+// round-trip in the common case.
+func anyPeerSmokePasses(ctx context.Context, smokeFn func(ctx context.Context, peer PeerCandidate) bool, linked []PeerCandidate) bool {
+	for _, peer := range linked {
+		if smokeFn(ctx, peer) {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadyPayoff builds the Part-5 post-onboarding narration shown when the mesh is
+// verified ready: the per-peer default profile (read from config), how to switch
+// profiles, and example prompts templated with the real linked peer name(s). It is
+// exported so the wizard can surface it directly and so it is unit-testable.
+func ReadyPayoff(cfg *config.Config, linked []PeerCandidate) string {
+	defaultProfile := defaultRunnerProfile(cfg)
+	var names []string
+	for _, p := range linked {
+		if n := cleanName(p.Name); n != "" {
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		names = []string{"the peer"}
+	}
+	primary := names[0]
+
+	var b strings.Builder
+	b.WriteString("Bidirectional smoke passed — the mesh is verified ready. ")
+	b.WriteString(fmt.Sprintf("Linked peer(s): %s.\n\n", strings.Join(names, ", ")))
+	b.WriteString(fmt.Sprintf("Per-peer default profile: %q. Anything past dev is real authority — switch by passing profile in a delegate call ", defaultProfile))
+	b.WriteString("(profile menu: readonly, dev, network, interactive, git_push).\n\n")
+	b.WriteString("Example prompts:\n")
+	for _, ex := range readyExamplePrompts(primary) {
+		b.WriteString("  - ")
+		b.WriteString(ex)
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// defaultRunnerProfile reads the default profile configured for a runner
+// (runners.<r>.default_profile, typically dev). Falls back to "dev". Runner names
+// are visited in sorted order so the result is deterministic when more than one
+// runner is configured (the common case is a single runner).
+func defaultRunnerProfile(cfg *config.Config) string {
+	names := make([]string, 0, len(cfg.Runners))
+	for name := range cfg.Runners {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if p := strings.TrimSpace(cfg.Runners[name].DefaultProfile); p != "" {
+			return p
+		}
+	}
+	return "dev"
+}
+
+// readyExamplePrompts returns example delegation prompts templated with the real
+// linked peer name. These mirror the gateway's taskRecipes() (disk check, repo
+// status, native build, service logs, test runner, branch handoff); the recipe set
+// itself lives in the gateway package (unexported), so the user-facing example
+// prompts are kept in sync here.
+func readyExamplePrompts(peer string) []string {
+	return []string{
+		fmt.Sprintf("Use cmesh to ask %s to report disk usage for / (readonly).", peer),
+		fmt.Sprintf("Use cmesh to ask %s for repository status in ~/code/myapp (readonly).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to run the native build in ~/code/myapp (dev).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to summarize recent logs for a service (readonly).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to run the test suite in ~/code/myapp (dev).", peer),
+		fmt.Sprintf("Use cmesh to ask %s to continue work on a branch in ~/code/myapp (dev).", peer),
+	}
 }
 
 func onlinePeers(peers []PeerCandidate) []PeerCandidate {
@@ -166,19 +265,29 @@ func linkedCmeshPeers(cfg *config.Config, cmeshPeers []PeerCandidate) []PeerCand
 }
 
 // AddPeerLink writes the reciprocal reachability ([peers.<name>] with the peer's
-// address/port) and adds the peer's whois-matchable identity (Name/StableID,
-// never the ephemeral discovery NodeID) to policy.outbound.allowed_peers. It is
-// idempotent and never widens inbound policy.allowed_peers.
+// address/port) and grants the single consented peer trust. The peer's
+// whois-matchable identity (Name/StableID, never the ephemeral discovery NodeID) is
+// added to policy.outbound.allowed_peers (this node may send work to the peer) and,
+// when grantInbound is true, ALSO to policy.allowed_peers (this node may accept work
+// from the peer). It is idempotent.
+//
+// Per the amended trust model, linking a peer is an explicit, consented, single-peer
+// trust grant in BOTH directions. The inbound grant is bounded: only the one
+// consented peer's glob-escaped identity is added (never a wildcard, never any other
+// node), and the peer remains constrained by this node's allowed_cwds and profile
+// ceilings — inbound trust is "may ask", not "may do anything". grantInbound is
+// role-aware: pass false for an origin-only node, which never takes the inbound
+// grant (and never requires the reverse smoke for 'ready').
 //
 // stableID, when non-empty, is the peer's authoritative whois stable_id captured
-// from its /v1/hello (see CapturePeerIdentity). It is added to the outbound
-// allowlist alongside the hostname so trust survives a hostname change. Pass "" to
-// rely on the hostname label alone.
+// from its /v1/hello (see CapturePeerIdentity). It is added to the allowlists
+// alongside the hostname so trust survives a hostname change. Pass "" to rely on the
+// hostname label alone.
 //
 // Because the config file does not round-trip through the TOML encoder (Duration
 // has no MarshalText), this performs targeted text edits that mirror the format
 // GenerateConfig writes.
-func AddPeerLink(configPath string, peer PeerCandidate, stableID string) (peerName string, err error) {
+func AddPeerLink(configPath string, peer PeerCandidate, stableID string, grantInbound bool) (peerName string, err error) {
 	if configPath == "" {
 		configPath = config.DefaultPath()
 	}
@@ -213,7 +322,8 @@ func AddPeerLink(configPath string, peer PeerCandidate, stableID string) (peerNa
 	body := string(raw)
 
 	// 1. Ensure identity (and stable_id if present) are in
-	// policy.outbound.allowed_peers (idempotent).
+	// policy.outbound.allowed_peers (idempotent) — outbound: this node may send work
+	// to the peer.
 	body, err = ensureOutboundAllow(body, identity)
 	if err != nil {
 		return "", err
@@ -225,7 +335,25 @@ func AddPeerLink(configPath string, peer PeerCandidate, stableID string) (peerNa
 		}
 	}
 
-	// 2. Ensure a [peers.<name>] block exists (idempotent).
+	// 2. When this node serves as a worker (role worker|both, the default), grant the
+	// single consented peer INBOUND trust too (policy.allowed_peers) so the reverse
+	// smoke leg (peer -> this node) can pass and the handshake closes. Bounded: only
+	// the one peer's already-glob-escaped identity (and stable_id) is added, never a
+	// wildcard or any other node.
+	if grantInbound {
+		body, err = ensureInboundAllow(body, identity)
+		if err != nil {
+			return "", err
+		}
+		if stableID != "" && stableID != identity {
+			body, err = ensureInboundAllow(body, stableID)
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+
+	// 3. Ensure a [peers.<name>] block exists (idempotent).
 	body = ensurePeerSection(body, name, peer, identity)
 
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
@@ -279,6 +407,45 @@ func ensureOutboundAllow(body, identity string) (string, error) {
 	// No [policy.outbound] allowed_peers found; append a section.
 	appended := strings.TrimRight(body, "\n")
 	appended += "\n\n[policy.outbound]\nallowed_peers = " + encodeStringArray([]string{identity}) + "\n"
+	return appended, nil
+}
+
+// ensureInboundAllow inserts identity into the [policy] allowed_peers array if
+// absent, preserving the single-line array format. It targets the top-level
+// [policy] section only (not [policy.outbound]). If the section/key is missing it is
+// appended. This is the inbound grant: this node may accept work from the peer.
+func ensureInboundAllow(body, identity string) (string, error) {
+	lines := strings.Split(body, "\n")
+	inPolicy := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section := strings.Trim(trimmed, "[]")
+			inPolicy = section == "policy"
+			continue
+		}
+		if !inPolicy {
+			continue
+		}
+		key, _, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) != "allowed_peers" {
+			continue
+		}
+		existing := parseStringArray(trimmed)
+		for _, e := range existing {
+			if e == identity {
+				return body, nil // already present; idempotent.
+			}
+		}
+		existing = append(existing, identity)
+		// Preserve original indentation of the key line.
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "allowed_peers = " + encodeStringArray(existing)
+		return strings.Join(lines, "\n"), nil
+	}
+	// No [policy] allowed_peers found; append a section.
+	appended := strings.TrimRight(body, "\n")
+	appended += "\n\n[policy]\nallowed_peers = " + encodeStringArray([]string{identity}) + "\n"
 	return appended, nil
 }
 
