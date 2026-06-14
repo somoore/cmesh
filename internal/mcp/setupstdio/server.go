@@ -104,12 +104,31 @@ func (s *Server) handle(ctx context.Context, req rpcRequest) (rpcResponse, bool)
 		resp.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities": map[string]any{
-				"tools": map[string]any{"listChanged": false},
+				"tools":   map[string]any{"listChanged": false},
+				"prompts": map[string]any{"listChanged": false},
 			},
 			"serverInfo": map[string]string{"name": "cmesh-setup", "version": version.Version},
 		}
 	case "tools/list":
 		resp.Result = map[string]any{"tools": tools()}
+	case "prompts/list":
+		resp.Result = map[string]any{"prompts": prompts()}
+	case "prompts/get":
+		var params struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			resp.Error = &rpcError{Code: -32602, Message: "invalid prompts/get params: " + err.Error()}
+			return resp, true
+		}
+		if params.Name != setupCmeshPromptName {
+			resp.Error = &rpcError{Code: -32602, Message: "unknown prompt: " + params.Name}
+			return resp, true
+		}
+		resp.Result = map[string]any{
+			"description": "Set up cmesh on this machine and link it with another node.",
+			"messages":    setupCmeshPromptMessages(),
+		}
 	case "tools/call":
 		var params struct {
 			Name      string          `json:"name"`
@@ -221,6 +240,16 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 			"gateway_url": fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Node.MCPPort),
 			"run_command": "cmesh up",
 		}}
+	case "onboarding_status":
+		return onboardingStatus(ctx)
+	case "configure_node":
+		return configureNode(ctx, args)
+	case "start_service":
+		return startService(ctx, args)
+	case "link_peer":
+		return linkPeer(ctx, args)
+	case "register_gateway":
+		return registerGateway(ctx, args)
 	default:
 		return failure("unknown_tool", "unknown tool "+name)
 	}
@@ -417,6 +446,45 @@ func tools() []map[string]any {
 			"name":        "gateway_info",
 			"description": "Show the post-init local HTTP MCP gateway URL and daemon run command.",
 			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "onboarding_status",
+			"description": "Drive cmesh onboarding. Call this FIRST and follow next_step. Re-derives setup progress from the environment on every call; safe to call repeatedly and on a second node to continue.",
+			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "configure_node",
+			"description": "Write this node's cmesh config (auto-filled from detection). Preserves an existing gateway token on re-run. Requires confirmed=true to write.",
+			"inputSchema": objectSchema(map[string]any{
+				"role":         stringSchema("Machine role: origin, worker, or both."),
+				"allowed_cwds": arraySchema(stringSchema("Directory glob workers may use on this machine.")),
+				"peer_names":   arraySchema(stringSchema("Peer names to configure for outbound delegation.")),
+				"profiles":     arraySchema(stringSchema("Profiles to expose: readonly, dev, network, interactive, git_push.")),
+				"confirmed":    map[string]any{"type": "boolean", "description": "Set true to write the config after the user consents (always overwrites an existing config, preserving only the gateway host token)."},
+			}, nil),
+		},
+		{
+			"name":        "start_service",
+			"description": "Install and start the cmesh background service, then verify the local gateway is healthy. Requires confirmed=true.",
+			"inputSchema": objectSchema(map[string]any{
+				"confirmed": map[string]any{"type": "boolean", "description": "Set true to install and start the service after the user consents."},
+			}, nil),
+		},
+		{
+			"name":        "link_peer",
+			"description": "Trust and reach a discovered cmesh peer (reciprocal reachability + outbound allow keyed on the whois-matchable name), then run a bidirectional smoke. Requires confirmed=true.",
+			"inputSchema": objectSchema(map[string]any{
+				"peer":      stringSchema("Name of the discovered cmesh peer to link."),
+				"confirmed": map[string]any{"type": "boolean", "description": "Set true to link the peer after the user consents."},
+			}, []string{"peer"}),
+		},
+		{
+			"name":        "register_gateway",
+			"description": "Point the agent's cmesh MCP at the local HTTP gateway (Claude Code or Codex). Triggers a single end-of-flow session restart. The host token is never echoed. Requires confirmed=true.",
+			"inputSchema": objectSchema(map[string]any{
+				"harness":   stringSchema("Target agent: claude-code or codex."),
+				"confirmed": map[string]any{"type": "boolean", "description": "Set true to register the gateway after the user consents."},
+			}, []string{"harness"}),
 		},
 	}
 }
