@@ -23,12 +23,16 @@ go build -o cmesh ./cmd/cmesh
 ./cmesh install
 ```
 
-On Windows PowerShell:
+On Windows, run the PowerShell installer from the repo root. It mirrors the shell
+installer — builds from source (or installs a prebuilt binary), puts `cmesh.exe`
+on your PATH, and launches the agent picker:
 
 ```powershell
-go build -o cmesh.exe ./cmd/cmesh
-.\cmesh.exe install
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
+
+(`-ExecutionPolicy Bypass` lets an unsigned local script run on a stock box; drop
+it if your policy already allows local scripts.)
 
 `cmesh install` puts the binary on your PATH and then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
 
@@ -76,7 +80,7 @@ continue helping me configure cmesh for this new node
 This re-enters the same stateless wizard on the new machine. "Continue" here means "continue setting up *the mesh*," not "resume the other machine's session." On the new machine the wizard:
 
 1. Detects that this is a fresh node and sees the first machine online on the tailnet.
-2. Writes this machine's config, recording the first machine in its inbound `allowed_peers` by **hostname** (the name Tailscale `whois` can match), and confirms with you before writing.
+2. Writes this machine's config, recording the first machine in its inbound `allowed_peers` by its **whois-matchable identity** — the Tailscale DNS hostname label (e.g. `scotts-macbook-pro`) and stable node ID, never the human display name (e.g. "Scott's MacBook Pro"). This is the identity Tailscale `whois` reports for an incoming connection, so it is what the inbound policy can actually match. It confirms with you before writing.
 3. Installs and starts this machine's daemon so it is reachable on the tailnet.
 
 Once the second machine's daemon is up and reachable, finish on the **first machine**. Its wizard (or a fresh `help me setup cmesh`) now discovers the new machine, writes the reciprocal peer entry and outbound trust, and runs a **bidirectional smoke test** in both directions. When both directions pass, both machines report `ready`.
@@ -158,11 +162,22 @@ List and test peers:
 
 ```bash
 cmesh peers
-cmesh peers test homelab --cwd ~/code/myapp
-cmesh peers test homelab --cwd ~/code/myapp --bidirectional
+cmesh peers test homelab
+cmesh peers test homelab --bidirectional
+cmesh peers test homelab --cwd ~/code/myapp   # target a specific directory
 ```
 
-The smoke test creates a real readonly task, fetches the result envelope, and verifies the expected raw smoke response and audit event — a runner that exits successfully without actually doing the task does not count as healthy. Use `--bidirectional` when validating a two-machine setup: the first leg runs a direct smoke task from this machine to the peer, and the reverse leg asks the peer's daemon to run its own smoke task back, so timing reflects cmesh transport rather than agent planning latency.
+The smoke test creates a real readonly task, fetches the result envelope, and verifies the expected raw smoke response and audit event — a runner that exits successfully without actually doing the task does not count as healthy. With no `--cwd`, the **worker** picks a directory its own `allowed_cwds` permits, so the smoke works across machines (and across operating systems) without you knowing a path that exists on the other side; pass `--cwd` only to target a specific directory. Use `--bidirectional` when validating a two-machine setup: the first leg runs a direct smoke task from this machine to the peer, and the reverse leg asks the peer's daemon to run its own smoke task back, so timing reflects cmesh transport rather than agent planning latency.
+
+### Fixing a broken or stale peer entry
+
+If a peer stops authenticating (`peer_unauthorized`), or a `[peers.*]` entry looks wrong, you do **not** edit config by hand. Tell your agent:
+
+```text
+A cmesh peer entry looks wrong. Diagnose and fix my peers.
+```
+
+The agent calls cmesh's `repair_peers` tool. It checks every configured peer against its authoritative Tailscale `whois` identity, returns a per-peer diff (which entries are `ok`, `fixable`, in `conflict`, or `unreachable`), and on your confirmation rewrites the mismatched entries to the correct identity, removes stale duplicate entries, and reconciles the allowlists. It preserves your existing trust posture (it never grants a peer more access than it already had) and leaves conflicts and unreachable peers untouched for you to review. When the agent is on the local gateway, the repaired config takes effect after the daemon restarts; the tool says so.
 
 The daemon normally runs as the service the wizard installed. To run it in the foreground for debugging:
 

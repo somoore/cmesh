@@ -79,7 +79,7 @@ The whole point is that you should rarely touch the CLI. The only real install i
 - `cmesh setup` — re-run the agent picker (for example, after installing a new agent).
 - `cmesh up` — run the daemon, or manage it as a service (`cmesh up service install`).
 - `cmesh doctor` — diagnostics for Tailscale, config, runners, and the local MCP gateway.
-- `cmesh peers` — list and test peers.
+- `cmesh peers` — list and test peers (`cmesh peers test <peer>` runs a real smoke task).
 - `cmesh uninstall` — mirror of the installer; remove the MCP and, separately consented, the rest.
 - `cmesh mcp --stdio` — the onboarding MCP itself, launched by your agent (you do not run this by hand).
 
@@ -125,6 +125,17 @@ Once a link is `ready`, ask your agent to delegate work:
 ```text
 Use cmesh to ask homelab to run the test suite in ~/code/myapp (dev).
 ```
+
+If a peer ever stops authenticating or an entry looks wrong, you fix it the same
+way you set everything else up — by talking to your agent:
+
+```text
+A cmesh peer entry looks wrong. Diagnose and fix my peers.
+```
+
+The agent runs cmesh's `repair_peers` tool, which reconciles each peer against its
+authoritative Tailscale identity, shows you a per-peer diff, and rewrites the
+broken entries on your confirmation — no editing config by hand.
 
 Full setup instructions, profiles, and example prompts live in [docs/quickstart.md](docs/quickstart.md).
 

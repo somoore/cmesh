@@ -2,13 +2,22 @@
 
 > Experimental: cmesh can cause real changes on real machines. Keep configs narrow, assume worker profiles grant real authority, and do not use this on anything you love: machines, repos, credentials, or data you cannot afford to lose.
 
-cmesh uses a TOML config file, but most users should start with:
+cmesh uses a TOML config file, but **most users never write it by hand**. The
+recommended path is to register the cmesh MCP and let the onboarding wizard
+generate, confirm, and write your config:
 
 ```bash
-cmesh init
+cmesh install            # put the binary on PATH + register the MCP into your agent
+# then, in a new agent session: "help me setup cmesh"
 ```
 
-`init` detects Tailscale, local runners, and cmesh-capable peers, then writes the config for you. Edit TOML directly when you need an escape hatch or automation. By default, cmesh reads:
+The wizard detects Tailscale, local runners, and cmesh-capable peers, shows you the
+result, and writes the config only after you confirm. See [Quickstart](quickstart.md)
+for the full flow. This document is the reference for the file it produces — read it
+when you want to understand a field, automate config generation, or hand-tune an
+escape hatch.
+
+By default, cmesh reads:
 
 ```text
 ~/.config/cmesh/config.toml
@@ -20,13 +29,9 @@ You can pass a specific file with:
 cmesh up --config /path/to/config.toml
 ```
 
-For agent-assisted setup before the daemon exists, run:
-
-```bash
-cmesh mcp
-```
-
-It detects supported AI coding agents and upserts a stdio setup MCP entry that launches `cmesh mcp --stdio`. That setup MCP can generate, validate, and write config after explicit confirmation.
+For scripted, non-interactive setup, `cmesh init` writes a config from flags
+(`--role`, `--allow-peer`, `--allow-cwd`, `--peer`, `--profile`) without the wizard.
+Prefer the wizard for interactive setup; reach for `init` in automation.
 
 ## Minimal shape
 
@@ -187,3 +192,7 @@ port = 7778
 ```
 
 Use the peer's Tailscale IP for `address`.
+
+`name` and `node_id` must be the peer's **whois-matchable identity**: its Tailscale DNS hostname label (e.g. `homelab-vm`, the first label of `homelab-vm.tailnet.ts.net`) or its stable node ID. This is what Tailscale `whois` reports for an incoming connection and therefore what the inbound policy (and `allowed_peers`) matches against. Do **not** use a peer's human display name (e.g. "Scott's MacBook Pro") — that is not whois-matchable, so the worker will reject the peer with `peer_unauthorized` even though the entry "looks" right.
+
+The wizard writes the correct identity for you, and `repair_peers` reconciles an existing entry against the live `whois` identity (see [Quickstart](quickstart.md)). Hand-edit these blocks only as an escape hatch, and prefer the DNS label or stable ID.
