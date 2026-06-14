@@ -818,6 +818,8 @@ func TestCreateTaskPassesTaskScopedMCPURLToRunner(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runner was not invoked")
 	}
+	waitForTerminalTask(t, server, "task-mcp-url")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-mcp-url")
 }
 
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
