@@ -448,6 +448,23 @@ func AddPeerLink(configPath string, peer PeerCandidate, stableID string, grantIn
 	// 3. Ensure a [peers.<name>] block exists (idempotent).
 	body = ensurePeerSection(body, name, peer, identity)
 
+	// 4. Self-heal: prune any OTHER [peers.*] section for the same physical peer
+	// (matched by tailnet address) keyed on a superseded identity — e.g. a stale
+	// entry an earlier buggy discovery wrote under a display name. The address is
+	// the stable machine identifier; keep only the section we just wrote. Drop the
+	// pruned sections' now-dead identities from the allowlists too, so re-linking a
+	// peer whose name changed leaves no orphaned trust strings behind.
+	if peer.Address != "" {
+		var prunedIdentities []string
+		body, prunedIdentities = prunePeerSectionsByAddress(body, name, peer.Address)
+		for _, dead := range prunedIdentities {
+			if dead == identity || dead == stableID {
+				continue // never remove the identity/stable_id we just granted.
+			}
+			body = removeFromAllowlists(body, dead)
+		}
+	}
+
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return "", err
 	}
@@ -560,6 +577,126 @@ func ensurePeerSection(body, name string, peer PeerCandidate, identity string) s
 	b.WriteString("address = " + encodeString(peer.Address) + "\n")
 	b.WriteString(fmt.Sprintf("port = %d\n", port))
 	return b.String()
+}
+
+// prunePeerSectionsByAddress removes every [peers.X] block whose `address` equals
+// addr, EXCEPT the block named keepName. It returns the rewritten body and the
+// node_id identities of the removed blocks (so their dead allowlist entries can be
+// pruned too). A section runs from its "[peers.X]" header to the next table header
+// or EOF. Sections without a matching address — and all non-peer tables — are left
+// untouched.
+func prunePeerSectionsByAddress(body, keepName, addr string) (string, []string) {
+	lines := strings.Split(body, "\n")
+	var out []string
+	var removed []string
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		peerName, isPeerHeader := peerSectionName(trimmed)
+		if !isPeerHeader {
+			out = append(out, line)
+			i++
+			continue
+		}
+		// Collect the whole section [header .. next header / EOF).
+		start := i
+		j := i + 1
+		for j < len(lines) {
+			t := strings.TrimSpace(lines[j])
+			if strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]") {
+				break
+			}
+			j++
+		}
+		section := lines[start:j]
+		if peerName != keepName && sectionAddress(section) == addr {
+			if id := sectionValue(section, "node_id"); id != "" {
+				removed = append(removed, id)
+			}
+			// Drop the section (and a single trailing blank line, to avoid piling up
+			// blank lines where the block used to be).
+			if j < len(lines) && strings.TrimSpace(lines[j]) == "" {
+				j++
+			}
+		} else {
+			out = append(out, section...)
+		}
+		i = j
+	}
+	return strings.Join(out, "\n"), removed
+}
+
+// peerSectionName returns the X in a "[peers.X]" header line and true, or "", false.
+func peerSectionName(trimmed string) (string, bool) {
+	if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+		return "", false
+	}
+	inner := strings.Trim(trimmed, "[]")
+	name, ok := strings.CutPrefix(inner, "peers.")
+	if !ok || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+func sectionAddress(section []string) string {
+	return sectionValue(section, "address")
+}
+
+// sectionValue returns the decoded string value of key within a section's lines,
+// or "" if absent.
+func sectionValue(section []string, key string) string {
+	for _, line := range section {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.TrimSpace(k) != key {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal([]byte(strings.TrimSpace(v)), &s); err == nil {
+			return s
+		}
+		return strings.Trim(strings.TrimSpace(v), `"`)
+	}
+	return ""
+}
+
+// removeFromAllowlists strips identity from both the [policy] and [policy.outbound]
+// allowed_peers arrays. Used to clear dead trust strings left by a superseded peer
+// identity. The current (correct) identities are never passed here.
+func removeFromAllowlists(body, identity string) string {
+	lines := strings.Split(body, "\n")
+	section := ""
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.Trim(trimmed, "[]")
+			continue
+		}
+		if section != "policy" && section != "policy.outbound" {
+			continue
+		}
+		key, _, ok := strings.Cut(trimmed, "=")
+		if !ok || strings.TrimSpace(key) != "allowed_peers" {
+			continue
+		}
+		existing := parseStringArray(trimmed)
+		var kept []string
+		changed := false
+		for _, e := range existing {
+			if e == identity {
+				changed = true
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if !changed {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "allowed_peers = " + encodeStringArray(kept)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func parseStringArray(line string) []string {

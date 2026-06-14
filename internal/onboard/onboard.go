@@ -141,17 +141,42 @@ func TailnetPeers(ctx context.Context, meshPort int, probeCmesh bool) ([]PeerCan
 	if err != nil {
 		return nil, fmt.Errorf("tailscale status --json: %w", err)
 	}
+	peers, err := parseTailnetPeers(out)
+	if err != nil {
+		return nil, err
+	}
+	if probeCmesh {
+		for i := range peers {
+			if peers[i].Address != "" && peers[i].Online {
+				peers[i].CmeshCapable, peers[i].Detail = probeMesh(ctx, peers[i].Address, meshPort)
+			}
+		}
+	}
+	return peers, nil
+}
+
+// parseTailnetPeers turns `tailscale status --json` output into PeerCandidates.
+// Pure (no network): cmesh probing is layered on by the caller. Split out so the
+// whois-matchable name derivation is unit-testable.
+func parseTailnetPeers(statusJSON []byte) ([]PeerCandidate, error) {
 	var raw struct {
 		Self tailnetPeer            `json:"Self"`
 		Peer map[string]tailnetPeer `json:"Peer"`
 	}
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if err := json.Unmarshal(statusJSON, &raw); err != nil {
 		return nil, fmt.Errorf("parse tailscale status --json: %w", err)
 	}
-	selfName := firstNonEmpty(raw.Self.HostName, firstLabel(raw.Self.DNSName), firstLabel(raw.Self.Name))
+	// PeerCandidate.Name feeds the trust allowlist (matchableIdentity), so it MUST
+	// be the whois-matchable identity. tailscale whois reports the DNS hostname
+	// label (e.g. "scotts-macbook-pro"), NOT HostName, which is the human display
+	// name and can contain spaces/apostrophes (e.g. "Scott's MacBook Pro"). Keying
+	// on HostName writes an allowlist entry that never matches the peer's
+	// authenticated identity. Prefer the DNS first label; fall back to HostName
+	// only when no DNS name is available.
+	selfName := firstNonEmpty(firstLabel(raw.Self.DNSName), firstLabel(raw.Self.Name), raw.Self.HostName)
 	var peers []PeerCandidate
 	for _, peer := range raw.Peer {
-		name := firstNonEmpty(peer.HostName, firstLabel(peer.DNSName), firstLabel(peer.Name))
+		name := firstNonEmpty(firstLabel(peer.DNSName), firstLabel(peer.Name), peer.HostName)
 		if name == "" || name == selfName {
 			continue
 		}
@@ -163,9 +188,6 @@ func TailnetPeers(ctx context.Context, meshPort int, probeCmesh bool) ([]PeerCan
 		}
 		if len(peer.TailscaleIPs) > 0 {
 			candidate.Address = peer.TailscaleIPs[0]
-		}
-		if probeCmesh && candidate.Address != "" && candidate.Online {
-			candidate.CmeshCapable, candidate.Detail = probeMesh(ctx, candidate.Address, meshPort)
 		}
 		peers = append(peers, candidate)
 	}

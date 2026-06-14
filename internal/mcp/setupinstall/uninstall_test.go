@@ -15,6 +15,7 @@ func TestCodexHasCmeshTable(t *testing.T) {
 		want bool
 	}{
 		{name: "present", body: "model = \"x\"\n\n[mcp_servers.cmesh]\ncommand = 'cmesh'\n", want: true},
+		{name: "present with trailing comment", body: "model = \"x\"\n\n[mcp_servers.cmesh] # installed by cmesh\ncommand = 'cmesh'\n", want: true},
 		{name: "absent", body: "model = \"x\"\n\n[mcp_servers.other]\n", want: false},
 		{name: "empty", body: "", want: false},
 		{name: "inline-not-matched", body: "foo = '[mcp_servers.cmesh]'\n", want: false},
@@ -31,6 +32,8 @@ func TestCodexHasCmeshTable(t *testing.T) {
 func TestUninstallCodexStripsCmeshOnly(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("PATH", "")
 	// CodexConfigPath uses ~/.codex/config.toml; point Uninstall at our temp via
 	// the same HOME so the detector and remover agree.
 	codexDir := filepath.Join(dir, ".codex")
@@ -69,6 +72,8 @@ command = 'other'
 func TestUninstallCodexIdempotentWhenAbsent(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("PATH", "")
 	codexDir := filepath.Join(dir, ".codex")
 	if err := os.MkdirAll(codexDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -86,9 +91,48 @@ func TestUninstallCodexIdempotentWhenAbsent(t *testing.T) {
 func TestUninstallCodexIdempotentWhenNoConfig(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("PATH", "")
 	res := Uninstall(Agent{ID: "codex", Name: "Codex"})
 	if !res.OK || res.Detail != "not registered" {
 		t.Fatalf("expected OK/not registered, got %+v", res)
+	}
+}
+
+func TestUninstallCodexUsesCodexCLI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "codex.log")
+	markerPath := filepath.Join(dir, "registered")
+	if err := os.WriteFile(markerPath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed marker: %v", err)
+	}
+	script := "#!/bin/sh\n" +
+		"PATH=/bin:/usr/bin:$PATH\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then [ -e " + shellQuote(markerPath) + " ] && exit 0 || exit 1; fi\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"remove\" ]; then rm -f " + shellQuote(markerPath) + "; exit 0; fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	res := uninstallCodex(Agent{ID: "codex", Name: "Codex"})
+	if !res.OK {
+		t.Fatalf("uninstallCodex failed: %+v", res)
+	}
+	body, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(body), "mcp remove cmesh") {
+		t.Fatalf("codex mcp remove was not called:\n%s", body)
 	}
 }
 
@@ -211,6 +255,7 @@ func TestUninstallClaudeReportsFailureWhenScopeRemains(t *testing.T) {
 func TestDetectInstalledAgentsCodexOnly(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
 	// Empty PATH so no real claude/codex binaries are detected.
 	t.Setenv("PATH", "")
 	codexDir := filepath.Join(dir, ".codex")

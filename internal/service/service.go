@@ -92,6 +92,9 @@ func Install(opts Options) error {
 		}
 		args := WindowsServiceSCArgs(action, cmdLine, win.User, win.Password)
 		if err := runServiceCommand("sc.exe", args...); err != nil {
+			if isWindowsAccessDeniedError(err) {
+				return fmt.Errorf("installing the Windows service requires Administrator rights (sc.exe returned access denied). Re-run from an elevated prompt — right-click PowerShell and \"Run as administrator\", then run the install again. Or skip the service and run the daemon directly with `cmesh up`: %w", err)
+			}
 			return err
 		}
 		if win.User == "" {
@@ -316,6 +319,24 @@ func isWindowsServiceNotInstalledError(err error) bool {
 	}
 	text := err.Error()
 	return strings.Contains(text, "FAILED 1060") || strings.Contains(text, "does not exist as an installed service")
+}
+
+// isWindowsAccessDeniedError reports whether err is sc.exe failing with access
+// denied (Windows error 5) — the symptom of running service install without
+// Administrator rights. sc.exe writes "Access is denied." to stdout/stderr,
+// which runServiceCommand does not capture, so the resulting *exec.ExitError
+// carries only exit code 5. Key on the exit code first, with a text fallback for
+// callers that do capture output.
+func isWindowsAccessDeniedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 5 {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "access is denied") || strings.Contains(text, "exit status 5")
 }
 
 func parseWindowsServiceStartName(out string) (string, error) {

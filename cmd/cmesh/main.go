@@ -1148,7 +1148,11 @@ func cmdPeers(args []string) error {
 func cmdTest(args []string) error {
 	fs := flag.NewFlagSet("test", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
-	cwd := fs.String("cwd", "~", "worker cwd for the smoke task")
+	// Default empty (not "~"): an empty cwd lets the worker self-select a cwd its
+	// own allowed_cwds accepts (see handleCreateTask). "~" is rarely inside a
+	// conservatively-scoped allowlist and, across a cross-OS mesh, names a path
+	// that may not exist on the worker. Pass --cwd to target a specific directory.
+	cwd := fs.String("cwd", "", "worker cwd for the smoke task (empty: the worker picks an allowed dir)")
 	profile := fs.String("profile", "readonly", "profile to request")
 	wait := fs.Bool("wait", true, "wait for the smoke task to finish")
 	timeoutSeconds := fs.Int("timeout", 60, "smoke task timeout in seconds")
@@ -1282,13 +1286,11 @@ func cmdTest(args []string) error {
 		printCheck("task queued", true, resp.TaskID)
 	}
 	if *bidirectional {
+		// Leave empty when --reverse-cwd is unset: the reverse smoke runs THIS
+		// machine as the worker, whose handleCreateTask self-selects a cwd its own
+		// allowed_cwds accepts. Defaulting to os.Getwd() only passed when cmesh
+		// happened to be run from inside the allowlist.
 		cwdBack := strings.TrimSpace(*reverseCWD)
-		if cwdBack == "" {
-			cwdBack, err = os.Getwd()
-			if err != nil {
-				return err
-			}
-		}
 		fmt.Println()
 		fmt.Println("reverse cmesh test")
 		fmt.Println()

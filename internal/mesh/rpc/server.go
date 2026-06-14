@@ -181,10 +181,13 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 		err := fmt.Errorf("authenticated caller is not a configured peer")
 		return schema.PeerSmokeResponse{Error: &schema.Error{Code: task.ErrorPeerUnauthorized, Detail: err.Error()}}, err
 	}
+	// Leave cwd empty when the caller did not specify one: this smoke delegates the
+	// task BACK to the caller (the caller is the worker here), so the caller's own
+	// receive path self-selects a cwd its policy accepts. cwd is not checked by
+	// CheckOutbound, only by the worker's CheckInbound, so an empty cwd is correct
+	// to forward. A hardcoded "~" — or this node's allowed_cwds — would be a path
+	// that may not exist on or be allowed by the caller.
 	cwd := strings.TrimSpace(req.CWD)
-	if cwd == "" {
-		cwd = "~"
-	}
 	profile := strings.TrimSpace(req.Profile)
 	if profile == "" {
 		profile = "readonly"
@@ -300,6 +303,21 @@ func smokeCreateTaskRequest(cfg *config.Config, cwd, profile string, timeoutSeco
 	}
 }
 
+// isSmokeOriginSession reports whether any of the candidate origin-session IDs
+// names a cmesh smoke task. All smoke entrypoints (wizard, rpc, mcp) tag their
+// origin session with a "-smoke" suffix; this is the worker-side signal to
+// self-select a cwd when none was supplied. Matching is suffix-based so it does
+// not fire on a user session that merely contains "smoke".
+func isSmokeOriginSession(candidates ...string) bool {
+	for _, c := range candidates {
+		c = strings.TrimSpace(c)
+		if c == "cmesh-rpc-smoke" || c == "cmesh-wizard-smoke" || c == "mcp-smoke" || strings.HasSuffix(c, "-smoke") {
+			return true
+		}
+	}
+	return false
+}
+
 func rpcSmokeResultMatches(result *task.ResultEnvelope) bool {
 	if result == nil {
 		return false
@@ -355,6 +373,17 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Provenance.WorkerNodeID = s.Config.Node.ID
 	req.Provenance.PromptHash = task.PromptHash(req.Prompt)
+
+	// A smoke task with no cwd self-selects one this worker's policy accepts. The
+	// smoke verifies the runner round-trips; the delegator can't know a cwd that
+	// exists on this worker (especially cross-OS), so the worker — the node that
+	// runs the task and enforces allowed_cwds — picks it. Non-smoke tasks keep
+	// their existing empty-cwd behavior; only smoke is auto-filled.
+	if strings.TrimSpace(req.CWD) == "" && isSmokeOriginSession(req.Provenance.OriginSessionID, req.OriginSessionID) {
+		if cwd := policy.SmokeCWD(s.Config); cwd != "" {
+			req.CWD = cwd
+		}
+	}
 
 	intent := policy.TaskIntent{
 		PeerName:     identity.NodeName,

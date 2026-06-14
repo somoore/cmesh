@@ -268,6 +268,88 @@ func TestAddPeerLinkOriginOnlySkipsInbound(t *testing.T) {
 	}
 }
 
+// TestAddPeerLinkPrunesStaleSectionForSameAddress is the self-heal regression: a
+// config already carries a [peers.*] block written under a superseded (display-name)
+// identity for a machine, plus its dead allowlist strings. Re-linking that machine
+// under the correct whois-matchable identity must (a) write the correct section,
+// (b) remove the stale section for the same tailnet address, and (c) drop the dead
+// identity strings from both allowlists — leaving no orphaned trust behind and no
+// hand-editing required.
+func TestAddPeerLinkPrunesStaleSectionForSameAddress(t *testing.T) {
+	path := writeBaseConfig(t)
+	const addr = "100.120.229.49"
+
+	// Seed the exact stale shape an earlier buggy discovery wrote: a display-name
+	// section + display-name allowlist entries, all for the same address.
+	stale := PeerCandidate{Name: "Scott's MacBook Pro", NodeID: "Scott's MacBook Pro", Address: addr, CmeshCapable: true}
+	if _, err := AddPeerLink(path, stale, "", true); err != nil {
+		t.Fatalf("seed stale link: %v", err)
+	}
+	seeded := readFile(t, path)
+	if !strings.Contains(seeded, "Scott's MacBook Pro") {
+		t.Fatalf("expected the seeded stale entry to be present:\n%s", seeded)
+	}
+
+	// Re-link the SAME machine (same address) under the corrected whois identity.
+	good := PeerCandidate{Name: "scotts-macbook-pro", NodeID: "scotts-macbook-pro", Address: addr, CmeshCapable: true}
+	name, err := AddPeerLink(path, good, "nduXyDZMbU11CNTRL", true)
+	if err != nil {
+		t.Fatalf("re-link: %v", err)
+	}
+	if name != "scotts-macbook-pro" {
+		t.Fatalf("name = %q, want scotts-macbook-pro", name)
+	}
+
+	body := readFile(t, path)
+	// (a) correct section present.
+	if !strings.Contains(body, "[peers.scotts-macbook-pro]") {
+		t.Fatalf("missing corrected peer section:\n%s", body)
+	}
+	// (b) stale section pruned (matched by address).
+	if strings.Contains(body, "[peers.scott-s-macbook-pro]") || strings.Contains(body, `[peers.Scott`) {
+		t.Fatalf("stale display-name peer section was not pruned:\n%s", body)
+	}
+	// (c) dead display-name identity gone from the allowlists; correct identities kept.
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if contains(cfg.Policy.AllowedPeers, "Scott's MacBook Pro") || contains(cfg.Policy.Outbound.AllowedPeers, "Scott's MacBook Pro") {
+		t.Fatalf("dead display-name identity still in allowlists: inbound=%v outbound=%v", cfg.Policy.AllowedPeers, cfg.Policy.Outbound.AllowedPeers)
+	}
+	if !contains(cfg.Policy.AllowedPeers, "scotts-macbook-pro") {
+		t.Fatalf("corrected identity missing from inbound allowlist: %v", cfg.Policy.AllowedPeers)
+	}
+	if !contains(cfg.Policy.AllowedPeers, "nduXyDZMbU11CNTRL") {
+		t.Fatalf("captured stable id missing from inbound allowlist: %v", cfg.Policy.AllowedPeers)
+	}
+	// Exactly one peer section for this machine remains.
+	if n := strings.Count(body, "address = "+encodeString(addr)); n != 1 {
+		t.Fatalf("expected exactly 1 peer section for %s, found %d:\n%s", addr, n, body)
+	}
+}
+
+// TestAddPeerLinkKeepsOtherPeers ensures pruning is scoped to the same address and
+// never removes an unrelated peer.
+func TestAddPeerLinkKeepsOtherPeers(t *testing.T) {
+	path := writeBaseConfig(t)
+	other := PeerCandidate{Name: "node-c", NodeID: "node-c", Address: "100.64.0.9", CmeshCapable: true}
+	if _, err := AddPeerLink(path, other, "stable-c", true); err != nil {
+		t.Fatalf("link other: %v", err)
+	}
+	relinked := PeerCandidate{Name: "node-b", NodeID: "node-b", Address: "100.64.0.2", CmeshCapable: true}
+	if _, err := AddPeerLink(path, relinked, "stable-b", true); err != nil {
+		t.Fatalf("link b: %v", err)
+	}
+	body := readFile(t, path)
+	if !strings.Contains(body, "[peers.node-c]") {
+		t.Fatalf("unrelated peer node-c was removed:\n%s", body)
+	}
+	if !strings.Contains(body, "[peers.node-b]") {
+		t.Fatalf("peer node-b missing:\n%s", body)
+	}
+}
+
 func TestAddPeerLinkRejectsGlobMetachars(t *testing.T) {
 	path := writeBaseConfig(t)
 	for _, bad := range []string{"node-*", "node-?", "node-[a]"} {

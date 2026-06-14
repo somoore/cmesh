@@ -67,6 +67,9 @@ func claudeHasCmesh(claude string) bool {
 }
 
 func detectCodexInstalled() (Agent, bool) {
+	if codex, err := exec.LookPath("codex"); err == nil && codexHasCmeshCLI(codex) {
+		return Agent{ID: "codex", Name: "Codex", Found: true, Detail: "cmesh MCP registered"}, true
+	}
 	path := CodexConfigPath()
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -80,13 +83,16 @@ func detectCodexInstalled() (Agent, bool) {
 
 // codexHasCmeshTable reports whether the TOML body declares [mcp_servers.cmesh].
 func codexHasCmeshTable(body string) bool {
-	want := "[mcp_servers." + ServerName + "]"
 	for _, line := range strings.Split(body, "\n") {
-		if strings.TrimSpace(line) == want {
+		if name, ok := tomlTableHeader(line); ok && name == "mcp_servers."+ServerName {
 			return true
 		}
 	}
 	return false
+}
+
+func codexHasCmeshCLI(codex string) bool {
+	return exec.Command(codex, "mcp", "get", ServerName).Run() == nil
 }
 
 func uninstallClaude(agent Agent) Result {
@@ -117,15 +123,35 @@ func uninstallClaude(agent Agent) Result {
 }
 
 func uninstallCodex(agent Agent) Result {
+	removedByCLI := false
+	if codex, err := exec.LookPath("codex"); err == nil {
+		if codexHasCmeshCLI(codex) {
+			out, err := exec.Command(codex, "mcp", "remove", ServerName).CombinedOutput()
+			if err != nil && codexHasCmeshCLI(codex) {
+				detail := strings.TrimSpace(string(out))
+				if detail == "" {
+					detail = err.Error()
+				}
+				return Result{Agent: agent, Detail: detail}
+			}
+			removedByCLI = true
+		}
+	}
 	path := CodexConfigPath()
 	body, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if removedByCLI {
+				return Result{Agent: agent, OK: true, Detail: "removed from Codex"}
+			}
 			return Result{Agent: agent, OK: true, Detail: "not registered"}
 		}
 		return Result{Agent: agent, Detail: err.Error()}
 	}
 	if !codexHasCmeshTable(string(body)) {
+		if removedByCLI {
+			return Result{Agent: agent, OK: true, Detail: "removed from Codex"}
+		}
 		return Result{Agent: agent, OK: true, Detail: "not registered"}
 	}
 	stripped := strings.TrimRight(removeTable(string(body), "mcp_servers."+ServerName), "\r\n")
@@ -134,6 +160,12 @@ func uninstallCodex(agent Agent) Result {
 	}
 	if err := os.WriteFile(path, []byte(stripped), 0o600); err != nil {
 		return Result{Agent: agent, Detail: err.Error()}
+	}
+	if codex, err := exec.LookPath("codex"); err == nil && codexHasCmeshCLI(codex) {
+		return Result{Agent: agent, Detail: "cmesh is still registered with Codex after removal"}
+	}
+	if removedByCLI {
+		return Result{Agent: agent, OK: true, Detail: "removed from Codex"}
 	}
 	return Result{Agent: agent, OK: true, Detail: "removed from " + path}
 }

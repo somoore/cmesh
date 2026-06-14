@@ -344,6 +344,47 @@ func TestGenerateConfigAllowedPeersMatchWhoisIdentity(t *testing.T) {
 	}
 }
 
+// TestParseTailnetPeersKeysOnWhoisMatchableName reproduces the Mac<->Windows
+// peer_unauthorized bug: a macOS node advertises HostName "Scott's MacBook Pro"
+// (display name, with a curly apostrophe and spaces) while its whois identity is
+// the DNS label "scotts-macbook-pro". Discovery must key PeerCandidate.Name —
+// which flows into policy.allowed_peers via matchableIdentity — on the DNS label,
+// NOT HostName; otherwise the written allowlist entry never matches the peer's
+// authenticated whois identity and inbound delegation is rejected.
+func TestParseTailnetPeersKeysOnWhoisMatchableName(t *testing.T) {
+	const statusJSON = `{
+		"Self": {"DNSName": "win11-desktop.taila31b1.ts.net.", "HostName": "win11-desktop"},
+		"Peer": {
+			"node-key-abc": {
+				"ID": "nduXyDZMbU11CNTRL",
+				"HostName": "Scott’s MacBook Pro",
+				"DNSName": "scotts-macbook-pro.taila31b1.ts.net.",
+				"TailscaleIPs": ["100.120.229.49"],
+				"Online": true
+			}
+		}
+	}`
+
+	peers, err := parseTailnetPeers([]byte(statusJSON))
+	if err != nil {
+		t.Fatalf("parseTailnetPeers: %v", err)
+	}
+	if len(peers) != 1 {
+		t.Fatalf("expected 1 peer, got %d: %+v", len(peers), peers)
+	}
+	got := peers[0]
+	if got.Name != "scotts-macbook-pro" {
+		t.Fatalf("peer Name = %q, want whois-matchable DNS label \"scotts-macbook-pro\" (not the HostName display name)", got.Name)
+	}
+	// The allowlist value derived from this candidate must be the matchable label.
+	if id := matchableIdentity(got); id != "scotts-macbook-pro" {
+		t.Fatalf("matchableIdentity = %q, want \"scotts-macbook-pro\"", id)
+	}
+	if strings.Contains(got.Name, " ") || strings.Contains(got.Name, "’") {
+		t.Fatalf("peer Name %q still carries display-name characters", got.Name)
+	}
+}
+
 // TestGenerateConfigRejectsGlobMetacharPeerIdentities is the B-SEC1 regression
 // guard. A tailnet peer self-reports its hostname; if GenerateConfig wrote a
 // glob metacharacter ("*", "[a-z]*", "a?b") into policy.allowed_peers, the real

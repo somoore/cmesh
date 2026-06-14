@@ -248,6 +248,8 @@ func (s *Server) CallTool(ctx context.Context, name string, args json.RawMessage
 		return startService(ctx, args)
 	case "link_peer":
 		return linkPeer(ctx, args)
+	case "repair_peers":
+		return repairPeers(ctx, args)
 	case "register_gateway":
 		return registerGateway(ctx, args)
 	default:
@@ -477,6 +479,13 @@ func tools() []map[string]any {
 				"peer":      stringSchema("Name of the discovered cmesh peer to link."),
 				"confirmed": map[string]any{"type": "boolean", "description": "Set true to link the peer after the user consents."},
 			}, []string{"peer"}),
+		},
+		{
+			"name":        "repair_peers",
+			"description": "Diagnose and fix wrong, stale, or broken [peers.*] entries in this node's cmesh config — use when the user says a peer entry looks wrong, a peer won't authenticate, or asks to fix/reconcile/repair their peers. Checks every configured peer against its authoritative tailscale whois identity, reports a per-peer diff, and (with confirmed=true) rewrites mismatched entries to the whois-matchable identity, prunes stale duplicates, and reconciles allowlists — without the user editing any config. Trust posture is preserved; conflicts and unreachable peers are left unchanged.",
+			"inputSchema": objectSchema(map[string]any{
+				"confirmed": map[string]any{"type": "boolean", "description": "Omit (or false) to get a per-peer report and change nothing; set true to apply the repairs after the user consents."},
+			}, nil),
 		},
 		{
 			"name":        "register_gateway",

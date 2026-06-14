@@ -156,11 +156,27 @@ func installCodex(agent Agent, cmeshPath string) Result {
 	if !agent.Found {
 		return Result{Agent: agent, Detail: "Codex was not found"}
 	}
+	if codex, err := exec.LookPath("codex"); err == nil {
+		_ = exec.Command(codex, "mcp", "remove", ServerName).Run()
+		cmd := exec.Command(codex, "mcp", "add", ServerName, "--", cmeshPath, "mcp", "--stdio")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			detail := strings.TrimSpace(string(out))
+			if detail == "" {
+				detail = err.Error()
+			}
+			return Result{Agent: agent, Detail: detail}
+		}
+		if !codexHasCmeshCLI(codex) {
+			return Result{Agent: agent, Detail: "Codex MCP registration did not verify after install"}
+		}
+		return Result{Agent: agent, OK: true, Detail: "registered with Codex"}
+	}
 	path := CodexConfigPath()
 	if err := UpsertCodexConfig(path, cmeshPath); err != nil {
 		return Result{Agent: agent, Detail: err.Error()}
 	}
-	return Result{Agent: agent, OK: true, Detail: fmt.Sprintf("updated %s", path)}
+	return Result{Agent: agent, OK: true, Detail: fmt.Sprintf("updated %s (Codex CLI not found)", path)}
 }
 
 func removeTable(body, table string) string {

@@ -59,6 +59,8 @@ hop_limit = 2
 
 If `random-laptop` is on the tailnet but not in `allowed_peers`, the task is denied before any runner starts.
 
+Entries in `allowed_peers` must be the **whois-matchable identity** the resolver returns for the connection — the Tailscale DNS hostname label or the stable node ID — not a human display name. cmesh's onboarding and `repair_peers` write this identity for you; this is a deliberate constraint, since matching on a self-reported or display name would let an attacker-influenceable string into the trust boundary. A repair never trusts a peer's self-reported `/v1/hello` name for the allowlist; it anchors on `whois` and flags any disagreement instead of silently rewriting.
+
 ### A request with forged identity headers
 
 cmesh does not trust identity headers. The loopback gateway rejects forwarded identity headers, and mesh RPC identity comes from Tailscale LocalAPI, not from `X-Forwarded-*`, bearer tokens, or request JSON.
@@ -172,7 +174,7 @@ For production or team-wide use, treat cmesh as security-sensitive infrastructur
 ### Runner setup
 
 - Confirm the runner works locally before exposing it through cmesh.
-- Use `cmesh mcp` to upsert the setup MCP into Claude Code or Codex before daemon setup when you want agent-assisted onboarding.
+- Use `cmesh install` to register the setup MCP into Claude Code or Codex before daemon setup when you want agent-assisted onboarding.
 - Use bare or restricted profiles where practical.
 - Do not configure cmesh to pass skip-all-permissions flags.
 - Keep runner credentials local to the machine that uses them.

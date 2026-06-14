@@ -106,6 +106,75 @@ func TestInboundRejectsDisallowedCWD(t *testing.T) {
 	}
 }
 
+// TestSmokeCWDResolvesToAnAllowedExistingDir proves SmokeCWD returns a concrete
+// cwd that CheckInbound accepts, for both the recursive "/**" allowlist form
+// (root is allowed) and the single-segment "/*" form (a child must be chosen,
+// since the parent does not match "*"). This is the invariant the onboarding
+// smoke depends on: a hardcoded "~" would fail a conservatively-scoped allowlist.
+func TestSmokeCWDResolvesToAnAllowedExistingDir(t *testing.T) {
+	t.Run("recursive glob returns the allowed root", func(t *testing.T) {
+		root := t.TempDir()
+		cfg := testConfig(root) // allowed_cwds = [root/**]
+		cwd := SmokeCWD(cfg)
+		if cwd == "" {
+			t.Fatal("SmokeCWD returned empty for a recursive glob over an existing dir")
+		}
+		assertCWDAllowed(t, cfg, cwd)
+	})
+
+	t.Run("single-segment glob descends to an existing child", func(t *testing.T) {
+		// EvalSymlinks the root so the "/*" pattern (which pathAllowed matches via
+		// filepath.Match without resolving symlinks) lines up with the normalized
+		// cwd; otherwise a symlinked temp root (/var -> /private/var on macOS) makes
+		// even a valid child unmatchable. This mirrors how a real, non-symlinked
+		// allowlist path (e.g. /Users/me/code/*) behaves.
+		base := t.TempDir()
+		root, err := filepath.EvalSymlinks(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(root, "repo")
+		if err := os.Mkdir(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(root)
+		cfg.Policy.AllowedCWDs = []string{filepath.Join(root, "*")}
+		cwd := SmokeCWD(cfg)
+		if cwd == "" {
+			t.Fatal("SmokeCWD returned empty despite an existing child dir")
+		}
+		assertCWDAllowed(t, cfg, cwd)
+	})
+
+	t.Run("single-segment glob with no child returns empty", func(t *testing.T) {
+		base := t.TempDir() // empty: no subdirectories to satisfy "*"
+		root, err := filepath.EvalSymlinks(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := testConfig(root)
+		cfg.Policy.AllowedCWDs = []string{filepath.Join(root, "*")}
+		if cwd := SmokeCWD(cfg); cwd != "" {
+			t.Fatalf("expected empty cwd (no child to match \"*\"), got %q", cwd)
+		}
+	})
+}
+
+// assertCWDAllowed fails the test unless cwd passes CheckInbound — the real
+// contract SmokeCWD must uphold.
+func assertCWDAllowed(t *testing.T, cfg *config.Config, cwd string) {
+	t.Helper()
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "mac-studio",
+		CWD:          cwd,
+		Profile:      "dev",
+		OriginNodeID: "mac-studio",
+	})
+	if !decision.Allowed {
+		t.Fatalf("SmokeCWD %q is not accepted by CheckInbound: %+v", cwd, decision)
+	}
+}
+
 func TestInboundRejectsUnavailableProfile(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)

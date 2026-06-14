@@ -200,6 +200,8 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
 	case "task_catalog":
 		return ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}}, nil
+	case "repair_peers":
+		return g.repairPeersCall(ctx, args)
 	case "list_tailnet_peers":
 		peers, err := onboard.TailnetPeers(ctx, g.Config.Node.MeshPort, true)
 		if err != nil {
@@ -630,13 +632,80 @@ func (g *Gateway) delegateManyCall(ctx context.Context, req DelegateRequest) (To
 
 const gatewaySmokeExpectedResponse = "cmesh smoke ok"
 
+// repairPeersCall reconciles the config's [peers.*] entries against their
+// authoritative tailscale whois identity (see onboard.DiagnosePeers). It loads the
+// config fresh from disk — that file is the thing being repaired — rather than using
+// the daemon's in-memory g.Config.
+//
+// IMPORTANT: the gateway runs INSIDE the daemon, which loaded its policy once at
+// startup and has no config-reload path. So a confirmed repair rewrites the file but
+// does NOT change what this live daemon enforces until it is restarted. The
+// next_step says so in plain terms; we never report success as if the running mesh
+// were already fixed.
+func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (ToolResponse, error) {
+	var req struct {
+		Confirmed bool `json:"confirmed,omitempty"`
+	}
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+	}
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, "load config: "+err.Error())
+	}
+	if len(cfg.Peers) == 0 {
+		return ToolResponse{OK: true, Result: map[string]any{
+			"repairs":   []onboard.PeerRepair{},
+			"message":   "No [peers.*] entries are configured; nothing to repair.",
+			"next_step": "If you expected a peer here, run the cmesh setup flow to discover and link one.",
+		}}, nil
+	}
+	repairs, err := onboard.DiagnosePeers(ctx, cfg)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	fixable := onboard.CountRepairs(repairs, onboard.RepairFixable)
+
+	if !req.Confirmed {
+		msg := fmt.Sprintf("Found %d configured peer(s): %d fixable, %d ok.", len(repairs), fixable, onboard.CountRepairs(repairs, onboard.RepairOK))
+		next := "Nothing to fix — all reachable peer entries already match their whois identity."
+		if fixable > 0 {
+			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries. Note: this daemon must be restarted afterward for the change to take effect (it loads config only at startup). Conflicts and unreachable peers are left unchanged."
+		}
+		return ToolResponse{OK: true, Result: map[string]any{
+			"requires_confirmation": fixable > 0,
+			"repairs":               repairs,
+			"message":               msg,
+			"next_step":             next,
+		}}, nil
+	}
+
+	fixedNames, err := onboard.ApplyPeerRepairs(config.DefaultPath(), repairs)
+	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"repaired": fixedNames,
+		"repairs":  repairs,
+		"message":  fmt.Sprintf("Rewrote %d peer entry(ies) in the config: %s.", len(fixedNames), strings.Join(fixedNames, ", ")),
+		// The live daemon still holds the OLD policy in memory; be explicit so the user
+		// isn't told the mesh is fixed when the running process hasn't reloaded.
+		"requires_daemon_restart": len(fixedNames) > 0,
+		"next_step":               "Restart the cmesh daemon so it loads the repaired config (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm.",
+	}}, nil
+}
+
 func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, timeoutSeconds int) (ToolResponse, error) {
 	if strings.TrimSpace(peer) == "" {
 		return toolFailure(task.ErrorPeerUnreachable, "peer is required")
 	}
-	if strings.TrimSpace(cwd) == "" {
-		cwd = "~"
-	}
+	// An empty cwd is forwarded as-is: this task runs on the REMOTE worker, which
+	// self-selects a cwd its own policy accepts when none is given (keyed off the
+	// "mcp-smoke" origin session below). A cwd from this node's policy could name a
+	// path that does not exist on the worker (e.g. cross-OS). Callers can still pass
+	// an explicit cwd to target a specific directory.
 	if strings.TrimSpace(profile) == "" {
 		profile = "readonly"
 	}
@@ -652,13 +721,14 @@ func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, t
 		return rpcFailure(task.ErrorPeerUnreachable, err)
 	}
 	delegated, err := g.delegateCall(ctx, DelegateRequest{
-		Peer:           peer,
-		Prompt:         "Reply with exactly: " + gatewaySmokeExpectedResponse,
-		CWD:            cwd,
-		Profile:        profile,
-		TimeoutSeconds: timeoutSeconds,
-		Wait:           true,
-		IdempotencyKey: strings.Join([]string{"mcp-smoke", peer, cwd, profile, strconv.Itoa(timeoutSeconds)}, "\x00"),
+		Peer:            peer,
+		Prompt:          "Reply with exactly: " + gatewaySmokeExpectedResponse,
+		CWD:             cwd,
+		Profile:         profile,
+		TimeoutSeconds:  timeoutSeconds,
+		Wait:            true,
+		OriginSessionID: "mcp-smoke",
+		IdempotencyKey:  strings.Join([]string{"mcp-smoke", peer, cwd, profile, strconv.Itoa(timeoutSeconds)}, "\x00"),
 	})
 	if err != nil {
 		return delegated, err
@@ -1300,6 +1370,13 @@ func mcpTools() []map[string]any {
 			"name":        "task_catalog",
 			"description": "List bounded delegation recipes such as disk checks, repo status, native builds, service log summaries, test runs, and branch handoff.",
 			"inputSchema": objectSchema(nil, nil),
+		},
+		{
+			"name":        "repair_peers",
+			"description": "Diagnose and fix wrong, stale, or broken [peers.*] entries in this node's cmesh config — use when the user says a peer entry looks wrong, a peer won't authenticate (peer_unauthorized), or asks to fix/reconcile/repair their peers. Checks every configured peer against its authoritative tailscale whois identity, reports a per-peer diff, and (with confirmed=true) rewrites mismatched entries, prunes stale duplicates, and reconciles allowlists — no manual config editing. Trust posture is preserved; conflicts and unreachable peers are left unchanged. The daemon must be restarted afterward to load the repaired config.",
+			"inputSchema": objectSchema(map[string]any{
+				"confirmed": map[string]any{"type": "boolean", "description": "Omit (or false) for a per-peer report that changes nothing; set true to apply the repairs after the user consents."},
+			}, nil),
 		},
 		{
 			"name":        "list_tailnet_peers",

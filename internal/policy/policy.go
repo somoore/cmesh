@@ -3,6 +3,7 @@ package policy
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -198,6 +199,78 @@ func normalizeAllowedRoot(path string) (string, error) {
 		real = strings.ToLower(real)
 	}
 	return real, nil
+}
+
+// SmokeCWD returns a concrete, existing directory that this node's own inbound
+// policy accepts, for use as the default cwd of a smoke task. The smoke runs a
+// real runner round-trip in the worker's cwd, so that cwd must pass CheckInbound
+// (NormalizeCWD requires it to exist; pathAllowed requires it to match
+// allowed_cwds). A hardcoded "~" can never satisfy a conservatively-scoped
+// allowlist (e.g. ["~/code/*"]), which would make a smoke — and the onboarding
+// "ready" gate that depends on it — impossible to pass without loosening policy.
+//
+// It walks allowed_cwds in order and returns the first pattern that resolves to
+// an existing directory the policy allows: the root for a recursive "/**" glob,
+// an existing child for a single-segment "/*" glob, or the literal path itself.
+// It returns "" when nothing resolves, so callers fall back to their prior
+// default ("~") and the smoke fails loudly rather than silently mis-targeting.
+func SmokeCWD(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	for _, pattern := range cfg.Policy.AllowedCWDs {
+		if cwd := smokeCWDForPattern(pattern, cfg.Policy.AllowedCWDs); cwd != "" {
+			return cwd
+		}
+	}
+	return ""
+}
+
+func smokeCWDForPattern(pattern string, patterns []string) string {
+	expanded, err := config.ExpandPath(pattern)
+	if err != nil {
+		return ""
+	}
+	// Recursive "/**" glob: the root dir itself is allowed and is concrete.
+	if root := strings.TrimSuffix(expanded, string(filepath.Separator)+"**"); root != expanded {
+		return existingAllowedDir(root, patterns)
+	}
+	// Single-segment "/*" glob matches direct children only (not the parent), so
+	// descend to the first existing subdirectory.
+	if parent := strings.TrimSuffix(expanded, string(filepath.Separator)+"*"); parent != expanded {
+		entries, err := os.ReadDir(parent)
+		if err != nil {
+			return ""
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			if cwd := existingAllowedDir(filepath.Join(parent, entry.Name()), patterns); cwd != "" {
+				return cwd
+			}
+		}
+		return ""
+	}
+	// Literal path with no glob.
+	return existingAllowedDir(expanded, patterns)
+}
+
+// existingAllowedDir returns candidate normalized when it is an existing
+// directory that pathAllowed accepts, else "".
+func existingAllowedDir(candidate string, patterns []string) string {
+	info, err := os.Stat(candidate)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	normalized, err := NormalizeCWD(candidate)
+	if err != nil {
+		return ""
+	}
+	if !pathAllowed(normalized, patterns) {
+		return ""
+	}
+	return candidate
 }
 
 func peerIdentityCandidates(intent TaskIntent) []string {

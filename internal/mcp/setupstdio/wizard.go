@@ -333,11 +333,18 @@ func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 		}}
 	}
 
-	// Capture the peer's authoritative whois identity (name + stable_id) from its
-	// /v1/hello so the allowlists survive a hostname change. Best-effort: the
-	// hostname label already matches whois NodeName, so a failed capture is not
-	// fatal.
-	_, stableID, _ := onboard.CapturePeerIdentity(ctx, candidate.Address, config.DefaultMeshPort)
+	// Resolve the peer's identity from its own /v1/hello — the authoritative source
+	// for the whois-matchable node_name and stable_id (both from MagicDNS, which is
+	// also what the inbound policy matches a connection against). When capture
+	// succeeds, prefer the reported node_name over the discovery-derived candidate
+	// name: discovery reads `tailscale status`, whose HostName can be a human
+	// display name ("Scott's MacBook Pro") that never matches the peer's whois
+	// identity. Capture is best-effort — on failure we keep the discovery name as a
+	// fallback rather than blanking it (AddPeerLink requires a non-empty name).
+	capturedName, stableID, _ := onboard.CapturePeerIdentity(ctx, candidate.Address, config.DefaultMeshPort)
+	if n := strings.TrimSpace(capturedName); n != "" {
+		candidate.Name = n
+	}
 	peerName, err := onboard.AddPeerLink(config.DefaultPath(), candidate, stableID, grantInbound)
 	if err != nil {
 		return failure("link_peer_failed", err.Error())
@@ -353,6 +360,69 @@ func linkPeer(ctx context.Context, args json.RawMessage) ToolResponse {
 		"grants_inbound": grantInbound,
 		"smoke":          smoke,
 		"next_step":      next,
+	}}
+}
+
+type repairPeersRequest struct {
+	Confirmed bool `json:"confirmed,omitempty"`
+}
+
+// repairPeers lets a user say "fix my peer entries" to the agent instead of editing
+// TOML or knowing to re-run link_peer. It delegates to onboard.DiagnosePeers /
+// ApplyPeerRepairs (the trust anchor is tailscale whois, not the peer's
+// self-reported /v1/hello name; see those for the security rationale). Without
+// confirmed=true it returns a per-peer diff and changes nothing; with confirmed=true
+// it rewrites the fixable entries, preserving this node's inbound trust posture.
+//
+// This runs in the onboarding stdio server, a SEPARATE process from the daemon, so
+// the written config takes effect on the next daemon (re)start as usual.
+func repairPeers(ctx context.Context, args json.RawMessage) ToolResponse {
+	var req repairPeersRequest
+	if len(args) > 0 {
+		if err := json.Unmarshal(args, &req); err != nil {
+			return failure("invalid_arguments", err.Error())
+		}
+	}
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return failure("config_load_failed", err.Error())
+	}
+	if len(cfg.Peers) == 0 {
+		return ToolResponse{OK: true, Result: map[string]any{
+			"repairs":   []onboard.PeerRepair{},
+			"message":   "No [peers.*] entries are configured; nothing to repair.",
+			"next_step": "If you expected a peer here, run the setup flow to discover and link one.",
+		}}
+	}
+	repairs, err := onboard.DiagnosePeers(ctx, cfg)
+	if err != nil {
+		return failure("tailnet_peers_failed", err.Error())
+	}
+	fixable := onboard.CountRepairs(repairs, onboard.RepairFixable)
+
+	if !req.Confirmed {
+		msg := fmt.Sprintf("Found %d configured peer(s): %d fixable, %d ok.", len(repairs), fixable, onboard.CountRepairs(repairs, onboard.RepairOK))
+		next := "Nothing to fix — all reachable peer entries already match their whois identity."
+		if fixable > 0 {
+			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries to their whois-matchable identity. Conflicts and unreachable peers are left unchanged."
+		}
+		return ToolResponse{OK: true, Result: map[string]any{
+			"requires_confirmation": fixable > 0,
+			"repairs":               repairs,
+			"message":               msg,
+			"next_step":             next,
+		}}
+	}
+
+	fixedNames, err := onboard.ApplyPeerRepairs(config.DefaultPath(), repairs)
+	if err != nil {
+		return failure("repair_failed", err.Error())
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"repaired":  fixedNames,
+		"repairs":   repairs,
+		"message":   fmt.Sprintf("Repaired %d peer entry(ies): %s.", len(fixedNames), strings.Join(fixedNames, ", ")),
+		"next_step": "Run a bidirectional smoke (or onboarding_status) to confirm the mesh is healthy.",
 	}}
 }
 
@@ -394,11 +464,15 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	report.Forward["node_name"] = firstNonEmpty(hello.NodeName, hello.NodeID)
 
 	const smokeExpected = "cmesh smoke ok"
+	// Leave CWD empty: the forward task runs on the REMOTE worker, which self-
+	// selects a cwd its own allowed_cwds accepts (keyed off the "cmesh-wizard-smoke"
+	// origin session). We can't know a path that exists on the remote — especially
+	// cross-OS — so the worker, which enforces the policy, picks it.
 	createResp, err := client.CreateTask(ctx, schema.CreateTaskRequest{
 		OriginNodeID:    cfg.Node.ID,
 		OriginSessionID: "cmesh-wizard-smoke",
 		Prompt:          "Reply with exactly: " + smokeExpected,
-		CWD:             "~",
+		CWD:             "",
 		Profile:         "readonly",
 		TimeoutSeconds:  60,
 		Wait:            true,
@@ -420,7 +494,11 @@ func bidirectionalSmoke(ctx context.Context, peer onboard.PeerCandidate) smokeRe
 	forwardOK := createResp.State == "done"
 	report.Forward["ok"] = forwardOK
 
-	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{CWD: "~", Profile: "readonly", TimeoutSeconds: 60})
+	// Leave CWD empty: the reverse smoke runs THIS node as the worker (the remote
+	// asks us to run it), and runPeerSmokeToCaller defaults an empty cwd to a path
+	// the worker's own policy accepts. Sending "~" here would force a cwd our own
+	// allowed_cwds may reject.
+	reverse, err := client.PeerSmoke(ctx, schema.PeerSmokeRequest{Profile: "readonly", TimeoutSeconds: 60})
 	if err != nil {
 		report.Reverse["ok"] = false
 		report.Detail = "reverse smoke failed: " + err.Error()
