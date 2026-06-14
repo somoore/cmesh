@@ -151,13 +151,23 @@ func maybeRemoveDataDir(resolvedDataDir, configPath string, report *cleanupRepor
 	home, _ := os.UserHomeDir()
 	configRoot := configRootDir()
 
-	// Bound against what config actually says the data dir is (not a fixed
-	// default, which would refuse legitimate custom data dirs). This clause
-	// mainly catches symlink escapes; the home/configRoot/root checks are what
-	// protect $HOME.
-	if guardErr := dataDirDeletable(resolvedDataDir, home, configRoot, resolvedDataDir); guardErr != nil {
+	// Path guard: refuse filesystem root, $HOME, the user config root, and any
+	// ancestor of those. These protect against deleting something catastrophic.
+	if guardErr := dataDirDeletable(resolvedDataDir, home, configRoot); guardErr != nil {
 		printCheck("data dir", false, "refused to delete "+resolvedDataDir+": "+guardErr.Error())
 		report.left = append(report.left, "data dir "+resolvedDataDir+" (guarded: "+guardErr.Error()+")")
+		return
+	}
+
+	// Stronger, independent signal that this dir is really cmesh's: it must
+	// directly contain a cmesh-created artifact (the task DB or audit log).
+	// Without this, a config pointing data_dir at /etc, /opt, /var/lib, etc.
+	// would pass every path check (none is $HOME/configRoot/root/ancestor) and
+	// os.RemoveAll would proceed. We never delete a directory we cannot prove
+	// cmesh populated.
+	if !dataDirHasCmeshArtifacts(resolvedDataDir) {
+		printCheck("data dir", false, "refused to delete "+resolvedDataDir+": no cmesh artifacts found (expected cmesh.db or audit.jsonl)")
+		report.left = append(report.left, "data dir "+resolvedDataDir+" (no cmesh artifacts; left untouched)")
 		return
 	}
 
@@ -231,11 +241,17 @@ func selfInstalledBinary(exe string) bool {
 	return false
 }
 
-// dataDirDeletable is the security guard for the data-dir delete. It refuses to
-// delete paths that are dangerous to remove (root, $HOME, the user config root,
-// empty) and requires the resolved path to actually live at or under the
-// configured cmesh data dir. It is pure so it can be unit-tested directly.
-func dataDirDeletable(resolved, home, configRoot, configuredDataDir string) error {
+// dataDirDeletable is the path-safety guard for the data-dir delete. It refuses
+// to delete paths that are catastrophic to remove (filesystem root, $HOME, the
+// user config root, an empty path, or any ancestor of $HOME/config root). It is
+// pure so it can be unit-tested directly.
+//
+// It deliberately does NOT try to prove the path "belongs" to cmesh via a path
+// comparison — an earlier version compared the resolved path against a value
+// that was always the path itself, so the check was a tautology that always
+// passed. Proof that a directory is really cmesh's is established separately and
+// far more strongly by dataDirHasCmeshArtifacts.
+func dataDirDeletable(resolved, home, configRoot string) error {
 	if strings.TrimSpace(resolved) == "" {
 		return errors.New("empty path")
 	}
@@ -267,18 +283,29 @@ func dataDirDeletable(resolved, home, configRoot, configuredDataDir string) erro
 			return fmt.Errorf("path is an ancestor of %s", fclean)
 		}
 	}
+	return nil
+}
 
-	// Must live at or under the configured cmesh data dir.
-	if configuredDataDir != "" {
-		want := filepath.Clean(configuredDataDir)
-		if real, err := filepath.EvalSymlinks(want); err == nil {
-			want = filepath.Clean(real)
-		}
-		if clean != want && !isAncestor(want, clean) {
-			return fmt.Errorf("not under the configured cmesh data dir %s", want)
+// cmeshArtifactNames are the files cmesh creates directly inside its data dir by
+// default (see internal/config: Store.Path = <data_dir>/cmesh.db,
+// Audit.Path = <data_dir>/audit.jsonl). The presence of any one of these is a
+// strong, independent signal that the directory really is a cmesh data dir.
+var cmeshArtifactNames = []string{"cmesh.db", "audit.jsonl"}
+
+// dataDirHasCmeshArtifacts reports whether dir directly contains at least one
+// recognizable cmesh-created artifact. This is the primary safeguard against
+// deleting a directory that merely happens to be named/configured as the data
+// dir but was never populated by cmesh (e.g. data_dir mistakenly set to /etc).
+func dataDirHasCmeshArtifacts(dir string) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	for _, name := range cmeshArtifactNames {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // isAncestor reports whether ancestor is a strict parent directory of child.
