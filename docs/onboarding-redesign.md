@@ -1,7 +1,21 @@
 # cmesh CLI + Install + Onboarding Redesign
 
-Status: proposed plan (not yet implemented)
+Status: IMPLEMENTED on branch `onboarding-redesign` (build/vet/test/gofmt + win/linux cross-compile green).
 Decisions locked: restructure CLI commands · confirm each state change · hand-rolled `x/term` multi-select
+
+Implementation notes (as built, differing from or refining the plan below):
+- `cmesh install` ensures the binary is on PATH (shared `ensureBinaryOnPath`,
+  `--no-self-install` to skip) AND registers the MCP — so one command delivers
+  "binary on PATH + MCP". `scripts/install.sh` auto-launches the picker on an
+  interactive terminal (`--no-agent-setup` opt-out; non-TTY falls back to a hint).
+- `node.role` is persisted in config so an origin-only node reaches `ready`
+  without requiring the reverse worker smoke; worker/both keep the real-smoke gate.
+- `link_peer` grants bounded bidirectional trust (see Trust-model amendment) and
+  the confirm preview discloses both directions.
+- `ready` is gated on a real, re-derived bidirectional smoke (not a config-text
+  match) and emits the Part-5 payoff + routes to `register_gateway`.
+- Discovery is surfaced via `list_tailnet_peers` + `onboarding_status.Peers`
+  rather than a separate `discover_peers` tool.
 
 ## Goal
 
