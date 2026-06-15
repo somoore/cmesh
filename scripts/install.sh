@@ -43,6 +43,10 @@ detect_arch() {
   esac
 }
 
+can_use_dev_tty() {
+  [ -r /dev/tty ] && [ -w /dev/tty ] && ( : </dev/tty >/dev/tty ) 2>/dev/null
+}
+
 install_file() {
   src=$1
   dst=$2
@@ -163,8 +167,20 @@ install_from_release() {
   info "downloading $url"
   download "$url" "$tmpdir/$asset" || die "download failed: $url"
   tar -xzf "$tmpdir/$asset" -C "$tmpdir"
-  [ -f "$tmpdir/cmesh" ] || die "release archive did not contain cmesh binary"
-  install_file "$tmpdir/cmesh" "$install_path"
+  bin="$tmpdir/cmesh"
+  if [ "$os" = "windows" ]; then
+    bin="$tmpdir/cmesh.exe"
+  fi
+  if [ ! -f "$bin" ]; then
+    if [ -f "$tmpdir/cmesh" ]; then
+      bin="$tmpdir/cmesh"
+    elif [ -f "$tmpdir/cmesh.exe" ]; then
+      bin="$tmpdir/cmesh.exe"
+    else
+      die "release archive did not contain cmesh binary"
+    fi
+  fi
+  install_file "$bin" "$install_path"
   return 0
 }
 
@@ -177,7 +193,11 @@ if [ -z "$install_dir" ]; then
   fi
 fi
 
-install_path="$install_dir/cmesh"
+install_name=cmesh
+if [ "$(detect_os)" = "windows" ]; then
+  install_name=cmesh.exe
+fi
+install_path="$install_dir/$install_name"
 
 if install_from_binary; then
   info "installed $install_path from CMESH_BIN"
@@ -255,7 +275,7 @@ elif [ -t 0 ] && [ -t 1 ]; then
   # Run via the resolved install path so it works before the new PATH entry is
   # active in this shell. cmesh install prints the next-steps banner itself.
   "$install_path" install
-elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+elif can_use_dev_tty; then
   info ""
   info "Launching the cmesh agent picker..."
   info ""
