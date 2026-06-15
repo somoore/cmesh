@@ -16,9 +16,22 @@ find "$dist" -maxdepth 1 -type f \( \
   -name 'release-notes.md' \
 \) | sort | while IFS= read -r artifact; do
   echo "signing $artifact"
-  go run github.com/sigstore/cosign/v2/cmd/cosign@"$cosign_version" sign-blob \
-    --yes \
-    --output-signature "$artifact.sig" \
-    --output-certificate "$artifact.pem" \
-    "$artifact"
+  attempt=1
+  while :; do
+    rm -f "$artifact.sig" "$artifact.pem"
+    if go run github.com/sigstore/cosign/v2/cmd/cosign@"$cosign_version" sign-blob \
+      --yes \
+      --output-signature "$artifact.sig" \
+      --output-certificate "$artifact.pem" \
+      "$artifact"; then
+      break
+    fi
+    if [ "$attempt" -ge 3 ]; then
+      echo "failed to sign $artifact after $attempt attempts"
+      exit 1
+    fi
+    attempt=$((attempt + 1))
+    echo "retrying $artifact signing attempt $attempt"
+    sleep 5
+  done
 done
