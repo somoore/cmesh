@@ -2542,9 +2542,13 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Writes == profiledefs.WritesDeny {
 					ccfg.PermissionMode = "plan"
 					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Edit", "MultiEdit", "Write", "NotebookEdit")
+				} else {
+					ccfg.PermissionMode = "acceptEdits"
 				}
 				if pcfg.Shell == profiledefs.ShellDeny {
-					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash")
+					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash", "PowerShell")
+				} else if pcfg.Shell == profiledefs.ShellAllow {
+					ccfg.AllowedTools = appendUnique(ccfg.AllowedTools, "Bash", "PowerShell")
 				}
 				profiles[pname] = ccfg
 			}
