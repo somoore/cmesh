@@ -59,8 +59,10 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	body := string(bodyBytes)
-	if !strings.Contains(body, "mcp remove --scope user cmesh\n") {
-		t.Fatalf("remove command missing from log:\n%s", body)
+	for _, scope := range claudeScopes {
+		if !strings.Contains(body, "mcp remove --scope "+scope+" cmesh\n") {
+			t.Fatalf("remove command for scope %q missing from log:\n%s", scope, body)
+		}
 	}
 	if !strings.Contains(body, "mcp add --scope user cmesh -- /opt/cmesh mcp --stdio\n") {
 		t.Fatalf("setup stdio add command missing from log:\n%s", body)

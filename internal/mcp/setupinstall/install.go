@@ -139,7 +139,13 @@ func installClaude(agent Agent, cmeshPath string) Result {
 	if err != nil {
 		return Result{Agent: agent, Detail: err.Error()}
 	}
-	_ = exec.Command(claude, "mcp", "remove", "--scope", "user", ServerName).Run()
+	// A stale local/project HTTP gateway entry overrides the user-scoped stdio
+	// setup server inside that project and shows up in Claude as reconnecting
+	// when no daemon is running yet. Sweep every known Claude scope in the
+	// current project before adding the user-scoped setup server.
+	for _, scope := range claudeScopes {
+		_ = exec.Command(claude, "mcp", "remove", "--scope", scope, ServerName).Run()
+	}
 	cmd := exec.Command(claude, "mcp", "add", "--scope", "user", ServerName, "--", cmeshPath, "mcp", "--stdio")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
