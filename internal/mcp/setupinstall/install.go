@@ -192,8 +192,7 @@ func claudeResolvesToSetupStdio(claude, cmeshPath string) bool {
 func claudeGetOutputIsSetupStdio(body, cmeshPath string) bool {
 	lower := strings.ToLower(body)
 	if !strings.Contains(lower, "scope: user") ||
-		strings.Contains(lower, "pending") ||
-		strings.Contains(lower, "rejected") ||
+		claudeGetOutputHasBlockedStatus(body) ||
 		strings.Contains(lower, "http://") ||
 		strings.Contains(lower, "https://") {
 		return false
@@ -201,6 +200,19 @@ func claudeGetOutputIsSetupStdio(body, cmeshPath string) bool {
 	return strings.Contains(body, cmeshPath) &&
 		strings.Contains(body, "mcp") &&
 		strings.Contains(body, "--stdio")
+}
+
+func claudeGetOutputHasBlockedStatus(body string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		if !(strings.HasPrefix(lower, "status:") || strings.HasPrefix(lower, "approval:")) {
+			continue
+		}
+		if strings.Contains(lower, "pending") || strings.Contains(lower, "rejected") {
+			return true
+		}
+	}
+	return false
 }
 
 func installCodex(agent Agent, cmeshPath string) Result {

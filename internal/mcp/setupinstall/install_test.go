@@ -178,6 +178,18 @@ func TestClaudeGetOutputIsSetupStdioRequiresUserScope(t *testing.T) {
 		t.Fatalf("pending/rejected entries must not verify as usable setup servers")
 	}
 
+	rejectedUser := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  Status: Rejected",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if claudeGetOutputIsSetupStdio(rejectedUser, "/opt/cmesh") {
+		t.Fatalf("pending/rejected entries must not verify as usable setup servers")
+	}
+
 	userSetup := strings.Join([]string{
 		"cmesh:",
 		"  Scope: User",
@@ -187,6 +199,28 @@ func TestClaudeGetOutputIsSetupStdioRequiresUserScope(t *testing.T) {
 	}, "\n")
 	if !claudeGetOutputIsSetupStdio(userSetup, "/opt/cmesh") {
 		t.Fatalf("user-scoped stdio setup server should verify")
+	}
+
+	pendingPath := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  Command: /tmp/pending-release/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if !claudeGetOutputIsSetupStdio(pendingPath, "/tmp/pending-release/cmesh") {
+		t.Fatalf("status words in the command path should not block a valid user-scoped stdio setup server")
+	}
+
+	approvalPath := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  Command: /tmp/approval-pending/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if !claudeGetOutputIsSetupStdio(approvalPath, "/tmp/approval-pending/cmesh") {
+		t.Fatalf("approval/status words in the command path should not block a valid user-scoped stdio setup server")
 	}
 }
 
