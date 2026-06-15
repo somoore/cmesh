@@ -31,7 +31,6 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
-          persist-credentials: false
 
       - name: Validate signed tag
         id: release-ref
