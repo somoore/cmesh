@@ -14,8 +14,8 @@ import (
 func TestBeginDispatchCreatesAndReplays(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	raw := []byte(`{"task_id":"task-1","prompt":"go test"}`)
-	rec := newRecord("task-1")
+	raw := []byte(`{"task_id":"tsk_taskone","prompt":"go test"}`)
+	rec := newRecord("tsk_taskone")
 	first, err := s.BeginDispatch(ctx, rec, raw, 30*24*time.Hour)
 	if err != nil {
 		t.Fatalf("BeginDispatch create: %v", err)
@@ -38,7 +38,7 @@ func TestBeginDispatchCreatesAndReplays(t *testing.T) {
 func TestBeginDispatchRejectsMutatedReplay(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	rec := newRecord("task-1")
+	rec := newRecord("tsk_taskone")
 	if _, err := s.BeginDispatch(ctx, rec, []byte(`{"prompt":"a"}`), 30*24*time.Hour); err != nil {
 		t.Fatalf("BeginDispatch create: %v", err)
 	}
@@ -51,10 +51,10 @@ func TestBeginDispatchRejectsMutatedReplay(t *testing.T) {
 func TestBeginDispatchRejectsDifferentOriginForSameTaskID(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.BeginDispatch(ctx, newRecord("task-1"), []byte(`{"prompt":"a"}`), 30*24*time.Hour); err != nil {
+	if _, err := s.BeginDispatch(ctx, newRecord("tsk_taskone"), []byte(`{"prompt":"a"}`), 30*24*time.Hour); err != nil {
 		t.Fatalf("BeginDispatch create: %v", err)
 	}
-	rec := newRecord("task-1")
+	rec := newRecord("tsk_taskone")
 	rec.OriginNodeID = "other-node"
 	_, err := s.BeginDispatch(ctx, rec, []byte(`{"prompt":"a"}`), 30*24*time.Hour)
 	if !errors.Is(err, ErrTaskIDOwnedByDifferentOrigin) {
@@ -65,7 +65,7 @@ func TestBeginDispatchRejectsDifferentOriginForSameTaskID(t *testing.T) {
 func TestUpdateTaskStateStoresResult(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	rec := newRecord("task-1")
+	rec := newRecord("tsk_taskone")
 	if _, err := s.BeginDispatch(ctx, rec, []byte(`{"prompt":"a"}`), 30*24*time.Hour); err != nil {
 		t.Fatalf("BeginDispatch create: %v", err)
 	}
@@ -77,14 +77,14 @@ func TestUpdateTaskStateStoresResult(t *testing.T) {
 		WorkerSummaryUntrusted: "tests passed",
 		VerificationRequired:   true,
 	}
-	updated, err := s.UpdateTaskState(ctx, rec.ID, StateUpdate{State: task.StateDone, Result: &result, ResultRef: "transcript:task-1"})
+	updated, err := s.UpdateTaskState(ctx, rec.ID, StateUpdate{State: task.StateDone, Result: &result, ResultRef: "transcript:tsk_taskone"})
 	if err != nil {
 		t.Fatalf("done update: %v", err)
 	}
 	if updated.Result == nil || updated.Result.WorkerSummaryUntrusted != "tests passed" {
 		t.Fatalf("result was not stored: %+v", updated.Result)
 	}
-	if updated.ResultRef != "transcript:task-1" {
+	if updated.ResultRef != "transcript:tsk_taskone" {
 		t.Fatalf("unexpected result ref %q", updated.ResultRef)
 	}
 }
@@ -92,18 +92,18 @@ func TestUpdateTaskStateStoresResult(t *testing.T) {
 func TestHasAuditEvent(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	event := audit.Event{EventID: "evt-1", Type: "task.dispatch.requested", TaskID: "task-1", NodeID: "node-1", Timestamp: time.Now().UTC()}
+	event := audit.Event{EventID: "evt-1", Type: "task.dispatch.requested", TaskID: "tsk_taskone", NodeID: "node-1", Timestamp: time.Now().UTC()}
 	if err := s.RecordAuditEvent(ctx, event); err != nil {
 		t.Fatalf("RecordAuditEvent: %v", err)
 	}
-	found, err := s.HasAuditEvent(ctx, "task-1", "task.dispatch.requested")
+	found, err := s.HasAuditEvent(ctx, "tsk_taskone", "task.dispatch.requested")
 	if err != nil {
 		t.Fatalf("HasAuditEvent: %v", err)
 	}
 	if !found {
 		t.Fatal("expected audit event to be found")
 	}
-	found, err = s.HasAuditEvent(ctx, "task-1", "task.completed")
+	found, err = s.HasAuditEvent(ctx, "tsk_taskone", "task.completed")
 	if err != nil {
 		t.Fatalf("HasAuditEvent missing type: %v", err)
 	}

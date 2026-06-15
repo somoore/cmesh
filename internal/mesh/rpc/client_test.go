@@ -13,7 +13,7 @@ import (
 func TestClientPreservesTopLevelStructuredErrorCode(t *testing.T) {
 	client := NewClient(errorServer(t, `{"code":"cwd_denied","detail":"outside allowed_cwds"}`))
 
-	_, err := client.CreateTask(context.Background(), schema.CreateTaskRequest{TaskID: "task-1"})
+	_, err := client.CreateTask(context.Background(), schema.CreateTaskRequest{TaskID: "tsk_taskone"})
 	if err == nil {
 		t.Fatal("CreateTask error = nil")
 	}
@@ -23,9 +23,9 @@ func TestClientPreservesTopLevelStructuredErrorCode(t *testing.T) {
 }
 
 func TestClientPreservesWrappedStructuredErrorCode(t *testing.T) {
-	client := NewClient(errorServer(t, `{"task_id":"task-1","state":"denied","error":{"code":"profile_unavailable","detail":"profile is not configured"}}`))
+	client := NewClient(errorServer(t, `{"task_id":"tsk_taskone","state":"denied","error":{"code":"profile_unavailable","detail":"profile is not configured"}}`))
 
-	_, err := client.CreateTask(context.Background(), schema.CreateTaskRequest{TaskID: "task-1"})
+	_, err := client.CreateTask(context.Background(), schema.CreateTaskRequest{TaskID: "tsk_taskone"})
 	if err == nil {
 		t.Fatal("CreateTask error = nil")
 	}

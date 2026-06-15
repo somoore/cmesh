@@ -2,6 +2,38 @@ package task
 
 import "testing"
 
+func TestValidIDRejectsPathTraversalAndMalformed(t *testing.T) {
+	// A freshly minted id must validate.
+	id, err := NewID()
+	if err != nil {
+		t.Fatalf("NewID: %v", err)
+	}
+	if !ValidID(id) {
+		t.Fatalf("minted id %q failed ValidID", id)
+	}
+	if !ValidID(DeterministicID("a", "b")) {
+		t.Fatalf("deterministic id failed ValidID")
+	}
+	// Anything that could escape the data dir or otherwise isn't a system id
+	// must be rejected — this guards the filepath.Join sinks (logs, artifacts,
+	// worktrees, task tokens) against path traversal.
+	for _, bad := range []string{
+		"",
+		"task-1",
+		"../../etc/passwd",
+		"tsk_../escape",
+		"tsk_UPPER",
+		"tsk_has space",
+		"tsk_with/slash",
+		"tsk_0189", // 0,1,8,9 are not in the base32 alphabet
+		"notprefixed",
+	} {
+		if ValidID(bad) {
+			t.Errorf("ValidID(%q) = true, want false", bad)
+		}
+	}
+}
+
 func TestValidTransition(t *testing.T) {
 	valid := [][2]State{
 		{StateQueued, StateRunning},

@@ -2230,7 +2230,13 @@ func hardenLocalWithLookup(next http.Handler, hostToken string, lookup func(stri
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), provenanceContextKey{}, prov)))
 			return
 		}
-		next.ServeHTTP(w, r)
+		// Fail closed: with no configured host token and no valid task token, the
+		// gateway has no way to authenticate the caller. Refuse rather than serve
+		// tool calls unauthenticated to any local process. A correctly onboarded
+		// node always has a host token (the wizard mints one); reaching here means
+		// a hand-edited or pre-host-token config, which must not run open.
+		writeToolErrorStatus(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "gateway host token is not configured; refusing unauthenticated request")
+		return
 	})
 }
 

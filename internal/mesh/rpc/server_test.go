@@ -33,7 +33,7 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 	server := newTestServer(t, root, run)
 
 	createBody := `{
-		"task_id":"task-1",
+		"task_id":"tsk_taskone",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"wait until cancelled",
@@ -60,7 +60,7 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 		t.Fatal("runner did not start")
 	}
 
-	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/cancel", nil)
+	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/cancel", nil)
 	cancelReq.RemoteAddr = "100.64.0.1:12345"
 	cancelRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(cancelRes, cancelReq)
@@ -74,14 +74,14 @@ func TestCancelSignalsRunningTask(t *testing.T) {
 		t.Fatal("runner context was not cancelled")
 	}
 
-	rec, err := server.Store.GetTask(context.Background(), "task-1")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_taskone")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
 	if rec.State != task.StateCancelled {
 		t.Fatalf("state = %q, want cancelled", rec.State)
 	}
-	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-1")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "tsk_taskone")
 }
 
 func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
@@ -114,24 +114,24 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 		}
 	}
 
-	createTask("task-1")
+	createTask("tsk_taskone")
 	select {
 	case got := <-run.started:
-		if got != "task-1" {
-			t.Fatalf("first started task = %q, want task-1", got)
+		if got != "tsk_taskone" {
+			t.Fatalf("first started task = %q, want tsk_taskone", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("first task did not start")
 	}
 
-	createTask("task-2")
+	createTask("tsk_tasktwo")
 	time.Sleep(50 * time.Millisecond)
-	rec, err := server.Store.GetTask(context.Background(), "task-2")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_tasktwo")
 	if err != nil {
-		t.Fatalf("GetTask task-2: %v", err)
+		t.Fatalf("GetTask tsk_tasktwo: %v", err)
 	}
 	if rec.State != task.StateQueued {
-		t.Fatalf("task-2 state = %q, want queued while runner concurrency is full", rec.State)
+		t.Fatalf("tsk_tasktwo state = %q, want queued while runner concurrency is full", rec.State)
 	}
 	select {
 	case got := <-run.started:
@@ -143,14 +143,14 @@ func TestRunnerConcurrencyLeavesWaitingTaskQueued(t *testing.T) {
 
 	select {
 	case got := <-run.started:
-		if got != "task-2" {
-			t.Fatalf("second started task = %q, want task-2", got)
+		if got != "tsk_tasktwo" {
+			t.Fatalf("second started task = %q, want tsk_tasktwo", got)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("second task did not start after slot was released")
 	}
-	waitForTerminalTask(t, server, "task-1")
-	waitForTerminalTask(t, server, "task-2")
+	waitForTerminalTask(t, server, "tsk_taskone")
+	waitForTerminalTask(t, server, "tsk_tasktwo")
 }
 
 func TestQueryProfilePromptDoesNotExecuteOrWriteTargetFile(t *testing.T) {
@@ -181,7 +181,7 @@ func TestQueryProfilePromptDoesNotExecuteOrWriteTargetFile(t *testing.T) {
 
 	target := filepath.Join(root, "query-should-not-write.txt")
 	createBody := `{
-		"task_id":"query-prompt-no-exec",
+		"task_id":"tsk_querypromptnoexec",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":` + strconv.Quote("create "+target) + `,
@@ -201,7 +201,7 @@ func TestQueryProfilePromptDoesNotExecuteOrWriteTargetFile(t *testing.T) {
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("query profile prompt created target file or unexpected stat error: %v", err)
 	}
-	rec, err := server.Store.GetTask(context.Background(), "query-prompt-no-exec")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_querypromptnoexec")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestReadonlyInspectSelfSelectsAllowedCWD(t *testing.T) {
 	server.Policy = policy.New(server.Config)
 
 	createBody := `{
-		"task_id":"inspect-no-cwd",
+		"task_id":"tsk_inspectnocwd",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"task_kind":"inspect",
@@ -242,7 +242,7 @@ func TestReadonlyInspectSelfSelectsAllowedCWD(t *testing.T) {
 	if createRes.Code != http.StatusOK {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	rec, err := server.Store.GetTask(context.Background(), "inspect-no-cwd")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_inspectnocwd")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
 
 	createBody := `{
-		"task_id":"task-1",
+		"task_id":"tsk_taskone",
 		"origin_node_id":"evil-peer",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -285,7 +285,7 @@ func TestCreateTaskRejectsMismatchedOriginClaim(t *testing.T) {
 	if createRes.Code != http.StatusForbidden {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	if _, err := server.Store.GetTask(context.Background(), "task-1"); err == nil {
+	if _, err := server.Store.GetTask(context.Background(), "tsk_taskone"); err == nil {
 		t.Fatal("forged task should not be stored")
 	}
 	body, err := os.ReadFile(auditPath)
@@ -305,7 +305,7 @@ func TestCreateTaskDerivesHopCountFromVerifiedChain(t *testing.T) {
 	server := newTestServer(t, root, immediateRunner{})
 
 	createBody := `{
-		"task_id":"task-hop",
+		"task_id":"tsk_hop",
 		"origin_node_id":"origin",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -326,8 +326,8 @@ func TestCreateTaskDerivesHopCountFromVerifiedChain(t *testing.T) {
 	if createRes.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	waitForTerminalTask(t, server, "task-hop")
-	rec, err := server.Store.GetTask(context.Background(), "task-hop")
+	waitForTerminalTask(t, server, "tsk_hop")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_hop")
 	if err != nil {
 		t.Fatalf("stored task: %v", err)
 	}
@@ -352,10 +352,10 @@ func TestPeerSmokeTestsBackToAuthenticatedCaller(t *testing.T) {
 			}
 			sawSmokePrompt = strings.Contains(raw.Prompt, rpcSmokeExpectedResponse)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"task_id":"remote-smoke","state":"done"}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/remote-smoke/result":
+			_, _ = w.Write([]byte(`{"task_id":"tsk_remotesmoke","state":"done"}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/tsk_remotesmoke/result":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"task_id":"remote-smoke","result":{"status":"done","command_output":{"command":"fake","exit_code":0,"stdout":"cmesh smoke ok\n","stderr":"","duration_s":1},"worker_summary_untrusted":"cmesh smoke ok","usage":{},"verification_required":true}}`))
+			_, _ = w.Write([]byte(`{"task_id":"tsk_remotesmoke","result":{"status":"done","command_output":{"command":"fake","exit_code":0,"stdout":"cmesh smoke ok\n","stderr":"","duration_s":1},"worker_summary_untrusted":"cmesh smoke ok","usage":{},"verification_required":true}}`))
 		default:
 			t.Fatalf("unexpected worker request %s %s", r.Method, r.URL.Path)
 		}
@@ -393,7 +393,7 @@ func TestCreateTaskRejectsCyclicDelegationChain(t *testing.T) {
 	server := newTestServer(t, root, immediateRunner{})
 
 	createBody := `{
-		"task_id":"task-cycle",
+		"task_id":"tsk_cycle",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -428,7 +428,7 @@ func TestCreateTaskDeniesDisallowedCWDWithoutRunner(t *testing.T) {
 	}
 
 	createBody := `{
-		"task_id":"task-denied-cwd",
+		"task_id":"tsk_deniedcwd",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -454,7 +454,7 @@ func TestCreateTaskDeniesDisallowedCWDWithoutRunner(t *testing.T) {
 	if run.calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", run.calls)
 	}
-	rec, err := server.Store.GetTask(context.Background(), "task-denied-cwd")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_deniedcwd")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
 	server := newTestServer(t, root, run) // allowed_cwds = [root/**]
 
 	createBody := `{
-		"task_id":"task-smoke-empty-cwd",
+		"task_id":"tsk_smokeemptycwd",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"cmesh-wizard-smoke",
 		"prompt":"Reply with exactly: cmesh smoke ok",
@@ -492,7 +492,7 @@ func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
 	if createRes.Code == http.StatusForbidden {
 		t.Fatalf("smoke task with empty cwd was denied (expected self-selected cwd): %s", createRes.Body.String())
 	}
-	rec, err := server.Store.GetTask(context.Background(), "task-smoke-empty-cwd")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_smokeemptycwd")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -502,8 +502,8 @@ func TestCreateTaskSmokeSelfSelectsCWD(t *testing.T) {
 	if strings.TrimSpace(rec.CWD) == "" {
 		t.Fatalf("expected a self-selected cwd on the smoke record, got empty")
 	}
-	waitForTerminalTask(t, server, "task-smoke-empty-cwd")
-	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-smoke-empty-cwd")
+	waitForTerminalTask(t, server, "tsk_smokeemptycwd")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "tsk_smokeemptycwd")
 }
 
 // TestCreateTaskNonSmokeEmptyCWDNotSelfSelected proves the self-select is gated to
@@ -516,7 +516,7 @@ func TestCreateTaskNonSmokeEmptyCWDNotSelfSelected(t *testing.T) {
 	server := newTestServer(t, root, run)
 
 	createBody := `{
-		"task_id":"task-nonsmoke-empty-cwd",
+		"task_id":"tsk_nonsmokeemptycwd",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-real",
 		"prompt":"hello",
@@ -593,7 +593,7 @@ func TestWorkerIssuedLeaseRequiredForLeasedProfile(t *testing.T) {
 		return res
 	}
 
-	fake := create("task-fake-lease", "lease_fake")
+	fake := create("tsk_fakelease", "lease_fake")
 	if fake.Code != http.StatusForbidden {
 		t.Fatalf("fake lease status = %d, body = %s", fake.Code, fake.Body.String())
 	}
@@ -605,11 +605,11 @@ func TestWorkerIssuedLeaseRequiredForLeasedProfile(t *testing.T) {
 		t.Fatalf("fake lease error = %+v", fakeResp.Error)
 	}
 
-	ok := create("task-real-lease", lease.LeaseID)
+	ok := create("tsk_reallease", lease.LeaseID)
 	if ok.Code != http.StatusAccepted {
 		t.Fatalf("real lease status = %d, body = %s", ok.Code, ok.Body.String())
 	}
-	waitForTerminalTask(t, server, "task-real-lease")
+	waitForTerminalTask(t, server, "tsk_reallease")
 }
 
 func TestCreateTaskPassesNormalizedLeasedCWDToRunner(t *testing.T) {
@@ -646,7 +646,7 @@ func TestCreateTaskPassesNormalizedLeasedCWDToRunner(t *testing.T) {
 	}
 
 	createBody := `{
-		"task_id":"task-normalized-cwd",
+		"task_id":"tsk_normalizedcwd",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-normalized",
 		"prompt":"write inside the approved cwd",
@@ -677,7 +677,7 @@ func TestCreateTaskPassesNormalizedLeasedCWDToRunner(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runner was not invoked")
 	}
-	waitForTerminalTask(t, server, "task-normalized-cwd")
+	waitForTerminalTask(t, server, "tsk_normalizedcwd")
 }
 
 func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
@@ -688,7 +688,7 @@ func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
 	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
 
 	createBody := `{
-		"task_id":"task-denied-profile",
+		"task_id":"tsk_deniedprofile",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -714,7 +714,7 @@ func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
 	if run.calls != 0 {
 		t.Fatalf("runner calls = %d, want 0", run.calls)
 	}
-	rec, err := server.Store.GetTask(context.Background(), "task-denied-profile")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_deniedprofile")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -729,7 +729,7 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 	server := newTestServer(t, root, immediateRunner{})
 
 	createBody := `{
-		"task_id":"task-1",
+		"task_id":"tsk_taskone",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -745,11 +745,11 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 	if createRes.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	waitForTerminalTask(t, server, "task-1")
+	waitForTerminalTask(t, server, "tsk_taskone")
 
 	server.Identity = fakeIdentity{nodeID: "node-other", nodeName: "windows-vm"}
 
-	statusReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1", nil)
+	statusReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone", nil)
 	statusReq.RemoteAddr = "100.64.0.3:12345"
 	statusRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(statusRes, statusReq)
@@ -757,7 +757,7 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("status code = %d, body = %s", statusRes.Code, statusRes.Body.String())
 	}
 
-	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/result", nil)
+	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/result", nil)
 	resultReq.RemoteAddr = "100.64.0.3:12345"
 	resultRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(resultRes, resultReq)
@@ -765,7 +765,7 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("result code = %d, body = %s", resultRes.Code, resultRes.Body.String())
 	}
 
-	transcriptReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/transcript", nil)
+	transcriptReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/transcript", nil)
 	transcriptReq.RemoteAddr = "100.64.0.3:12345"
 	transcriptRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(transcriptRes, transcriptReq)
@@ -773,7 +773,7 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("transcript code = %d, body = %s", transcriptRes.Code, transcriptRes.Body.String())
 	}
 
-	artifactReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-1/artifacts/git-bundle", nil)
+	artifactReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/artifacts/git-bundle", nil)
 	artifactReq.RemoteAddr = "100.64.0.3:12345"
 	artifactRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(artifactRes, artifactReq)
@@ -781,7 +781,7 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("artifact code = %d, body = %s", artifactRes.Code, artifactRes.Body.String())
 	}
 
-	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/task-1/cancel", nil)
+	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/cancel", nil)
 	cancelReq.RemoteAddr = "100.64.0.3:12345"
 	cancelRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(cancelRes, cancelReq)
@@ -889,7 +889,7 @@ func assertAuditContains(t *testing.T, path string, values ...string) {
 
 func TestSubdelegationDirectRequesterCanAccessDownstreamTask(t *testing.T) {
 	rec := task.Record{
-		ID:              "task-1",
+		ID:              "tsk_taskone",
 		OriginNodeID:    "mac-studio",
 		DelegationChain: []string{"mac-studio", "windows-vm", "homelab-vm"},
 	}
@@ -908,7 +908,7 @@ func TestCreateTaskRecordsAuditEvents(t *testing.T) {
 	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
 
 	createBody := `{
-		"task_id":"task-audit",
+		"task_id":"tsk_audit",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -924,7 +924,7 @@ func TestCreateTaskRecordsAuditEvents(t *testing.T) {
 	if createRes.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	waitForTerminalTask(t, server, "task-audit")
+	waitForTerminalTask(t, server, "tsk_audit")
 	assertAuditContains(t, auditPath, `"type":"task.dispatch.accepted"`, `"type":"task.completed"`)
 }
 
@@ -935,7 +935,7 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 	server.Audit = audit.NewWriter(auditPath, server.Config.Node.ID)
 
 	createBody := `{
-		"task_id":"task-runner-fail",
+		"task_id":"tsk_runnerfail",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"simulate killed runner",
@@ -951,8 +951,8 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 	if createRes.Code != http.StatusAccepted {
 		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
 	}
-	waitForTerminalTask(t, server, "task-runner-fail")
-	rec, err := server.Store.GetTask(context.Background(), "task-runner-fail")
+	waitForTerminalTask(t, server, "tsk_runnerfail")
+	rec, err := server.Store.GetTask(context.Background(), "tsk_runnerfail")
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
@@ -965,7 +965,7 @@ func TestRunnerFailureStoresResultEnvelopeAndAudit(t *testing.T) {
 	if rec.Result.CommandOutput.ExitCode != 137 || rec.Result.CommandOutput.Stderr != "runner killed\n" {
 		t.Fatalf("command output = %+v", rec.Result.CommandOutput)
 	}
-	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/task-runner-fail/result", nil)
+	resultReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_runnerfail/result", nil)
 	resultReq.RemoteAddr = "100.64.0.1:12345"
 	resultRes := httptest.NewRecorder()
 	server.Handler().ServeHTTP(resultRes, resultReq)
@@ -982,7 +982,7 @@ func TestCreateTaskPassesTaskScopedMCPURLToRunner(t *testing.T) {
 	server.Config.Node.MCPPort = 8888
 
 	createBody := `{
-		"task_id":"task-mcp-url",
+		"task_id":"tsk_mcpurl",
 		"origin_node_id":"mac-studio",
 		"origin_session_id":"session-1",
 		"prompt":"hello",
@@ -1010,8 +1010,8 @@ func TestCreateTaskPassesTaskScopedMCPURLToRunner(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runner was not invoked")
 	}
-	waitForTerminalTask(t, server, "task-mcp-url")
-	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "task-mcp-url")
+	waitForTerminalTask(t, server, "tsk_mcpurl")
+	waitForTaskSecretsRemoved(t, server.Config.Node.DataDir, "tsk_mcpurl")
 }
 
 func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
@@ -1029,7 +1029,7 @@ func TestPrepareGitRejectsDirtyWorktree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile dirty: %v", err)
 	}
-	rec := task.Record{ID: "task-dirty", CWD: root, ProfileRequested: "dev"}
+	rec := task.Record{ID: "tsk_dirty", CWD: root, ProfileRequested: "dev"}
 	_, err := prepareGit(ctx, rec, "worker", t.TempDir(), []string{"edit_repo"}, gitPreparationOptions{})
 	if !errors.Is(err, errDirtyWorktree) {
 		t.Fatalf("prepareGit error = %v, want errDirtyWorktree", err)
@@ -1054,7 +1054,7 @@ func TestEffectiveRuntimeLimitHasDefaultCeiling(t *testing.T) {
 func TestTaskMCPConfigCarriesTaskTokenAndSecretsAreRemoved(t *testing.T) {
 	dataDir := t.TempDir()
 	metadata := runner.TaskMetadata{
-		TaskID:          "task-1",
+		TaskID:          "tsk_taskone",
 		OriginNodeID:    "origin",
 		OriginSessionID: "session",
 		WorkerNodeID:    "worker",
@@ -1062,7 +1062,7 @@ func TestTaskMCPConfigCarriesTaskTokenAndSecretsAreRemoved(t *testing.T) {
 		Profile:         "dev",
 		DelegationChain: []string{"origin", "worker"},
 		HopCount:        1,
-		TaskToken:       "task-token",
+		TaskToken:       "tsk_token",
 	}
 	if _, err := writeTaskContextFile(dataDir, metadata); err != nil {
 		t.Fatalf("writeTaskContextFile: %v", err)
@@ -1089,16 +1089,16 @@ func TestTaskMCPConfigCarriesTaskTokenAndSecretsAreRemoved(t *testing.T) {
 	if cmesh.Type != "http" || cmesh.URL != "http://127.0.0.1:7777/mcp" {
 		t.Fatalf("cmesh MCP server = %+v", cmesh)
 	}
-	if got := cmesh.Headers["Authorization"]; got != "Bearer task-token" {
+	if got := cmesh.Headers["Authorization"]; got != "Bearer tsk_token" {
 		t.Fatalf("Authorization header = %q", got)
 	}
 
-	hash := task.SHA256Hex([]byte("task-token"))
+	hash := task.SHA256Hex([]byte("tsk_token"))
 	tokenPath := filepath.Join(dataDir, taskTokenDirName, hash+".json")
 	if _, err := os.Stat(tokenPath); err != nil {
 		t.Fatalf("token context missing before removal: %v", err)
 	}
-	if err := removeTaskSecrets(dataDir, "task-1"); err != nil {
+	if err := removeTaskSecrets(dataDir, "tsk_taskone"); err != nil {
 		t.Fatalf("removeTaskSecrets: %v", err)
 	}
 	if _, err := os.Stat(tokenPath); !os.IsNotExist(err) {

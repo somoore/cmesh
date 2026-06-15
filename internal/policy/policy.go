@@ -134,7 +134,13 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 		effective = ceiling
 		profile = e.cfg.Profiles[effective]
 	}
-	if len(profile.AllowedPeers) > 0 && !matchesAny(identityCandidates(intent), profile.AllowedPeers) {
+	// Profile-level allowed_peers is an authorization gate, so it must key on the
+	// authenticated peer identity only. Never include OriginNodeID here: on the
+	// inbound path it comes from the request body (req.Provenance.OriginNodeID),
+	// so matching on it would let an allowed-but-unprivileged peer claim a
+	// privileged origin and use a profile scoped to that origin. OriginNodeID is
+	// for audit/provenance display, not authorization.
+	if len(profile.AllowedPeers) > 0 && !matchesAny(peerIdentityCandidates(intent), profile.AllowedPeers) {
 		return denied("profile_denied", fmt.Sprintf("profile %q is not allowed for this peer", effective), requested, effective)
 	}
 	if profile.RequireExplicit && !explicit {
