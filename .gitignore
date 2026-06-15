@@ -5,6 +5,16 @@ cmesh_PLAN.md
 feedback.md
 docs/PRD.md
 docs/PLAN.md
+docs/real-world-testing.md
+docs/onboarding-redesign.md
+claude-recommendations.md
+codex-recommendations.md
+ui-ux.md
+
+# Local experiments and tool scratch (landing-page / browser-automation output)
+austin-landing.html
+output/
+.playwright-cli/
 
 # Agent-local guidance and harness state
 .agents.md

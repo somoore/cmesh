@@ -80,6 +80,7 @@ The whole point is that you should rarely touch the CLI. The only real install i
 - `cmesh up` — run the daemon, or manage it as a service (`cmesh up service install`).
 - `cmesh doctor` — diagnostics for Tailscale, config, runners, and the local MCP gateway.
 - `cmesh peers` — list and test peers (`cmesh peers test <peer>` runs a real smoke task).
+- `cmesh profile` — inspect and manage profile templates (`templates`, `generate`, `validate`, `configure`, `current`, `use`, `reset`); normally driven by your agent, not by hand.
 - `cmesh uninstall` — mirror of the installer; remove the MCP and, separately consented, the rest.
 - `cmesh mcp --stdio` — the onboarding MCP itself, launched by your agent (you do not run this by hand).
 
@@ -89,16 +90,15 @@ Two things you do by hand. Everything else, you do by talking to your agent.
 
 **1. Install the binary and register the MCP.**
 
-```bash
-curl -fsSL https://get.cmesh.dev | sh
-```
-
-Or build from this repo and run the installer:
+Build from this repo and run the installer:
 
 ```bash
 go build -o cmesh ./cmd/cmesh
 ./cmesh install
 ```
+
+A hosted one-line installer (`curl -fsSL https://get.cmesh.dev | sh`) is planned
+but not yet live; build from source for now.
 
 On Windows, run the PowerShell installer from the repo root (it builds from
 source or installs a prebuilt binary, then launches the picker):

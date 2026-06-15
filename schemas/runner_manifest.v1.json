@@ -2,15 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.cmesh.local/runner_manifest.v1.json",
   "title": "cmesh runner capability manifest v1",
-  "description": "Evidence-backed capability declaration for a runner and its profiles.",
+  "description": "Evidence-backed capability declaration for a runner and its profiles. Mirrors internal/runner/types.go (CapabilityManifest, ProfileManifest).",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema_version",
     "runner",
-    "runner_version",
-    "manifest_version",
-    "generated_at",
     "profiles"
   ],
   "properties": {
@@ -20,29 +17,11 @@
     "runner": {
       "$ref": "#/$defs/runner_id"
     },
-    "runner_version": {
+    "version": {
       "type": "string",
       "minLength": 1,
-      "maxLength": 120
-    },
-    "manifest_version": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 80
-    },
-    "generated_at": {
-      "type": "string",
-      "format": "date-time"
-    },
-    "platforms": {
-      "type": "array",
-      "items": {
-        "enum": ["darwin", "linux", "windows", "freebsd"]
-      },
-      "uniqueItems": true
-    },
-    "default_profile": {
-      "$ref": "#/$defs/profile_name"
+      "maxLength": 120,
+      "description": "Optional runner version string."
     },
     "profiles": {
       "type": "object",
@@ -53,10 +32,6 @@
       "additionalProperties": {
         "$ref": "#/$defs/profile"
       }
-    },
-    "runner_extra": {
-      "type": "object",
-      "additionalProperties": true
     }
   },
   "$defs": {
@@ -65,17 +40,11 @@
       "additionalProperties": false,
       "required": [
         "claims",
-        "native_controls",
-        "credential_source",
-        "billing",
-        "enforcement_confidence",
-        "known_gaps",
-        "bare"
+        "enforcement_confidence"
       ],
       "properties": {
         "claims": {
           "type": "array",
-          "minItems": 1,
           "items": {
             "$ref": "#/$defs/capability_claim"
           },
@@ -91,19 +60,19 @@
         },
         "native_controls": {
           "type": "object",
-          "minProperties": 1,
           "additionalProperties": {
-            "type": ["string", "number", "boolean", "array", "object", "null"]
-          }
+            "type": "string"
+          },
+          "description": "Named native controls reported by the runner adapter (string-to-string)."
         },
         "credential_source": {
           "type": "string",
           "minLength": 1,
           "maxLength": 200,
-          "description": "The credential route used by this profile, such as ANTHROPIC_API_KEY, apiKeyHelper, subscription_login, or local_config."
+          "description": "The credential route used by this profile, such as ANTHROPIC_API_KEY|apiKeyHelper, subscription_login, or a runner-specific login."
         },
         "billing": {
-          "enum": ["api", "subscription", "local", "unknown"]
+          "enum": ["api", "subscription", "local", "unknown", "codex account"]
         },
         "enforcement_confidence": {
           "enum": ["low", "medium", "high"]
@@ -118,49 +87,6 @@
         },
         "bare": {
           "type": "boolean"
-        },
-        "network": {
-          "enum": ["denied", "limited", "allowed", "unknown"]
-        },
-        "git_push": {
-          "type": "boolean",
-          "default": false
-        },
-        "max_prompt_bytes": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "max_result_bytes": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "os_wrappers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/os_wrapper"
-          }
-        }
-      }
-    },
-    "os_wrapper": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["platform", "control", "confidence"],
-      "properties": {
-        "platform": {
-          "enum": ["darwin", "linux", "windows", "freebsd"]
-        },
-        "control": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 200
-        },
-        "confidence": {
-          "enum": ["low", "medium", "high"]
-        },
-        "details": {
-          "type": "string",
-          "maxLength": 1000
         }
       }
     },
@@ -186,7 +112,7 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 80,
-      "pattern": "^[a-z0-9][a-z0-9._-]*$"
+      "pattern": "^[a-z0-9._-]+$"
     }
   }
 }

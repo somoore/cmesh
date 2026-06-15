@@ -4,25 +4,31 @@
 
 Runner manifests are evidence-backed capability declarations. They prevent cmesh from overclaiming what a harness profile enforces.
 
-The schema is `schemas/runner_manifest.v1.json`.
+The manifest types are defined in `internal/runner/types.go`; each runner adapter
+builds its own manifest from its configured profiles.
 
-## Manifest Rules
+## Manifest Shape
 
-A runner manifest must declare:
+A runner manifest is produced by the runner adapter (see `internal/runner/types.go`,
+`CapabilityManifest`/`ProfileManifest`). At the top level it declares:
 
-- runner name and version;
-- manifest version and generation time;
-- profiles;
-- capability claims per profile;
-- exact native controls or flags;
-- credential source;
-- billing route;
-- enforcement confidence;
-- known gaps;
-- bare or non-bare behavior;
-- network and git push posture.
+- `schema_version` — always `runner_manifest.v1`;
+- `runner` — the runner name (`claude-code`, `codex`);
+- `version` — optional runner version string;
+- `profiles` — a map of profile name to profile manifest.
 
-The daemon loads manifests at startup and stores the active manifest in SQLite for audit correlation. A task audit event records requested, granted, and used controls.
+Each profile manifest declares:
+
+- `claims` — capability claims for the profile (`read_files`, `edit_repo`, `execute_repo_commands`);
+- `native_flags` — the exact CLI flags the adapter passes to the runner;
+- `native_controls` — optional named native controls (string-to-string);
+- `credential_source` — how the runner authenticates;
+- `billing` — billing route (`api`, `subscription`, `local`, `unknown`);
+- `enforcement_confidence` — `high`, `medium`, or `low`;
+- `known_gaps` — caveats a reviewer should know;
+- `bare` — whether the profile runs the runner in bare mode.
+
+The daemon records the resolved profile manifest in SQLite for audit correlation. A task audit event records the requested profile, the effective profile, and the requested, granted, and used claims.
 
 ## Enforcement Confidence
 
@@ -40,39 +46,22 @@ Do not claim capabilities the runner does not enforce.
 {
   "schema_version": "runner_manifest.v1",
   "runner": "claude-code",
-  "runner_version": "1.0.0",
-  "manifest_version": "2026-06-12",
-  "generated_at": "2026-06-12T00:00:00Z",
-  "platforms": ["darwin", "linux"],
-  "default_profile": "dev",
   "profiles": {
     "readonly": {
       "claims": ["read_files"],
       "native_flags": ["--permission-mode", "plan", "--bare"],
-      "native_controls": {
-        "permission_mode": "plan",
-        "bare": true
-      },
-      "credential_source": "ANTHROPIC_API_KEY or apiKeyHelper",
+      "credential_source": "ANTHROPIC_API_KEY|apiKeyHelper",
       "billing": "api",
       "enforcement_confidence": "medium",
       "known_gaps": [
         "Bare mode loses ambient project guidance such as CLAUDE.md.",
         "Credential and billing route depends on the configured API key or helper."
       ],
-      "bare": true,
-      "network": "unknown",
-      "git_push": false,
-      "max_prompt_bytes": 200000,
-      "max_result_bytes": 200000
+      "bare": true
     },
     "dev": {
       "claims": ["read_files", "edit_repo", "execute_repo_commands"],
       "native_flags": ["-p"],
-      "native_controls": {
-        "headless_prompt": true,
-        "skip_all_permissions": false
-      },
       "credential_source": "subscription_login",
       "billing": "subscription",
       "enforcement_confidence": "medium",
@@ -80,11 +69,7 @@ Do not claim capabilities the runner does not enforce.
         "Non-bare mode can inherit ambient hooks, skills, plugins, MCP servers, and repo guidance.",
         "Native tool permission behavior must be checked against the installed Claude Code version."
       ],
-      "bare": false,
-      "network": "unknown",
-      "git_push": false,
-      "max_prompt_bytes": 200000,
-      "max_result_bytes": 200000
+      "bare": false
     }
   }
 }
@@ -96,32 +81,22 @@ Do not claim capabilities the runner does not enforce.
 {
   "schema_version": "runner_manifest.v1",
   "runner": "codex",
-  "runner_version": "1.0.0",
-  "manifest_version": "2026-06-12",
-  "generated_at": "2026-06-12T00:00:00Z",
-  "platforms": ["darwin", "linux", "windows"],
-  "default_profile": "dev",
   "profiles": {
     "dev": {
       "claims": ["read_files", "edit_repo", "execute_repo_commands"],
-      "native_flags": [],
+      "native_flags": ["--ask-for-approval", "on-request", "--sandbox", "workspace-write"],
       "native_controls": {
         "sandbox": "workspace-write",
         "approval": "on-request",
         "network": "disabled_or_limited"
       },
-      "credential_source": "local_config",
-      "billing": "unknown",
+      "credential_source": "codex login or configured API credentials",
+      "billing": "codex account",
       "enforcement_confidence": "medium",
       "known_gaps": [
         "Approval and sandbox are separate axes.",
         "Network behavior depends on CLI configuration and wrapper policy."
-      ],
-      "bare": false,
-      "network": "limited",
-      "git_push": false,
-      "max_prompt_bytes": 200000,
-      "max_result_bytes": 200000
+      ]
     }
   }
 }
@@ -147,15 +122,13 @@ For Claude Code bare profiles:
 
 ## Audit Integration
 
-Every task should write audit fields for:
+Every task writes audit fields for:
 
 - requested profile;
 - effective profile;
 - requested claims;
 - granted claims;
-- used claims;
-- runner controls;
-- manifest version.
+- used claims.
 
 The audit record lets a reviewer answer:
 
