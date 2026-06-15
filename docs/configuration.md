@@ -95,17 +95,21 @@ The mesh server refuses wildcard bind addresses.
 - `allowed_peers`: node ids or names allowed to delegate to this worker.
 - `allowed_cwds`: cwd globs evaluated after home expansion and realpath normalization.
 - `hop_limit`: maximum delegation hop count.
+- `profile_ceilings`: optional map from a **requested** profile name to a **ceiling** profile name. When a peer requests the keyed profile, the worker silently remaps the effective profile down to the ceiling (e.g. `profile_ceilings = { system-change = "repo-dev" }` caps any `system-change` request to `repo-dev`). The ceiling profile must itself be configured.
 
 `[policy.outbound]` is enforced by the origin daemon before dispatch:
 
 ```toml
 [policy.outbound]
 allowed_peers = ["homelab-vm"]
+denied_peers = ["snapshot-vm"]
 denied_profiles = ["network", "interactive", "git_push"]
 allow_subdelegation = false
 ```
 
-`denied_profiles` is an origin-side brake. Generated configs keep high-risk profiles in this list, even if those profiles are defined locally, so they cannot be requested accidentally. Remove a profile from this list only on an origin machine that is intentionally allowed to request it.
+- `allowed_peers` / `denied_peers`: origin-side allowlist and denylist of peers this machine may dispatch to. A peer matched by `denied_peers` is rejected with `peer_unauthorized`; a non-empty `allowed_peers` rejects any peer not on it.
+- `denied_profiles`: an origin-side brake. Generated configs keep high-risk profiles in this list, even if those profiles are defined locally, so they cannot be requested accidentally. Remove a profile from this list only on an origin machine that is intentionally allowed to request it.
+- `allow_subdelegation`: whether a worker on this machine may delegate onward to another peer.
 
 ## Profiles
 
@@ -124,7 +128,7 @@ max_runtime = "30s"
 enforcement_confidence = "high"
 ```
 
-Runner manifests declare what those claims mean for a specific harness.
+[Runner manifests](runner-manifests.md) declare what those claims mean for a specific harness.
 
 Defaults expose `query`; agent-backed profiles such as `repo-dev` must be added explicitly and requested by name. High-risk profiles such as `desktop-control`, `system-change`, `network`, `interactive`, and `git_push` must also be explicit. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
 
@@ -141,6 +145,42 @@ max_runtime = "30m"
 ```
 
 Profile-level `allowed_peers` is checked in addition to `[policy].allowed_peers` and `[policy.outbound].allowed_peers`. Use it for interactive or network-capable profiles so a generally trusted peer cannot automatically use a more powerful profile. `require_explicit = true` prevents a high-risk profile from being selected through an empty profile request, even if someone accidentally makes it the runner default.
+
+### Profile authority ladder
+
+The built-in templates climb from deterministic read-only probes to high-risk agent-driven authority. The columns show which rungs must be requested by name (`require_explicit`) and which high-risk rungs additionally require a worker-issued lease (`require_lease`). The worker can also cap a request to a lower rung with `profile_ceilings`.
+
+| Profile | Runner | Risk | In default config | `require_explicit` | `require_lease` |
+| --- | --- | --- | --- | --- | --- |
+| `query` | `probe` | low | yes | no | no |
+| `query-network` | `probe` | medium | opt-in | yes | no |
+| `query-shell` | `shell` | medium | opt-in | yes | no |
+| `readonly-agent` | agent | medium | opt-in | no | no |
+| `repo-dev` | agent | high | opt-in | yes | yes |
+| `desktop-control` | agent | high | opt-in | yes | yes |
+| `system-change` | agent | high | opt-in | yes | yes |
+
+Generated configs expose `query` only; every higher profile is added deliberately and, for high-risk profiles, kept in `[policy.outbound].denied_profiles` on origins that should not request them. See [Security](security.md) for the reasoning behind keeping this ladder narrow.
+
+### Shell policy
+
+Allowlisted-shell profiles (the `shell` runner, e.g. `query-shell`) constrain
+which commands may run via `[profiles.X.shell_policy]`:
+
+```toml
+[profiles.query-shell.shell_policy]
+mode = "allowlist"
+denied_patterns = [">", ">>", "|", "&&", "||", ";", "`", "$(", " rm "]
+
+[profiles.query-shell.shell_policy.allowed_commands]
+darwin = ["df", "uname", "sysctl", "ps", "log"]
+linux = ["df", "uname", "systemctl", "ps", "journalctl"]
+windows = ["Get-Service", "Get-Process", "Get-EventLog", "Get-PSDrive"]
+```
+
+- `mode = "allowlist"` runs only the listed commands.
+- `allowed_commands` is keyed by OS (`darwin`, `linux`, `windows`); an empty key applies to all.
+- `denied_patterns` rejects shell metacharacters and dangerous tokens even inside an allowlisted command.
 
 ## Runners
 
@@ -199,3 +239,9 @@ Use the peer's Tailscale IP for `address`.
 `name` and `node_id` must be the peer's **whois-matchable identity**: its Tailscale DNS hostname label (e.g. `homelab-vm`, the first label of `homelab-vm.tailnet.ts.net`) or its stable node ID. This is what Tailscale `whois` reports for an incoming connection and therefore what the inbound policy (and `allowed_peers`) matches against. Do **not** use a peer's human display name (e.g. "Scott's MacBook Pro") — that is not whois-matchable, so the worker will reject the peer with `peer_unauthorized` even though the entry "looks" right.
 
 The wizard writes the correct identity for you, and `repair_peers` reconciles an existing entry against the live `whois` identity (see [Quickstart](quickstart.md)). Hand-edit these blocks only as an escape hatch, and prefer the DNS label or stable ID.
+
+## See also
+
+- [Security](security.md) — why policy, profiles, and peer identity are defined the way they are.
+- [MCP onboarding tools](mcp-onboarding.md) — the wizard tools that generate and write this config for you.
+- [Runner manifests](runner-manifests.md) — how profile claims map to what a specific runner actually enforces.

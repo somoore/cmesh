@@ -2557,15 +2557,16 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 						"Edit(**)", "MultiEdit(**)", "Write(**)", "NotebookEdit(**)")
 				}
 				if pcfg.Shell == profiledefs.ShellDeny {
-					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash")
-				} else {
-					// Shell-permitting profiles need Bash pre-approved or it stays
-					// interactive-gated and is denied headless. Bash permission rules
-					// match command prefixes, not paths, so a pre-approved Bash is
-					// bounded by the OS account rather than the cwd (already noted in
-					// repo-dev's known_gaps). Hard path-confinement of shell writes
-					// would require OS-level sandboxing, not a runner flag.
-					ccfg.AllowedTools = appendUnique(ccfg.AllowedTools, "Bash")
+					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash", "PowerShell")
+				} else if pcfg.Shell == profiledefs.ShellAllow {
+					// Shell-permitting profiles need Bash/PowerShell pre-approved or
+					// they stay interactive-gated and are denied headless. Shell
+					// permission rules match command prefixes, not paths, so a
+					// pre-approved shell is bounded by the OS account rather than the
+					// cwd (already noted in repo-dev's known_gaps). Hard path-
+					// confinement of shell writes would require OS-level sandboxing,
+					// not a runner flag.
+					ccfg.AllowedTools = appendUnique(ccfg.AllowedTools, "Bash", "PowerShell")
 				}
 				profiles[pname] = ccfg
 			}

@@ -68,3 +68,8 @@ make deploy VERSION=v0.1.0
 - Pin GitHub Actions to full commit SHAs.
 - Prefer signed tags for releases.
 - Keep `go.sum` reviewed and committed.
+
+## See also
+
+- [Development](development.md) — the build, test, and pre-commit workflow that precedes a release.
+- [Security](security.md) — the security posture release notes should keep explicit.

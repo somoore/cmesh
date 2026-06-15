@@ -6,35 +6,65 @@ cmesh lets the coding agent on this machine ask the coding agent on another mach
 
 The only thing you install by hand is the cmesh binary and the MCP registration. After that, you set up everything else by talking to your AI coding agent. The cmesh MCP is a stateless onboarding wizard: it detects rather than interrogates, confirms before it changes anything, and walks you all the way to a working two-machine mesh.
 
+This guide is the same on macOS, Linux, and Windows. Each install path below is complete on its own — pick your OS and copy-paste; you never have to translate steps from another platform.
+
+> **What success looks like (the 30-second mental model).** cmesh needs **two** machines you control, both on your Tailscale tailnet, each with a coding agent (Claude Code or Codex) already working locally. You install cmesh on both, then on each say "help me setup cmesh" and answer a few yes/no prompts. Each machine configures itself to trust and reach the other. When the link between them reports `ready`, you are done: from your local agent you can now delegate a scoped task to the other machine and get the result back in your session. Everything below is just getting two machines to `ready`.
+
+New to the model? [Concepts](concepts.md) explains peers, profiles, and the trust boundary in plain terms. For the full command and tool surface, see [Commands](commands.md) and [MCP tools](mcp-tools.md). The [README](../README.md) is the short pitch.
+
+## Prerequisites
+
+These apply to **every** machine that will take part in the mesh, on every OS:
+
+- **Tailscale installed and logged in.** Both machines must be on the same tailnet and able to see each other. Verify with `tailscale status`.
+- **A supported runner already working locally** — Claude Code or Codex — invokable from your shell and authenticated. cmesh delegates work *through* your existing agent; it does not install or authenticate one for you. Confirm the runner works on its own before exposing it through cmesh.
+- **A Go toolchain (only if building from source).** The install paths below build cmesh with `go build`, so you need Go on each machine until the hosted installer is live. This applies to Windows too — the PowerShell installer builds from source by default.
+
+You do not need to install a daemon, write any config, or open any ports by hand. The wizard does all of that, with your confirmation.
+
 ## 1. Install cmesh
 
-Install the binary and register the cmesh MCP into your coding agent. Either path works.
+Installing means putting the `cmesh` binary on your PATH and registering the cmesh MCP into your coding agent. Run this from the **repo root** (the directory that contains `cmd/cmesh`). Do it on **every** machine that should take part in the mesh.
 
-One-line installer:
+A hosted one-line installer (`curl -fsSL https://get.cmesh.dev | sh`) is planned but **not yet live**; build from source for now.
 
-```bash
-curl -fsSL https://get.cmesh.dev | sh
-```
+### macOS
 
-Or build from this repo and run the installer:
+From the repo root:
 
 ```bash
 go build -o cmesh ./cmd/cmesh
 ./cmesh install
 ```
 
-On Windows, run the PowerShell installer from the repo root. It mirrors the shell
-installer — builds from source (or installs a prebuilt binary), puts `cmesh.exe`
-on your PATH, and launches the agent picker:
+`./cmesh install` puts the binary on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+
+### Linux
+
+From the repo root:
+
+```bash
+go build -o cmesh ./cmd/cmesh
+./cmesh install
+```
+
+`./cmesh install` puts the binary on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+
+### Windows
+
+From the repo root, run the PowerShell installer:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-(`-ExecutionPolicy Bypass` lets an unsigned local script run on a stock box; drop
-it if your policy already allows local scripts.)
+`-ExecutionPolicy Bypass` lets an unsigned local script run on a stock box; drop it if your policy already allows local scripts. The installer builds `cmesh.exe` from source (so you need Go), puts it on your user PATH, prints the installed version, and then launches the same agent picker described above. Choose where to register cmesh, confirm with **Y**, and it upserts the stdio MCP entry that launches `cmesh mcp --stdio`. Run the installer from the repo root — if it cannot find `cmd/cmesh` it stops and tells you so.
 
-`cmesh install` puts the binary on your PATH and then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+If you added cmesh to PATH for the first time, **open a new terminal** so the PATH change takes effect before running `cmesh` by name.
+
+> Planning to run this Windows machine as a **worker** (a machine that *receives* delegated tasks)? Note now that the cmesh service should later run under the same account that holds your Tailscale and runner auth, and that runner command paths in config must be absolute. The details are in [step 3](#3-add-a-second-machine-the-symmetric-handshake) and [Configuration](configuration.md#runners); you do not need them yet to finish installing.
+
+### Re-running the picker
 
 To run the agent picker again later (for example, after installing a new agent), use:
 
@@ -42,7 +72,7 @@ To run the agent picker again later (for example, after installing a new agent),
 cmesh setup
 ```
 
-Do this on every machine that should take part in the mesh.
+`cmesh setup` is an alias for the picker `cmesh install` shows; it does not reinstall the binary.
 
 ## 2. Talk to the wizard
 
@@ -71,7 +101,7 @@ Under the hood these steps are cmesh MCP tools (`onboarding_status`, `configure_
 
 A single machine cannot delegate anywhere yet. To form a mesh you set up a second machine. There is **no shared session between machines**: the second machine does not resume the first machine's session or pick up where it left off. Instead, **each machine configures itself to trust and reach the other**, and cmesh discovers the rest over the tailnet.
 
-First, install cmesh on the second machine exactly as in step 1 (installer or build + `cmesh install`).
+First, install cmesh on the second machine exactly as in [step 1](#1-install-cmesh) — same OS path, same `cmesh install`. The two machines do not have to share an operating system; a Mac and a Windows box pair fine.
 
 Then, on the **second machine**, open a new agent session and say:
 
@@ -88,6 +118,17 @@ This re-enters the same stateless wizard on the new machine. "Continue" here mea
 Once the second machine's daemon is up and reachable, finish on the **first machine**. Its wizard (or a fresh `help me setup cmesh`) now discovers the new machine, writes the reciprocal peer entry and outbound trust, and runs a **bidirectional smoke test** in both directions. When both directions pass, both machines report `ready`.
 
 The ordering matters: the new machine has to configure itself and come up on the tailnet **before** the first machine's smoke test can succeed. The wizard enforces this for you.
+
+### A note on Windows workers
+
+If the machine receiving delegated work is Windows, the cmesh service should run under the **same account** that has Tailscale and runner auth, so Claude Code or Codex reuse that user's credentials. A service installed without an explicit user runs as **LocalSystem** and will not inherit the interactive user's runner auth or PATH. Keep runner commands **absolute** in config, for example:
+
+```toml
+[runners.claude-code]
+command = ["C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"]
+```
+
+[Configuration](configuration.md#runners) covers the service-account and runner-path details (including installing the service under a named user with `cmesh up service install --user`); [Security](security.md) covers why a Windows worker account is a standing remote-execution credential to keep narrow.
 
 ## 4. After setup: profiles and example prompts
 
@@ -113,7 +154,7 @@ The profile menu, from least to most authority:
 - `repo-dev` / `dev` - agent edits/tests inside allowed cwd, explicit and lease-gated.
 - `desktop-control`, `system-change`, `network`, `interactive`, `git_push` - elevated profiles for desktop/session, system, network, or push authority.
 
-> Security note: `query` is the safe default. Agent-backed and elevated profiles are real authority on the worker machine. Grant them only to peers you trust, and scope them to that peer.
+> Security note: `query` is the safe default. Agent-backed and elevated profiles are real authority on the worker machine. Grant them only to peers you trust, and scope them to that peer. See [Security](security.md) for the full model and [Configuration](configuration.md) for how to scope a profile to a single origin.
 
 ### Example prompts
 
@@ -146,7 +187,7 @@ The uninstaller is safe to run twice and never deletes anything cmesh did not cr
 
 ## Checking and operating a node
 
-The wizard handles first-run setup. A few commands are useful afterward for diagnostics and direct operation.
+The wizard handles first-run setup. A few commands are useful afterward for diagnostics and direct operation. (The full command surface is in [Commands](commands.md).)
 
 Verify a node:
 
@@ -198,13 +239,12 @@ http://127.0.0.1:7777/mcp
 
 Direct mesh RPC calls such as `POST http://100.x.y.z:7778/v1/tasks` are for low-level debugging only. Normal flows go through the local gateway so outbound policy and task provenance are applied before the worker sees the request.
 
-## Notes for Windows workers
+## Where to go next
 
-On Windows, the service should run under the same account that has Tailscale and runner auth so Claude Code or Codex reuse that user's credentials. When configuring a Windows worker, keep runner commands absolute, for example:
-
-```toml
-[runners.claude-code]
-command = ["C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"]
-```
-
-A service installed without an explicit user runs as LocalSystem and will not inherit the interactive user's runner auth or PATH.
+- [Concepts](concepts.md) — peers, profiles, and the trust boundary explained.
+- [Commands](commands.md) — the full `cmesh` command surface.
+- [MCP tools](mcp-tools.md) — the tools your agent calls (`delegate`, `task_status`, `repair_peers`, and more).
+- [MCP onboarding tools](mcp-onboarding.md) — the wizard's tools, if you want to drive setup by hand.
+- [Configuration](configuration.md) — config file reference, including Windows workers and profile scoping.
+- [Security](security.md) — the defense-in-depth model and recommended hardening.
+- [README](../README.md) — the short overview of what cmesh is and why.

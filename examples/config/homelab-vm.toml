@@ -22,25 +22,45 @@ allowed_peers = ["mac-studio"]
 denied_profiles = ["yolo"]
 allow_subdelegation = false
 
-[profiles.readonly]
-runner = "claude-code"
-claims = ["read_files"]
-bare = true
-network = false
-git_push = false
-max_runtime = "30m"
+# query is the safe default: built-in deterministic probes on the "probe" runner,
+# with no shell, no writes, and no arbitrary agent execution. This is the profile
+# a caller gets unless they explicitly name a higher-authority one.
+[profiles.query]
+runner = "probe"
+description = "Deterministic read-only machine queries. No shell, no writes, no arbitrary agent."
+capabilities = ["disk_info", "system_info", "memory_info", "uptime", "repo_status", "process_list"]
+writes = "deny"
+shell = "deny"
+risk = "low"
+max_runtime = "30s"
 
-[profiles.dev]
+# repo-dev is agent authority for repo work: edits, builds, and tests inside an
+# allowed cwd. It is available but NOT the default — being high-risk, a caller
+# must request it by name (profile: "repo-dev") and hold an acknowledged lease.
+# Grant it only to peers you trust.
+[profiles.repo-dev]
 runner = "claude-code"
-claims = ["read_files", "edit_repo", "execute_repo_commands"]
-bare = false
+description = "Agent-assisted repo-local edits and test commands inside allowed cwd."
+capabilities = ["read_files", "edit_repo", "execute_in_repo"]
+writes = "repo_only"
+shell = "allow"
 network = false
 git_push = false
+require_explicit = true
+require_lease = true
+risk = "high"
 max_runtime = "2h"
+
+# The built-in probe runner backs the query profile. It runs cmesh's own
+# deterministic probes — no external agent — and is the node's default.
+[runners.probe]
+command = ["builtin"]
+default_profile = "query"
+concurrency = 1
 
 [runners.claude-code]
 command = ["claude", "-p"]
-default_profile = "dev"
+default_profile = "repo-dev"
 manifest_path = "~/.config/cmesh/manifests/claude-code.runner_manifest.v1.json"
 concurrency = 1
 

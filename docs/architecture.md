@@ -223,3 +223,9 @@ Worker daemon restart is fail-closed in v1:
 - silent task loss is forbidden.
 
 Origin restart reloads mirrored peer tasks from SQLite and continues polling the worker.
+
+## See also
+
+- [Security](security.md) — the trust boundary, defense-in-depth layers, and threat model behind this design.
+- [Configuration](configuration.md) — the config fields that drive policy, profiles, peers, and the two ports shown above.
+- [Delegation guidance](delegation-guidance.md) — the model-facing rules for when and how an agent uses the delegation surface.

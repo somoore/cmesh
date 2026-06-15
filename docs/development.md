@@ -97,12 +97,19 @@ internal/mcp/setupstdio    pre-daemon stdio setup MCP server
 internal/mesh/rpc          daemon-to-daemon RPC server/client
 internal/onboard           setup discovery and config generation
 internal/policy            inbound/outbound policy engine
+internal/profile           profile templates, capabilities, and guidance
 internal/runner            runner abstraction
 internal/runner/claudecode Claude Code runner
 internal/runner/codex      Codex runner
+internal/runner/shell      allowlisted-shell runner (query-shell)
 internal/store             SQLite task store
 internal/task              task state and result types
 schemas                    JSON Schemas
 examples                   runnable config and Tailscale grant examples
 docs                       architecture and operator guidance
 ```
+
+## See also
+
+- [Release process](release.md) — how the checks above feed into tagged, signed releases.
+- [Architecture](architecture.md) — the system the package map implements.

@@ -33,7 +33,7 @@ Delegate long-running, self-contained work:
 - repository indexing or summarization;
 - reproducible benchmark runs.
 
-Delegate fan-out checks when every peer can answer the same narrow question independently, such as disk space, installed tool versions, or a read-only health check. Use `peers` rather than merging several summaries into one prompt; cmesh returns a peer-keyed result map so each machine keeps its own task id, state, and result envelope.
+Delegate fan-out checks when every peer can answer the same narrow question independently, such as disk space, installed tool versions, or a read-only health check. Pass the `peers` parameter to `delegate` rather than merging several summaries into one prompt; cmesh returns a peer-keyed result map so each machine keeps its own task id, state, and result envelope.
 
 Delegate unique-toolchain work:
 
@@ -95,7 +95,7 @@ A good worker prompt includes:
 Example:
 
 ```text
-In cwd ~/projects/cmesh, run the Linux test suite and fix Linux-only failures if they are small and directly related. Use the dev profile. Do not change public APIs unless a test failure requires it. Commit local changes on a cmesh branch. Return diffstat, changed files, tests run, and any verification commands the origin should rerun.
+In cwd ~/projects/cmesh, run the Linux test suite and fix Linux-only failures if they are small and directly related. Use the repo-dev profile. Do not change public APIs unless a test failure requires it. Commit local changes on a cmesh branch. Return diffstat, changed files, tests run, and any verification commands the origin should rerun.
 ```
 
 ## Task Catalog
@@ -197,3 +197,9 @@ For fan-out tasks:
 2. Compare `command_output.exit_code` and parsed raw output per peer.
 3. Report missing, failed, and successful peers separately.
 4. Do not let one peer's summary explain another peer's artifact.
+
+## See also
+
+- [Architecture](architecture.md) — the request lifecycle behind `delegate`, polling, and result envelopes.
+- [Security](security.md) — why worker output is untrusted and how the worker enforces peer, cwd, and profile policy.
+- [Configuration](configuration.md) — the profiles and peers an agent chooses between when delegating.
