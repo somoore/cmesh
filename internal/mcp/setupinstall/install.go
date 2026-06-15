@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 const ServerName = "cmesh"
@@ -205,10 +206,19 @@ func claudeGetOutputIsSetupStdio(body, cmeshPath string) bool {
 func claudeGetOutputHasBlockedStatus(body string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		lower := strings.ToLower(strings.TrimSpace(line))
-		if !(strings.HasPrefix(lower, "status:") || strings.HasPrefix(lower, "approval:")) {
-			continue
+		if i := strings.Index(lower, ":"); i >= 0 {
+			label := strings.TrimSpace(lower[:i])
+			if label == "status" || label == "approval" {
+				value := strings.TrimSpace(lower[i+1:])
+				if strings.Contains(value, "pending") || strings.Contains(value, "rejected") {
+					return true
+				}
+			}
 		}
-		if strings.Contains(lower, "pending") || strings.Contains(lower, "rejected") {
+		status := strings.TrimLeftFunc(lower, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		})
+		if strings.HasPrefix(status, "pending approval") || strings.HasPrefix(status, "rejected") {
 			return true
 		}
 	}
