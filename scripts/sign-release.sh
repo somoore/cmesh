@@ -9,8 +9,12 @@ if [ ! -d "$dist" ]; then
   exit 1
 fi
 
-for artifact in "$dist"/*.tar.gz "$dist"/checksums.txt; do
-  [ -e "$artifact" ] || continue
+find "$dist" -maxdepth 1 -type f \( \
+  -name '*.tar.gz' -o \
+  -name '*.sbom.cdx.json' -o \
+  -name 'checksums.txt' -o \
+  -name 'release-notes.md' \
+\) | sort | while IFS= read -r artifact; do
   echo "signing $artifact"
   go run github.com/sigstore/cosign/v2/cmd/cosign@"$cosign_version" sign-blob \
     --yes \
