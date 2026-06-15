@@ -95,6 +95,7 @@ jobs:
         uses: github/codeql-action/analyze@96a56f9e1619f4ee5970aabb968dc392d1e9b425
         with:
           upload: false
+          upload-database: false
 
       - name: Skip markdown-only change
         if: steps.changes.outputs.markdown_only == 'true'
