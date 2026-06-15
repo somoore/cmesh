@@ -5,9 +5,10 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 COSIGN_VERSION ?= v2.6.3
+SYFT_VERSION ?= v1.45.1
 LDFLAGS := -s -w -X cmesh/internal/version.Version=$(VERSION) -X cmesh/internal/version.Commit=$(COMMIT) -X cmesh/internal/version.Date=$(DATE)
 
-.PHONY: test precommit unit fmt fmt-check mod-check supply-chain dup vuln build sign deploy clean install-hooks
+.PHONY: test precommit unit fmt fmt-check mod-check supply-chain dup vuln build sbom release-notes sign deploy clean install-hooks
 
 test: fmt-check mod-check supply-chain dup vuln unit
 
@@ -36,6 +37,12 @@ vuln:
 
 build:
 	@scripts/build-release.sh "$(APP)" "$(VERSION)" "$(COMMIT)" "$(DATE)" "$(DIST_DIR)"
+
+sbom:
+	@scripts/generate-sboms.sh "$(DIST_DIR)" "$(SYFT_VERSION)"
+
+release-notes:
+	@scripts/generate-release-notes.sh "$(VERSION)" "$(DIST_DIR)"
 
 sign:
 	@scripts/sign-release.sh "$(DIST_DIR)" "$(COSIGN_VERSION)"

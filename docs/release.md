@@ -42,13 +42,35 @@ Artifacts are written to `dist/`:
 - `cmesh_windows_arm64.tar.gz`
 - `checksums.txt`
 
+The Linux archives are the Ubuntu-supported release artifacts for x86_64
+(`linux/amd64`) and ARM64 (`linux/arm64`).
+
 The release tag supplies the version. Archive names intentionally match the
 installer scripts so `CMESH_REPO=owner/repo scripts/install.sh` and
 `scripts/install.ps1` can download the right asset for the host platform.
 
+## SBOMs and release notes
+
+The release workflow generates a CycloneDX JSON SBOM for each archive:
+
+```text
+<archive>.sbom.cdx.json
+```
+
+It also generates `release-notes.md` from the signed tag range. The GitHub
+release body uses the same file, and the file is uploaded as a release asset so
+each release keeps a durable changelog alongside its binaries.
+
+`checksums.txt` covers:
+
+- release archives;
+- per-archive SBOMs;
+- `release-notes.md`.
+
 ## Signing
 
-Release workflows sign archives and `checksums.txt` with Sigstore cosign keyless signing.
+Release workflows sign archives, SBOMs, `release-notes.md`, and `checksums.txt`
+with Sigstore cosign keyless signing.
 
 Each signed artifact gets:
 

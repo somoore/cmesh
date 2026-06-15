@@ -285,10 +285,23 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Generate SBOMs
+        run: make sbom
+
+      - name: Generate release notes
+        run: make release-notes VERSION="${{ needs.validate.outputs.tag_name }}"
+
       - name: Generate checksums
         run: |
           set -euo pipefail
-          (cd dist && sha256sum -- *.tar.gz > checksums.txt)
+          (
+            cd dist
+            find . -maxdepth 1 -type f \( \
+              -name '*.tar.gz' -o \
+              -name '*.sbom.cdx.json' -o \
+              -name 'release-notes.md' \
+            \) -print0 | sort -z | xargs -0 sha256sum > checksums.txt
+          )
           cat dist/checksums.txt
 
       - name: Sign release artifacts
@@ -308,4 +321,4 @@ jobs:
           gh release create "${{ needs.validate.outputs.tag_name }}" dist/* \
             --verify-tag \
             --title "${{ needs.validate.outputs.tag_name }}" \
-            --notes "cmesh ${{ needs.validate.outputs.tag_name }}"
+            --notes-file dist/release-notes.md
