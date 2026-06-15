@@ -46,8 +46,9 @@ The Linux archives are the Ubuntu-supported release artifacts for x86_64
 (`linux/amd64`) and ARM64 (`linux/arm64`).
 
 The release tag supplies the version. Archive names intentionally match the
-installer scripts so `CMESH_REPO=owner/repo scripts/install.sh` and
-`scripts/install.ps1` can download the right asset for the host platform.
+installer scripts, so the public one-liners can detect the host OS/architecture
+and download the right asset. Set `CMESH_REPO=owner/repo` to test a fork, or
+`CMESH_VERSION=vX.Y.Z` to pin a specific release.
 
 ## SBOMs and release notes
 

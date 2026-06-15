@@ -18,47 +18,64 @@ These apply to **every** machine that will take part in the mesh, on every OS:
 
 - **Tailscale installed and logged in.** Both machines must be on the same tailnet and able to see each other. Verify with `tailscale status`.
 - **A supported runner already working locally** — Claude Code or Codex — invokable from your shell and authenticated. cmesh delegates work *through* your existing agent; it does not install or authenticate one for you. Confirm the runner works on its own before exposing it through cmesh.
-- **A Go toolchain (only if building from source).** The install paths below build cmesh with `go build`, so you need Go on each machine until the hosted installer is live. This applies to Windows too — the PowerShell installer builds from source by default.
+- **A Go toolchain only if building from source.** The default install paths below use pre-built release binaries. You need Go only for the source-build fallback.
 
 You do not need to install a daemon, write any config, or open any ports by hand. The wizard does all of that, with your confirmation.
 
 ## 1. Install cmesh
 
-Installing means putting the `cmesh` binary on your PATH and registering the cmesh MCP into your coding agent. Run this from the **repo root** (the directory that contains `cmd/cmesh`). Do it on **every** machine that should take part in the mesh.
+Installing means putting the `cmesh` binary on your PATH and registering the cmesh MCP into your coding agent. Do it on **every** machine that should take part in the mesh.
 
-A hosted one-line installer (`curl -fsSL https://get.cmesh.dev | sh`) is planned but **not yet live**; build from source for now.
+The installer detects your OS and architecture, then downloads the matching GitHub release asset:
+
+- `darwin/amd64` -> `cmesh_darwin_amd64.tar.gz`
+- `darwin/arm64` -> `cmesh_darwin_arm64.tar.gz`
+- `linux/amd64` -> `cmesh_linux_amd64.tar.gz`
+- `linux/arm64` -> `cmesh_linux_arm64.tar.gz`
+- `windows/amd64` -> `cmesh_windows_amd64.tar.gz`
+- `windows/arm64` -> `cmesh_windows_arm64.tar.gz`
 
 ### macOS
 
-From the repo root:
-
 ```bash
-go build -o cmesh ./cmd/cmesh
-./cmesh install
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | sh
 ```
 
-`./cmesh install` puts the binary on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+The installer puts `cmesh` on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+
+To install a specific release instead of the newest published release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.1 sh
+```
 
 ### Linux
 
-From the repo root:
-
 ```bash
-go build -o cmesh ./cmd/cmesh
-./cmesh install
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | sh
 ```
 
-`./cmesh install` puts the binary on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+The installer puts `cmesh` on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
+
+To install a specific release instead of the newest published release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.1 sh
+```
 
 ### Windows
 
-From the repo root, run the PowerShell installer:
-
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.ps1 | iex"
 ```
 
-`-ExecutionPolicy Bypass` lets an unsigned local script run on a stock box; drop it if your policy already allows local scripts. The installer builds `cmesh.exe` from source (so you need Go), puts it on your user PATH, prints the installed version, and then launches the same agent picker described above. Choose where to register cmesh, confirm with **Y**, and it upserts the stdio MCP entry that launches `cmesh mcp --stdio`. Run the installer from the repo root — if it cannot find `cmd/cmesh` it stops and tells you so.
+`-ExecutionPolicy Bypass` lets an unsigned downloaded script run on a stock box; drop it if your policy already allows it. The installer downloads the matching `cmesh_windows_<arch>.tar.gz` release, puts `cmesh.exe` on your user PATH, prints the installed version, and then launches the same agent picker described above. Choose where to register cmesh, confirm with **Y**, and it upserts the stdio MCP entry that launches `cmesh mcp --stdio`.
+
+To install a specific release instead of the newest published release:
+
+```powershell
+$env:CMESH_VERSION = "v0.1.0-prealpha.1"; powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.ps1 | iex"
+```
 
 If you added cmesh to PATH for the first time, **open a new terminal** so the PATH change takes effect before running `cmesh` by name.
 
@@ -73,6 +90,21 @@ cmesh setup
 ```
 
 `cmesh setup` is an alias for the picker `cmesh install` shows; it does not reinstall the binary.
+
+### Building from source
+
+If you are working from a checkout and want to build locally instead of using a release archive, run this from the repo root:
+
+```bash
+go build -o cmesh ./cmd/cmesh
+./cmesh install
+```
+
+On Windows from a checkout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
 
 ## 2. Talk to the wizard
 

@@ -36,11 +36,10 @@ Two things you do by hand. Everything else, you do by talking to your agent.
 **1. Install the binary and register the MCP** (do this on each machine):
 
 ```bash
-go build -o cmesh ./cmd/cmesh
-./cmesh install
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | sh
 ```
 
-On Windows, run the PowerShell installer instead — see [docs/quickstart.md](docs/quickstart.md). `cmesh install` puts the binary on PATH and registers a stdio MCP entry in the agents it detects.
+On Windows, run the PowerShell one-liner instead — see [docs/quickstart.md](docs/quickstart.md). The installer detects your OS and CPU architecture, downloads the matching release archive, puts `cmesh` on PATH, and registers a stdio MCP entry in the agents it detects.
 
 **2. Open a new agent session and say:**
 

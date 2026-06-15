@@ -3,6 +3,7 @@ set -eu
 
 # --no-agent-setup: install the binary only; do not auto-launch the agent picker.
 no_agent_setup=0
+CMESH_REPO=${CMESH_REPO:-somoore/cmesh}
 for _arg in "$@"; do
   case "$_arg" in
     --no-agent-setup) no_agent_setup=1 ;;
@@ -108,14 +109,30 @@ download() {
 # .../download//cmesh_... URL. The caller checks the exit status instead.
 latest_version() {
   repo=$1
-  need_cmd sed
-  url="https://api.github.com/repos/$repo/releases/latest"
+  need_cmd awk
   tmp="${TMPDIR:-/tmp}/cmesh-latest.$$"
+
+  # GitHub's /releases/latest intentionally excludes pre-releases. Try it first
+  # for stable releases, then fall back to the newest published release so
+  # pre-alpha users can still install with CMESH_VERSION=latest.
+  url="https://api.github.com/repos/$repo/releases/latest"
   if ! download "$url" "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    return 1
+    url="https://api.github.com/repos/$repo/releases"
+    if ! download "$url" "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      return 1
+    fi
   fi
-  version=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp" | head -n 1)
+
+  version=$(awk '
+    match($0, /"tag_name"[[:space:]]*:[[:space:]]*"[^"]+"/) {
+      value = substr($0, RSTART, RLENGTH)
+      sub(/.*"tag_name"[[:space:]]*:[[:space:]]*"/, "", value)
+      sub(/".*/, "", value)
+      print value
+      exit
+    }
+  ' "$tmp")
   rm -f "$tmp"
   [ -n "$version" ] || return 1
   printf '%s' "$version"
@@ -123,20 +140,12 @@ latest_version() {
 
 # install_from_release downloads a prebuilt cmesh binary from a GitHub release.
 #
-# Release URL pattern (PLACEHOLDER until the public repo/CDN is published):
+# Release URL pattern:
 #   https://github.com/<owner>/<repo>/releases/download/<version>/cmesh_<os>_<arch>.tar.gz
 # Override the source with:
-#   CMESH_REPO=owner/repo      # e.g. cmesh/cmesh (default below is a placeholder)
+#   CMESH_REPO=owner/repo      # default: somoore/cmesh
 #   CMESH_VERSION=v1.2.3        # or "latest" (default)
-# When get.cmesh.dev is live this script ships with CMESH_REPO baked in.
 install_from_release() {
-  # No public release repo is published yet. Skip this source entirely unless the
-  # caller explicitly points at one (CMESH_REPO), rather than emitting confusing
-  # 404s against the placeholder. When get.cmesh.dev is live this default is
-  # replaced with the real owner/repo and this guard is removed.
-  if [ -z "${CMESH_REPO:-}" ]; then
-    return 1
-  fi
   need_cmd tar
   os=$(detect_os)
   arch=$(detect_arch)
@@ -246,6 +255,14 @@ elif [ -t 0 ] && [ -t 1 ]; then
   # Run via the resolved install path so it works before the new PATH entry is
   # active in this shell. cmesh install prints the next-steps banner itself.
   "$install_path" install
+elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  info ""
+  info "Launching the cmesh agent picker..."
+  info ""
+  # `curl ... | sh` makes stdin the script body, but the user's terminal is still
+  # available at /dev/tty in normal shells. Reattach the picker there so the
+  # one-liner can complete the MCP registration too.
+  "$install_path" install </dev/tty >/dev/tty
 else
   # Non-interactive (piped) install: we can't drive the picker, so tell the user
   # the complete remaining path, not just "run cmesh install".

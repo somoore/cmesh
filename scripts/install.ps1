@@ -11,7 +11,7 @@
     Install sources are tried in this order:
       1. $env:CMESH_BIN   - path to a prebuilt cmesh.exe to install
       2. source checkout  - builds from ./cmd/cmesh with `go build` (needs Go)
-      3. GitHub release    - downloads a published release (needs $env:CMESH_REPO)
+      3. GitHub release    - downloads a published release from somoore/cmesh
 
 .PARAMETER NoAgentSetup
     Install the binary only; do not auto-launch the agent picker.
@@ -20,7 +20,7 @@
 .ENVIRONMENT
     CMESH_INSTALL_DIR  Override the install directory (default: ~\.local\bin).
     CMESH_BIN          Path to a prebuilt cmesh.exe to install.
-    CMESH_REPO         owner/repo to download a published release from.
+    CMESH_REPO         owner/repo to download a published release from (default: somoore/cmesh).
     CMESH_VERSION      Release tag to download, or "latest" (default).
 
 .EXAMPLE
@@ -37,6 +37,10 @@ param(
 # Match `set -eu`: stop on the first error and treat unset-then-used as errors.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+if (-not $env:CMESH_REPO) {
+    $env:CMESH_REPO = 'somoore/cmesh'
+}
 
 function Die {
     param([Parameter(Mandatory)][string]$Message)
@@ -134,18 +138,25 @@ function Get-LatestVersion {
     $url = "https://api.github.com/repos/$Repo/releases/latest"
     try {
         $resp = Invoke-RestMethod -Uri $url -Headers @{ 'User-Agent' = 'cmesh-install' } -ErrorAction Stop
+        if ($resp -and $resp.tag_name) { return [string]$resp.tag_name }
+    } catch {
+        # GitHub's /releases/latest excludes pre-releases. Fall through to the
+        # release list so pre-alpha users can still install with "latest".
+    }
+    try {
+        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases" -Headers @{ 'User-Agent' = 'cmesh-install' } -ErrorAction Stop
     } catch {
         return $null
     }
-    if ($resp -and $resp.tag_name) { return [string]$resp.tag_name }
+    foreach ($release in @($releases)) {
+        if ($release -and $release.tag_name) { return [string]$release.tag_name }
+    }
     return $null
 }
 
 # Downloads a prebuilt cmesh from a GitHub release. Release asset naming matches
-# install.sh: cmesh_windows_<arch>.tar.gz. Skipped unless $env:CMESH_REPO is set,
-# since no public release repo is published yet (avoids confusing 404s).
+# install.sh: cmesh_windows_<arch>.tar.gz.
 function Install-FromRelease {
-    if (-not $env:CMESH_REPO) { return $false }
     Need-Cmd tar
     $arch = Get-Arch
     $version = $env:CMESH_VERSION
