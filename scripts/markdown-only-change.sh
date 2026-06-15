@@ -20,25 +20,29 @@ case "$base_sha" in
     ;;
 esac
 
-changed_files=$(git diff --name-only "$base_sha" "$head_sha")
+git diff --name-status -z -M -C "$base_sha" "$head_sha" | perl -0 -e '
+  local $/;
+  my @fields = split /\0/, <STDIN>;
+  pop @fields if @fields && $fields[-1] eq "";
 
-if [ -z "$changed_files" ]; then
-  echo false
-  exit 0
-fi
+  my $any = 0;
+  while (@fields) {
+    my $status = shift @fields;
+    $any = 1;
 
-tmp_changed=$(mktemp)
-trap 'rm -f "$tmp_changed"' EXIT
-printf '%s\n' "$changed_files" > "$tmp_changed"
+    my @paths;
+    if ($status =~ /^[RC]/) {
+      print "false\n" and exit 0 if @fields < 2;
+      push @paths, shift @fields, shift @fields;
+    } else {
+      print "false\n" and exit 0 if @fields < 1;
+      push @paths, shift @fields;
+    }
 
-while IFS= read -r path; do
-  case "$path" in
-    *.md) ;;
-    *)
-      echo false
-      exit 0
-      ;;
-  esac
-done < "$tmp_changed"
+    for my $path (@paths) {
+      print "false\n" and exit 0 if $path !~ /\.md\z/;
+    }
+  }
 
-echo true
+  print $any ? "true\n" : "false\n";
+'
