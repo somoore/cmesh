@@ -95,17 +95,21 @@ The mesh server refuses wildcard bind addresses.
 - `allowed_peers`: node ids or names allowed to delegate to this worker.
 - `allowed_cwds`: cwd globs evaluated after home expansion and realpath normalization.
 - `hop_limit`: maximum delegation hop count.
+- `profile_ceilings`: optional map from a **requested** profile name to a **ceiling** profile name. When a peer requests the keyed profile, the worker silently remaps the effective profile down to the ceiling (e.g. `profile_ceilings = { system-change = "repo-dev" }` caps any `system-change` request to `repo-dev`). The ceiling profile must itself be configured.
 
 `[policy.outbound]` is enforced by the origin daemon before dispatch:
 
 ```toml
 [policy.outbound]
 allowed_peers = ["homelab-vm"]
+denied_peers = ["snapshot-vm"]
 denied_profiles = ["network", "interactive", "git_push"]
 allow_subdelegation = false
 ```
 
-`denied_profiles` is an origin-side brake. Generated configs keep high-risk profiles in this list, even if those profiles are defined locally, so they cannot be requested accidentally. Remove a profile from this list only on an origin machine that is intentionally allowed to request it.
+- `allowed_peers` / `denied_peers`: origin-side allowlist and denylist of peers this machine may dispatch to. A peer matched by `denied_peers` is rejected with `peer_unauthorized`; a non-empty `allowed_peers` rejects any peer not on it.
+- `denied_profiles`: an origin-side brake. Generated configs keep high-risk profiles in this list, even if those profiles are defined locally, so they cannot be requested accidentally. Remove a profile from this list only on an origin machine that is intentionally allowed to request it.
+- `allow_subdelegation`: whether a worker on this machine may delegate onward to another peer.
 
 ## Profiles
 
@@ -141,6 +145,26 @@ max_runtime = "30m"
 ```
 
 Profile-level `allowed_peers` is checked in addition to `[policy].allowed_peers` and `[policy.outbound].allowed_peers`. Use it for interactive or network-capable profiles so a generally trusted peer cannot automatically use a more powerful profile. `require_explicit = true` prevents a high-risk profile from being selected through an empty profile request, even if someone accidentally makes it the runner default.
+
+### Shell policy
+
+Allowlisted-shell profiles (the `shell` runner, e.g. `query-shell`) constrain
+which commands may run via `[profiles.X.shell_policy]`:
+
+```toml
+[profiles.query-shell.shell_policy]
+mode = "allowlist"
+denied_patterns = [">", ">>", "|", "&&", "||", ";", "`", "$(", " rm "]
+
+[profiles.query-shell.shell_policy.allowed_commands]
+darwin = ["df", "uname", "sysctl", "ps", "log"]
+linux = ["df", "uname", "systemctl", "ps", "journalctl"]
+windows = ["Get-Service", "Get-Process", "Get-EventLog", "Get-PSDrive"]
+```
+
+- `mode = "allowlist"` runs only the listed commands.
+- `allowed_commands` is keyed by OS (`darwin`, `linux`, `windows`); an empty key applies to all.
+- `denied_patterns` rejects shell metacharacters and dangerous tokens even inside an allowlisted command.
 
 ## Runners
 

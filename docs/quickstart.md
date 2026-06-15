@@ -8,20 +8,17 @@ The only thing you install by hand is the cmesh binary and the MCP registration.
 
 ## 1. Install cmesh
 
-Install the binary and register the cmesh MCP into your coding agent. Either path works.
+Install the binary and register the cmesh MCP into your coding agent.
 
-One-line installer:
-
-```bash
-curl -fsSL https://get.cmesh.dev | sh
-```
-
-Or build from this repo and run the installer:
+Build from this repo and run the installer:
 
 ```bash
 go build -o cmesh ./cmd/cmesh
 ./cmesh install
 ```
+
+A hosted one-line installer (`curl -fsSL https://get.cmesh.dev | sh`) is planned
+but not yet live; build from source for now.
 
 On Windows, run the PowerShell installer from the repo root. It mirrors the shell
 installer — builds from source (or installs a prebuilt binary), puts `cmesh.exe`

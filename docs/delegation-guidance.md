@@ -95,7 +95,7 @@ A good worker prompt includes:
 Example:
 
 ```text
-In cwd ~/projects/cmesh, run the Linux test suite and fix Linux-only failures if they are small and directly related. Use the dev profile. Do not change public APIs unless a test failure requires it. Commit local changes on a cmesh branch. Return diffstat, changed files, tests run, and any verification commands the origin should rerun.
+In cwd ~/projects/cmesh, run the Linux test suite and fix Linux-only failures if they are small and directly related. Use the repo-dev profile. Do not change public APIs unless a test failure requires it. Commit local changes on a cmesh branch. Return diffstat, changed files, tests run, and any verification commands the origin should rerun.
 ```
 
 ## Task Catalog
