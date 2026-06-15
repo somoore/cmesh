@@ -2543,11 +2543,29 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 					ccfg.PermissionMode = "plan"
 					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Edit", "MultiEdit", "Write", "NotebookEdit")
 				} else {
-					ccfg.PermissionMode = "acceptEdits"
+					// Write-permitting profiles (e.g. repo_only) run headless via
+					// `claude -p`. The default permission mode falls back to
+					// interactive approval that no one can grant, so every edit is
+					// denied. We pre-approve the edit tools with cwd-relative path
+					// rules ("Write(**)" etc.) rather than a blanket allow or
+					// acceptEdits: the "(**)" pattern is rooted at the task cwd, so
+					// in-cwd edits run noninteractively while edits outside the cwd
+					// (e.g. /tmp) still fall through to the default deny. This keeps
+					// scope narrow to the allowed cwd instead of granting filesystem-
+					// wide edit access.
+					ccfg.AllowedTools = appendUnique(ccfg.AllowedTools,
+						"Edit(**)", "MultiEdit(**)", "Write(**)", "NotebookEdit(**)")
 				}
 				if pcfg.Shell == profiledefs.ShellDeny {
 					ccfg.DisallowedTools = appendUnique(ccfg.DisallowedTools, "Bash", "PowerShell")
 				} else if pcfg.Shell == profiledefs.ShellAllow {
+					// Shell-permitting profiles need Bash/PowerShell pre-approved or
+					// they stay interactive-gated and are denied headless. Shell
+					// permission rules match command prefixes, not paths, so a
+					// pre-approved shell is bounded by the OS account rather than the
+					// cwd (already noted in repo-dev's known_gaps). Hard path-
+					// confinement of shell writes would require OS-level sandboxing,
+					// not a runner flag.
 					ccfg.AllowedTools = appendUnique(ccfg.AllowedTools, "Bash", "PowerShell")
 				}
 				profiles[pname] = ccfg

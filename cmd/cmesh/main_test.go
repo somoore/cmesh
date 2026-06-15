@@ -140,7 +140,7 @@ func TestClaudeProfileForDenyWriteDisallowsWriteAndShellTools(t *testing.T) {
 	}
 }
 
-func TestClaudeProfileForRepoDevAllowsNoninteractiveRepoEditsAndShell(t *testing.T) {
+func TestClaudeProfileForRepoDevScopesEditsToCwdAndAllowsShell(t *testing.T) {
 	cfg := &config.Config{
 		Profiles: map[string]config.ProfileConfig{
 			profiledefs.RepoDev: {
@@ -166,12 +166,16 @@ func TestClaudeProfileForRepoDevAllowsNoninteractiveRepoEditsAndShell(t *testing
 		t.Fatal("claude-code runner not registered")
 	}
 	flags := strings.Join(run.Manifest().Profiles[profiledefs.RepoDev].NativeFlags, " ")
-	for _, want := range []string{"--permission-mode acceptEdits", "--allowedTools", "Bash", "PowerShell"} {
+	for _, want := range []string{"--allowedTools", "Bash", "PowerShell", "Write(**)", "Edit(**)", "MultiEdit(**)", "NotebookEdit(**)"} {
 		if !strings.Contains(flags, want) {
 			t.Fatalf("native flags %q missing %q", flags, want)
 		}
 	}
-	for _, unwanted := range []string{"--disallowedTools", "Write", "--permission-mode plan"} {
+	// Edits must be cwd-scoped, not a filesystem-wide blanket allow or acceptEdits.
+	if strings.Contains(flags, "acceptEdits") {
+		t.Fatalf("native flags %q must not use acceptEdits (it bypasses cwd scope)", flags)
+	}
+	for _, unwanted := range []string{"--disallowedTools", "--permission-mode plan"} {
 		if strings.Contains(flags, unwanted) {
 			t.Fatalf("native flags %q unexpectedly contain %q", flags, unwanted)
 		}
