@@ -139,11 +139,11 @@ func installClaude(agent Agent, cmeshPath string) Result {
 	if err != nil {
 		return Result{Agent: agent, Detail: err.Error()}
 	}
-	// A stale local/project HTTP gateway entry overrides the user-scoped stdio
-	// setup server inside that project and shows up in Claude as reconnecting
-	// when no daemon is running yet. Sweep every known Claude scope in the
-	// current project before adding the user-scoped setup server.
-	for _, scope := range claudeScopes {
+	// A stale local HTTP gateway entry overrides the user-scoped stdio setup
+	// server inside that project and shows up in Claude as reconnecting when no
+	// daemon is running yet. Sweep only user/local entries here: project scope is
+	// a shared .mcp.json file and must not be modified by this per-user installer.
+	for _, scope := range claudeInstallCleanupScopes {
 		_ = exec.Command(claude, "mcp", "remove", "--scope", scope, ServerName).Run()
 	}
 	cmd := exec.Command(claude, "mcp", "add", "--scope", "user", ServerName, "--", cmeshPath, "mcp", "--stdio")
@@ -155,7 +155,27 @@ func installClaude(agent Agent, cmeshPath string) Result {
 		}
 		return Result{Agent: agent, Detail: detail}
 	}
+	if !claudeResolvesToSetupStdio(claude, cmeshPath) {
+		return Result{Agent: agent, Detail: "Claude Code still resolves cmesh to a different MCP entry after install; remove or rename any project-scoped cmesh entry and retry"}
+	}
 	return Result{Agent: agent, OK: true, Detail: "registered with Claude Code"}
+}
+
+// claudeInstallCleanupScopes are private scopes the per-user installer may
+// replace automatically. Do not include "project": that is VCS-shared .mcp.json.
+var claudeInstallCleanupScopes = []string{"user", "local"}
+
+func claudeResolvesToSetupStdio(claude, cmeshPath string) bool {
+	out, err := exec.Command(claude, "mcp", "get", ServerName).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	body := string(out)
+	return strings.Contains(body, cmeshPath) &&
+		strings.Contains(body, "mcp") &&
+		strings.Contains(body, "--stdio") &&
+		!strings.Contains(strings.ToLower(body), "http://") &&
+		!strings.Contains(strings.ToLower(body), "https://")
 }
 
 func installCodex(agent Agent, cmeshPath string) Result {
