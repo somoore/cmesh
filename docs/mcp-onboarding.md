@@ -1,5 +1,7 @@
 # MCP onboarding tools
 
+> Experimental: these tools drive setup of an early agent delegation mesh for trusted private networks. They write config and start a real daemon only after explicit confirmation; treat every worker profile they expose as real authority on that machine.
+
 cmesh setup happens by talking to your AI coding agent, which calls cmesh MCP tools
 on your behalf. You normally never invoke these directly — you say "help me setup
 cmesh" and the wizard drives them. This page is the reference for what those tools
@@ -105,3 +107,9 @@ your agent to call a specific one — for example, "call cmesh `onboarding_statu
 show me the result", or "call `repair_peers` without confirming and show the diff".
 State-changing tools refuse to act until you pass `confirmed=true`, so a read-only
 probe is always safe.
+
+## See also
+
+- [Quickstart](quickstart.md) — the narrative setup walkthrough these tools drive.
+- [Configuration](configuration.md) — the config file `configure_node` writes and `repair_peers` reconciles.
+- [Architecture](architecture.md) — why setup is split across a stdio setup MCP and the loopback gateway.
