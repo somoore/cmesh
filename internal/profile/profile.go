@@ -30,10 +30,14 @@ const (
 
 	CapDiskInfo            = "disk_info"
 	CapSystemInfo          = "system_info"
+	CapMemoryInfo          = "memory_info"
+	CapUptime              = "uptime"
 	CapRepoStatus          = "repo_status"
 	CapServiceStatus       = "service_status"
 	CapProcessList         = "process_list"
 	CapLogTail             = "log_tail"
+	CapLogTailBounded      = "log_tail_bounded"
+	CapPortCheck           = "port_check"
 	CapNetworkCheck        = "network_check"
 	CapShellReadonly       = "shell_readonly"
 	CapReadFiles           = "read_files"
@@ -46,6 +50,10 @@ const (
 	CapDesktopControl      = "desktop_control"
 	CapDesktopInteraction  = "desktop_interaction"
 	CapSystemChange        = "system_change"
+
+	RiskLow    = "low"
+	RiskMedium = "medium"
+	RiskHigh   = "high"
 )
 
 type Template struct {
@@ -61,6 +69,7 @@ type Template struct {
 	GitPush               bool
 	RequireExplicit       bool
 	RequireLease          bool
+	Risk                  string
 	MaxRuntime            string
 	MaxOutputBytes        int64
 	AuditLevel            string
@@ -82,9 +91,10 @@ func Builtins() []Template {
 			Description:           "Deterministic read-only machine queries. No shell, no writes, no arbitrary agent.",
 			Runner:                RunnerProbe,
 			Intents:               []string{"query"},
-			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapRepoStatus},
+			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapMemoryInfo, CapUptime, CapRepoStatus, CapProcessList},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
+			Risk:                  RiskLow,
 			MaxRuntime:            "30s",
 			MaxOutputBytes:        65536,
 			AuditLevel:            "normal",
@@ -95,11 +105,12 @@ func Builtins() []Template {
 			Description:           "Deterministic read-only queries plus bounded network checks.",
 			Runner:                RunnerProbe,
 			Intents:               []string{"query"},
-			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapRepoStatus, CapNetworkCheck},
+			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapMemoryInfo, CapUptime, CapRepoStatus, CapProcessList, CapNetworkCheck, CapPortCheck},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
 			Network:               true,
 			RequireExplicit:       true,
+			Risk:                  RiskMedium,
 			MaxRuntime:            "30s",
 			MaxOutputBytes:        65536,
 			AuditLevel:            "loud",
@@ -110,10 +121,11 @@ func Builtins() []Template {
 			Description:           "Allowlisted read-oriented diagnostics. No writes.",
 			Runner:                "shell",
 			Intents:               []string{"query"},
-			Capabilities:          []string{CapShellReadonly, CapServiceStatus, CapProcessList, CapLogTail},
+			Capabilities:          []string{CapShellReadonly, CapServiceStatus, CapProcessList, CapLogTailBounded, CapLogTail},
 			Writes:                WritesDeny,
 			Shell:                 ShellAllowlisted,
 			RequireExplicit:       true,
+			Risk:                  RiskMedium,
 			MaxRuntime:            "30s",
 			MaxOutputBytes:        65536,
 			AuditLevel:            "loud",
@@ -136,6 +148,7 @@ func Builtins() []Template {
 			Capabilities:          []string{CapReadFiles},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
+			Risk:                  RiskMedium,
 			MaxRuntime:            "30m",
 			MaxOutputBytes:        1 << 20,
 			AuditLevel:            "normal",
@@ -152,6 +165,7 @@ func Builtins() []Template {
 			Shell:                 ShellAllow,
 			RequireExplicit:       true,
 			RequireLease:          true,
+			Risk:                  RiskHigh,
 			MaxRuntime:            "2h",
 			MaxOutputBytes:        1 << 20,
 			AuditLevel:            "loud",
@@ -169,6 +183,7 @@ func Builtins() []Template {
 			Network:               true,
 			RequireExplicit:       true,
 			RequireLease:          true,
+			Risk:                  RiskHigh,
 			MaxRuntime:            "30m",
 			MaxOutputBytes:        1 << 20,
 			AuditLevel:            "loud",
@@ -186,6 +201,7 @@ func Builtins() []Template {
 			Network:               true,
 			RequireExplicit:       true,
 			RequireLease:          true,
+			Risk:                  RiskHigh,
 			MaxRuntime:            "30m",
 			MaxOutputBytes:        1 << 20,
 			AuditLevel:            "loud",
@@ -209,10 +225,14 @@ func KnownCapabilities() map[string]struct{} {
 	values := []string{
 		CapDiskInfo,
 		CapSystemInfo,
+		CapMemoryInfo,
+		CapUptime,
 		CapRepoStatus,
 		CapServiceStatus,
 		CapProcessList,
 		CapLogTail,
+		CapLogTailBounded,
+		CapPortCheck,
 		CapNetworkCheck,
 		CapShellReadonly,
 		CapReadFiles,
@@ -254,6 +274,35 @@ func NormalizeCapabilities(capabilities, claims []string) []string {
 	return out
 }
 
+func RiskForProfile(name string) string {
+	switch CanonicalProfile(name) {
+	case Query:
+		return RiskLow
+	case QueryNetwork, QueryShell, ReadonlyAgent:
+		return RiskMedium
+	case RepoDev, DesktopControl, SystemChange:
+		return RiskHigh
+	default:
+		return ""
+	}
+}
+
+func RiskForConfig(name string, capabilities []string, writes, shell string, network bool) string {
+	if risk := RiskForProfile(name); risk != "" {
+		return risk
+	}
+	if writes == WritesAllow || contains(capabilities, CapDesktopControl) || contains(capabilities, CapSystemChange) || contains(capabilities, CapLaunchProcesses) {
+		return RiskHigh
+	}
+	if writes == WritesRepoOnly || shell == ShellAllow || contains(capabilities, CapEditRepo) || contains(capabilities, CapExecuteInRepo) {
+		return RiskHigh
+	}
+	if network || shell == ShellAllowlisted || contains(capabilities, CapNetworkCheck) || contains(capabilities, CapPortCheck) || contains(capabilities, CapShellReadonly) || contains(capabilities, CapReadFiles) {
+		return RiskMedium
+	}
+	return RiskLow
+}
+
 func ValidateSemantics(name, runner string, capabilities []string, writes, shell string, network, gitPush, requireExplicit bool, confidence string) error {
 	known := KnownCapabilities()
 	for _, capability := range capabilities {
@@ -287,7 +336,7 @@ func ValidateSemantics(name, runner string, capabilities []string, writes, shell
 		return fmt.Errorf("profiles.%s cannot combine shell=deny with shell_readonly", name)
 	}
 	if runner == RunnerProbe {
-		for _, denied := range []string{CapShellReadonly, CapReadFiles, CapEditRepo, CapExecuteInRepo, CapExecuteRepoCommands, CapGitPush, CapDesktopControl, CapDesktopInteraction, CapSystemChange} {
+		for _, denied := range []string{CapServiceStatus, CapLogTail, CapLogTailBounded, CapShellReadonly, CapReadFiles, CapEditRepo, CapExecuteInRepo, CapExecuteRepoCommands, CapGitPush, CapDesktopControl, CapDesktopInteraction, CapSystemChange} {
 			if contains(capabilities, denied) {
 				return fmt.Errorf("profiles.%s uses probe runner but grants %s", name, denied)
 			}

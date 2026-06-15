@@ -1,417 +1,573 @@
-This is a big, real improvement. You did not just add profile names; you added the beginning of a real permission system:
+# cmesh Recommendations — Profile / Permission Hardening
+## Summary
+The current codebase has moved in the right direction. `query` is now a real first-class profile backed by `ProbeRunner`, not just a prompt instruction. That is the correct security foundation.
+The remaining work should focus on preventing accidental elevation, tightening lease authorization, improving visibility into active authority, and expanding deterministic probes so users do not need to escalate to shell/agent profiles as often.
+Do **not** add heavy enterprise policy machinery yet. The right model is:
+> Safe by default, explicit elevation, TTL-based convenience, everything audited.
+---
+## Current Good State
+The following pieces are already in place and should be preserved:
+- `query` profile exists and is backed by `ProbeRunner`.
+- `query` denies shell and writes.
+- `query_peer` exists as a first-class MCP tool.
+- `query_peer` no longer falls back to `inspect_peer`.
+- `query_peer` creates fresh tasks by default.
+- Active profile context exists.
+- `readonly-agent` is shell-deny by default.
+- `repo-dev`, `desktop-control`, and `system-change` are treated as elevated profiles.
+- Worker-issued leases exist.
+- Profile templates exist:
+  - `query`
+  - `query-network`
+  - `query-shell`
+  - `readonly-agent`
+  - `repo-dev`
+  - `desktop-control`
+  - `system-change`
+- MCP onboarding can now guide users through profile setup.
+---
+# P0 Recommendations
+## 1. Scope Lease List/Revoke Authorization
+### Problem
+The worker now has real profile leases, which is good. However, lease listing and revocation need strict ownership checks.
+A remote peer should not be able to list or revoke leases issued to other peers.
+### Required Behavior
+Remote peers:
+- can list only leases issued to themselves;
+- can revoke only leases issued to themselves;
+- cannot see other peers’ leases;
+- cannot revoke other peers’ leases.
+Local operator/admin:
+- can list all leases;
+- can revoke any lease.
+Every list/revoke action should be audited.
+### Suggested API Shape
+```go
+ListForPeer(identity)
+RevokeForPeer(identity, leaseID)
+ListAllForLocalOperator()
+RevokeAnyForLocalOperator(leaseID)
+
+Acceptance Tests
+
+peer A cannot list peer B's leases
+peer A cannot revoke peer B's lease
+peer A can list its own leases
+peer A can revoke its own lease
+local operator can list all leases
+local operator can revoke any lease
+lease revoke audit includes caller identity
+
+⸻
+
+2. Do Not Auto-Route Into Explicit or Lease-Required Profiles
+
+Problem
+
+query_peer can resolve an active profile and then route to another typed profile if the requested capability is not available in the active one.
+
+That is useful, but dangerous if the destination profile has:
+
+RequireExplicit = true
+RequireLease = true
+
+Example:
+
+active profile: query
+requested query: network_check
+available profile: query-network
+
+If query-network requires explicit activation, cmesh should not silently switch into it.
+
+Required Behavior
+
+Auto-routing is allowed only when the candidate profile:
+
+* does not require explicit activation;
+* does not require a lease;
+* is same-risk or lower-risk than the active profile.
+
+For now, the simplest safe rule is:
+
+Never auto-route into RequireExplicit or RequireLease profiles.
+
+Better User Experience
+
+Instead of silent escalation, return:
+
+network_check requires profile query-network.
+Enable it temporarily with:
+  cmesh profile use win11-desktop query-network --ttl 15m
+Nothing was executed.
 
-* internal/profile with built-in templates and semantic validation.
-* query, query-network, query-shell, readonly-agent, repo-dev, desktop-control, system-change.
-* ProbeRunner for deterministic query tasks.
-* ShellRunner for allowlisted diagnostics.
-* query_peer, inspect_peer, profile_guide, profile_recommend, profile_generate, profile_validate, profile_configure, profile_use, profile_current, profile_reset.
-* Active profile context in profile-context.json.
-* Query-first onboarding language in setup MCP.
-* Generated configs defaulting toward query.
-* Claude/Codex runner config now partially reflects profile constraints.
-* Smoke test handles query via system_info probe.
+Acceptance Tests
 
-That is the correct direction. The project is moving from “remote prompt runner” toward policy-shaped endpoint tasking, which is exactly where it needs to go.
+active query + disk_info => allowed
+active query + network_check + query-network RequireExplicit => denied with guidance
+active query-network + network_check => allowed
+active query + service_status + query-shell RequireExplicit => denied with guidance
+active query-shell + service_status => allowed
+active query + repo edit => denied with repo-dev guidance
 
-I still could not run tests because go.mod requires go 1.26.4, and the sandbox cannot download the toolchain or dependencies. So this is a static review.
+⸻
 
-My overall verdict
+3. Make Active Authority Highly Visible
 
-You are very close to having the right foundation, but I would not claim “query/read-only is enforced” publicly yet. I would say:
+Problem
 
-query via ProbeRunner is moving toward hard enforcement.
-query-shell and readonly-agent are still softer and need clearer boundaries.
+Users should not have to specify the profile in every prompt. However, they need to know what authority is currently active.
 
-The biggest win is that query now has a real non-agent execution path. That is exactly what we wanted.
+The goal is not constant confirmation. The goal is ambient visibility.
 
-The biggest remaining issue is that “lease” is currently more of a local active context marker than a worker-verified authorization object.
+Recommended CLI Output
 
-What I really like
+cmesh profile current:
 
-1. query is no longer model-obedience based
+Default profile: query
+Peer             Active profile      Scope          Expires     Risk
+win11-desktop    query               default        -           low
+homelab          repo-dev            worker_lease   24m         high
+macbook          query-shell         session        8m          medium
 
-This is the most important improvement.
+cmesh status should include the same profile summary.
 
-ProbeRunner does not call Claude/Codex. It handles typed queries like:
-
-* system_info
-* disk_info
-* repo_status
-* network_check
-
-That means query can eventually be described as:
-
-no agent shell, no writes, no arbitrary commands.
-
-That is the right safe default.
-
-2. Built-in profile catalog is the right abstraction
-
-The templates in internal/profile/profile.go are exactly the right product model. You now have named capability bundles instead of vague modes.
-
-This is the right taxonomy:
-
-query
-query-network
-query-shell
-readonly-agent
-repo-dev
-desktop-control
-system-change
-
-That gives users flexibility without collapsing everything into readonly/dev/yolo.
-
-3. MCP onboarding is becoming a guided safety wizard
-
-The setup prompt now tells the model to use profile_guide / profile_recommend, recommend least power first, and require acknowledgements for higher-risk profiles. That is good.
-
-This is exactly how you make the MCP setup flow valuable: the agent becomes the guided installer, not the policy authority.
-
-4. Active profile context is a good UX primitive
-
-profile_use, profile_current, and profile_reset are the right shape. The user should be able to say:
-
-cmesh profile use win11 query
-
-or:
-
-cmesh profile use win11 repo-dev --cwd ... --ttl 30m
-
-Then natural tasks inherit that context.
-
-That matches your desired UX.
-
-5. You added semantic validation
-
-ValidateSemantics now rejects obvious contradictions:
-
-* writes=deny + edit_repo
-* shell=deny + shell_readonly
-* probe + shell/edit/system capabilities
-* high-risk capabilities without explicit selection
-* high enforcement confidence on non-probe runners
-
-That is exactly the right direction.
-
-P0 issues I would fix next
-
-1. require_lease is not a real remote lease yet
-
-This is the biggest issue.
-
-Right now, profile_use writes a local active context with a generated lease_id. Then the origin sends profile_context_id. On the worker side, CheckInbound mostly checks:
-
-if profile.RequireLease && strings.TrimSpace(intent.ProfileContextID) == "" {
-    deny
-}
-
-That means a peer can satisfy require_lease by sending any non-empty profile_context_id.
-
-That is not a real lease. It is a string.
-
-For personal dogfooding, this is okay as a local UX marker. For actual security, it is not enough.
-
-You need one of these designs:
-
-Option A: worker-side lease store
-
-The worker owns leases.
-
-Flow:
-
-origin asks for repo-dev lease
-worker creates lease_id with peer/profile/cwd/ttl
-worker stores it locally
-origin includes lease_id in future tasks
-worker validates lease_id against store
-
-Lease must bind:
-
-* origin identity from whois;
-* profile;
-* cwd scope;
-* expiry;
-* optional capabilities;
-* maybe origin node ID / stable ID.
-
-Option B: signed lease token
-
-Worker issues a signed token. Origin stores it. Worker verifies signature and claims on every task.
-
-This avoids a DB lookup but adds key management.
-
-For now, I’d do worker-side lease store. Simpler and auditable.
-
-Until then, rename the current behavior mentally as:
-
-active profile context
-
-not:
-
-lease enforcement
-
-2. query_peer should not silently fall back to readonly-agent
-
-This path is risky:
-
-query_peer unsupported kind
-  → fallbackInspectForUnsupportedQuery
-  → inspect_peer
-  → readonly-agent
-
-That means a typed safe query can silently become an agent-backed read-only task if readonly-agent exists.
-
-I understand why you added it for UX, but for security posture I would change it.
-
-Better behavior:
-
-* query_peer only runs typed query capabilities.
-* If kind unsupported, return capability_denied or profile_denied.
-* Response may suggest: “Use inspect_peer with readonly-agent if you want open-ended inspection.”
-
-Do not auto-escalate from deterministic probe to agent runner.
-
-This matters because query_peer should mean:
-
-typed, bounded, enforced.
-
-Not:
-
-maybe typed, maybe an agent prompt.
-
-3. readonly-agent currently allows shell
-
-The built-in readonly-agent template has:
-
-Writes: deny
-Shell: allow
-Runner: agent-backed
-
-And readOnlyInspectionPrompt says “do not write/delete/change system state.”
-
-That is not strong read-only. It is prompt-constrained agent execution with shell available.
-
-I would split this:
-
-readonly-agent
-  shell = deny
-  capabilities = read_files / summarize_bounded_input
-readonly-agent-shell
-  shell = allowlisted or harness-limited
-  enforcement = medium-low / loud audit
-
-Or make readonly-agent default to shell denied and push shell diagnostics into query-shell.
-
-Right now, readonly-agent is likely to be misunderstood as “safe read-only,” when it is actually “agent read-only by instruction/harness controls.”
-
-4. Query idempotency will return stale results
-
-queryPeerCall creates a deterministic idempotency key when none is provided:
-
-query + peer + kind + cwd + profile + params
-
-That means asking “how much disk is free?” twice may replay the old task instead of running a fresh query.
-
-For query tasks, that is bad. Queries are about live state.
-
-Change this:
-
-* If caller provides idempotency_key, use it.
-* If no key, generate a fresh task ID/request.
-* For query_peer, do not default to deterministic replay.
-
-Idempotency protects retries. It should not become caching.
-
-5. query_peer ignores active profile context
-
-delegate resolves active profile context when profile is empty. query_peer currently defaults to query directly:
-
-profileName := firstNonEmpty(req.Profile, profiledefs.Query)
-
-That means if the user did:
-
-cmesh profile use win11 query-shell --ttl 30m
-
-then calls query_peer without a profile, it still starts at query and may route to query-shell only for known mapped capabilities.
-
-I’d make query_peer resolve active profile context too, but with guardrails:
-
-if explicit profile given:
-  use explicit profile
-else:
-  use active profile for peer
-else:
-  query
-
-Then if active profile does not grant the requested kind, return a clear error or recommend the right tool/profile.
-
-6. query-shell needs command-specific argument validation
-
-The shell runner is a good idea, but currently it mostly validates:
-
-* command name is allowlisted;
-* denied patterns are absent;
-* args are strings.
-
-That is not enough long term. An allowlisted command with arbitrary args can still do surprising things.
-
-Example risks:
-
-* journalctl can read lots of sensitive logs.
-* Get-EventLog can expose sensitive local event data.
-* powershell -Command Get-Service <args> argument behavior can still be weird.
-* allowlisting command name alone is not the same as allowlisting operation shape.
-
-The next version should have per-command validators:
-
-Get-Service:
-  allowed args: -Name, -DisplayName
-  denied args: anything invoking script blocks / output redirection
-journalctl:
-  allowed args: -u, -n, --since
-  max lines required
-log:
-  max duration / predicate constraints
-
-Keep query-shell medium confidence and loud audit until then.
-
-7. disk_info path/volume params need stricter validation
-
-disk_info accepts path or volume.
-
-That is useful, but for a query profile I’d validate:
-
-* no UNC paths on Windows unless network capability is present;
-* no remote/network mounts unless explicitly allowed;
-* no arbitrary sensitive path probing if you care about path existence leakage;
-* platform-specific volume syntax.
-
-For disk info, it is probably okay to ask about C: or /, but the runner should make that explicit.
-
-Suggested next implementation sequence
-
-Commit 1: Make query fresh by default
-
-Change query idempotency:
-
-query_peer without idempotency_key creates a fresh task
-
-Only deterministic if explicit key provided.
-
-Commit 2: Remove automatic fallback from query_peer to inspect_peer
-
-Make query_peer typed-only.
-
-Return a helpful error:
-
-kind "battery_status" is not a typed query capability under profile query.
-Use inspect_peer with readonly-agent, or configure a typed probe.
-
-Commit 3: Make active profile apply to query_peer
-
-Resolve active profile context in query_peer the same way as delegate.
-
-Commit 4: Make readonly-agent shell-deny by default
-
-Move shell-capable read diagnostics to query-shell.
-
-If you still want agent + shell, create readonly-agent-shell or make it custom/advanced.
-
-Commit 5: Implement real worker-side leases
-
-Add mesh RPC endpoints or local worker API:
-
-POST /v1/profile-leases
-DELETE /v1/profile-leases/{id}
-GET /v1/profile-leases
-
-Lease fields:
+MCP list_peers() Should Include
 
 {
-  "lease_id": "lease_...",
-  "origin_node_id": "...",
-  "origin_stable_id": "...",
-  "profile": "repo-dev",
-  "cwd": "C:\\Users\\scott\\code\\cmesh",
-  "capabilities": ["read_files", "edit_repo", "execute_in_repo"],
-  "expires_at": "..."
+  "peer": "win11-desktop",
+  "active_profile": "query",
+  "profile_source": "default",
+  "elevated": false,
+  "risk": "low"
 }
 
-Then CheckInbound validates the lease.
+For elevated profiles:
 
-Commit 6: Add parameter validators for probes/shell
+{
+  "peer": "homelab",
+  "active_profile": "repo-dev",
+  "profile_source": "worker_lease",
+  "elevated": true,
+  "expires_in_s": 1440,
+  "cwd_scope": "/home/scott/code/cmesh",
+  "risk": "high"
+}
 
-Especially:
+Acceptance Tests
 
-* disk path/volume;
-* network host/port;
-* shell command args;
-* log tail line limits.
+profile_current shows default query
+profile_current shows active profile per peer
+profile_current shows lease expiration
+profile_current marks elevated profiles
+list_peers exposes active profile metadata
+status shows current profile state
 
-Commit 7: Add profile enforcement tests
+⸻
 
-The key tests:
+4. Add Global Safe Reset
 
-query cannot run shell
-query cannot use readonly-agent fallback
-query cannot change wallpaper
-query cannot edit repo
-query-network required for network_check
-query-shell denies non-allowlisted command
-query-shell denies allowlisted command with unsafe args
-repo-dev requires real worker-side lease
-fake profile_context_id does not satisfy require_lease
+Problem
 
-One design note: query-shell should be optional, not part of the default happy path
+Users need a quick way to get back to a known-safe state.
 
-Default first-run should still be:
+This reduces anxiety around using elevated profiles.
 
-query only
+Recommended Command
 
-Then:
+cmesh profile reset --all
 
-query-network optional
-query-shell optional, advanced
-readonly-agent optional
-repo-dev explicit + TTL
-desktop/system scary
+Expected behavior:
 
-The more I think about it, the strongest OSS trust story is:
+All active profile contexts reset to query.
+Revoked 2 elevated worker leases.
 
-Fresh install gives deterministic query probes only. No shell. No writes. No agent execution.
+If some remote lease revocations fail:
 
-That is very defensible.
+All local active profile contexts reset to query.
+Warning: failed to revoke 1 remote lease. It expires in 7m.
 
-My updated read on the project
+Acceptance Tests
 
-This is no longer just a prototype. You are building the permission architecture now.
+reset --all resets all local active profiles to query
+reset --all revokes owned elevated leases where possible
+reset --all does not revoke leases owned by other peers
+reset --all reports failed remote revocation
+reset --all writes audit events
 
-The current branch is a strong step because it introduces the right concepts. The remaining work is making sure the concepts are not just labels:
+⸻
 
-* query must mean deterministic and fresh.
-* readonly-agent must not pretend to be hard read-only.
-* require_lease must be worker-verified.
-* query_peer must not silently escalate to an agent runner.
-* query-shell must validate operation shape, not just command name.
+P1 Recommendations
 
-Fix those, and you will have a genuinely credible safe default.
+5. Add More Deterministic Probes
 
-Bottom line
+Why
 
-This is a very good update. The architecture is now pointing the right way.
+The more useful query is, the less often users need to escalate to query-shell, readonly-agent, or repo-dev.
 
-My honest recommendation:
+This keeps cmesh useful while preserving the safe default.
 
-Freeze new features and harden the profile boundary.
+Recommended Next Probes
 
-Specifically, make query boringly safe and make every escape hatch explicit. Once that is true, your onboarding story becomes excellent:
+memory_info
+uptime
+service_status
+process_list
+port_check
+log_tail_bounded
 
-Install cmesh.
-Open Claude/Codex.
-Run setup wizard.
-Default profile: query.
-Ask peers live questions.
-No writes. No shell. No arbitrary agent.
-Everything audited.
+Suggested Capability Mapping
 
-That is the foundation people will trust.
+disk_info          query
+system_info        query
+memory_info        query
+uptime             query
+repo_status        query
+service_status     query or query-shell, depending on implementation
+process_list       query
+port_check         query-network
+network_check      query-network
+log_tail_bounded   query or query-shell, but tightly scoped
+
+Important Notes
+
+log_tail_bounded can leak secrets. It should require:
+
+* explicit path allowlist or service selector;
+* max lines;
+* max bytes;
+* no full-file reads by default;
+* audit level loud.
+
+Acceptance Tests
+
+memory_info returns structured output
+uptime returns structured output
+service_status returns structured output
+process_list is bounded
+port_check requires query-network
+log_tail_bounded enforces max lines
+log_tail_bounded enforces max bytes
+log_tail_bounded denies arbitrary paths
+all probes produce audit events
+
+⸻
+
+6. Add Structured Query Result Field
+
+Problem
+
+Probe output currently works, but long-term the result envelope should expose structured query results directly so agents do not have to parse stdout.
+
+Recommended Result Shape
+
+{
+  "status": "done",
+  "task_kind": "query",
+  "query_result": {
+    "kind": "disk_info",
+    "data": {
+      "volume": "C:",
+      "total_gb": 99.02,
+      "free_gb": 48.70,
+      "used_gb": 50.33,
+      "percent_free": 49.2
+    }
+  },
+  "worker_summary_untrusted": "C: has 48.70 GB free out of 99.02 GB.",
+  "verification_required": false
+}
+
+Acceptance Tests
+
+disk_info result includes query_result.kind
+disk_info result includes query_result.data
+query_result does not require parsing stdout
+task_result still includes bounded human summary
+query_result appears in MCP response
+query_result appears in audit/result record
+
+⸻
+
+7. Add Profile Risk Levels
+
+Why
+
+Risk levels make the UI and MCP guidance cleaner without requiring complex policy.
+
+Suggested Risk Levels
+
+low       query
+medium    query-network, query-shell, readonly-agent
+high      repo-dev, desktop-control, system-change
+
+Example
+
+[profiles.query]
+risk = "low"
+[profiles.query-shell]
+risk = "medium"
+[profiles.repo-dev]
+risk = "high"
+
+Rules
+
+* Low-risk profiles can be active by default.
+* Medium-risk profiles require explicit activation and TTL.
+* High-risk profiles require explicit activation, TTL, and worker-issued lease.
+* desktop-control and system-change should use loud audit.
+
+Acceptance Tests
+
+profile templates expose risk
+status displays risk
+MCP list_peers displays risk
+high-risk profiles require explicit activation
+high-risk profiles require lease
+medium-risk profiles require explicit activation
+low-risk query is default
+
+⸻
+
+P2 Recommendations
+
+8. Add Lease Scope Modes
+
+Problem
+
+Current cwd lease matching appears exact-only. That is safe but may be awkward for repo workflows.
+
+Recommendation
+
+Keep exact as default, but support explicit recursive scope.
+
+cwd_scope = "exact"
+cwd_scope = "recursive"
+
+Rules
+
+* exact means only the exact normalized cwd is allowed.
+* recursive means cwd and children are allowed.
+* recursive must be explicit.
+* all cwd comparisons happen after realpath normalization.
+
+Acceptance Tests
+
+exact lease allows exact cwd
+exact lease denies child cwd
+recursive lease allows child cwd
+recursive lease denies sibling cwd
+symlink escape denied
+case-insensitive bypass denied on Windows/macOS
+
+⸻
+
+9. Add Better Denial Guidance
+
+Problem
+
+Security denials should be helpful, not frustrating.
+
+Recommended Denial Format
+
+{
+  "error": "profile_denied",
+  "detail": "network_check requires query-network, but active profile is query.",
+  "nothing_executed": true,
+  "suggested_command": "cmesh profile use win11-desktop query-network --ttl 15m"
+}
+
+Examples
+
+For repo edit under query:
+
+Denied: active profile is query.
+This task appears to require repo-dev.
+To allow repo-local edits for 30 minutes:
+  cmesh profile use win11-desktop repo-dev --cwd C:\Users\scott\code\cmesh --ttl 30m
+Nothing was executed.
+
+For desktop control:
+
+Denied: desktop-control is not active.
+This profile can change the remote desktop/session.
+To allow it temporarily:
+  cmesh profile use win11-desktop desktop-control --ttl 10m
+Nothing was executed.
+
+Acceptance Tests
+
+denial includes error code
+denial includes human-readable detail
+denial includes nothing_executed=true
+denial includes suggested command when possible
+denial does not suggest unsafe broad profiles
+
+⸻
+
+10. Improve doctor Around Profiles and Runners
+
+Recommended Commands
+
+cmesh doctor profile query
+cmesh doctor profile query-shell
+cmesh doctor runner probe
+cmesh doctor runner claude-code
+cmesh doctor service-context
+
+Useful Checks
+
+For query:
+
+profile exists
+runner = probe
+writes = deny
+shell = deny
+network = false
+capabilities valid
+probe runner available
+
+For query-shell:
+
+profile exists
+runner = shell
+shell policy present
+allowed commands valid for OS
+denied patterns present
+max output set
+max runtime set
+audit level loud
+
+For service context:
+
+service user
+home directory
+PATH
+runner path
+runner auth
+Tailscale LocalAPI access
+cwd access
+git available
+
+Acceptance Tests
+
+doctor query passes valid profile
+doctor query fails if shell enabled
+doctor query fails if writes enabled
+doctor query-shell warns on missing validators
+doctor service-context reports service user
+doctor runner claude-code checks stdin smoke
+
+⸻
+
+Things Not To Add Yet
+
+Avoid adding heavy systems until the core experience is boring.
+
+Do not add yet:
+
+OPA/Cedar
+enterprise RBAC
+approval queues
+central admin dashboard
+multi-tenant federation
+signed policy bundles
+complex delegation chains
+per-command interactive prompts
+SaaS control plane
+
+These will increase friction and slow the project down.
+
+The current best product shape is:
+
+query by default
+explicit temporary elevation
+TTL leases
+clear status
+helpful denials
+audit everything
+
+⸻
+
+Recommended Next Commit Order
+
+Commit 1
+
+Lease ownership authorization
+
+* Scope list/revoke to owning peer.
+* Local operator can list/revoke all.
+* Add tests.
+
+Commit 2
+
+No auto-routing to explicit/leased profiles
+
+* Refuse silent escalation to RequireExplicit or RequireLease.
+* Return helpful guidance.
+* Add tests.
+
+Commit 3
+
+Profile visibility
+
+* Improve profile_current.
+* Add active profile/risk/expiry to cmesh status.
+* Add active profile/risk/expiry to MCP list_peers.
+
+Commit 4
+
+Global safe reset
+
+* Add cmesh profile reset --all.
+* Revoke owned leases where possible.
+* Add audit events.
+
+Commit 5
+
+Structured query result
+
+* Add query_result to result envelope or runner_extra.
+* Update ProbeRunner.
+* Update MCP result formatting.
+
+Commit 6
+
+More probes
+
+Add:
+
+* memory_info
+* uptime
+* service_status
+* bounded process_list
+
+Keep port_check under query-network.
+
+Commit 7
+
+Doctor improvements
+
+Add:
+
+* doctor profile
+* doctor runner probe
+* doctor service-context
+
+⸻
+
+Final Recommendation
+
+Do not add more friction. Add visibility, temporary elevation, and safe defaults.
+
+The ideal user experience should be:
+
+Default: query
+No shell. No writes. No arbitrary agent.
+Ask useful live questions immediately.
+Need more power?
+Activate a profile once with TTL.
+Work naturally.
+It expires back to query.
+Everything is audited.
+
+That preserves the magic while preventing the obvious security nightmare.

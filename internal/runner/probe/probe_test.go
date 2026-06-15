@@ -36,8 +36,37 @@ func TestProbeRunnerSystemInfoUsesNoShell(t *testing.T) {
 	if payload["kind"] != profile.CapSystemInfo {
 		t.Fatalf("kind = %v", payload["kind"])
 	}
+	if result.QueryResult == nil || result.QueryResult.Kind != profile.CapSystemInfo || result.QueryResult.Data["kind"] != nil {
+		t.Fatalf("query_result = %#v", result.QueryResult)
+	}
 	if result.RunnerExtra["no_shell"] != true || result.RunnerExtra["no_writes"] != true {
 		t.Fatalf("probe did not declare no_shell/no_writes: %#v", result.RunnerExtra)
+	}
+}
+
+func TestProbeRunnerAdditionalNativeQueriesReturnStructuredOutput(t *testing.T) {
+	run := New(map[string]ProfileConfig{
+		profile.Query: {Capabilities: []string{profile.CapMemoryInfo, profile.CapUptime, profile.CapProcessList}, EnforcementConfidence: "high"},
+	})
+	for _, kind := range []string{profile.CapMemoryInfo, profile.CapUptime, profile.CapProcessList} {
+		t.Run(kind, func(t *testing.T) {
+			result, err := run.Run(runner.RunRequest{
+				Context:     context.Background(),
+				TaskID:      "task-probe-" + kind,
+				Profile:     profile.Query,
+				QueryKind:   kind,
+				QueryParams: map[string]any{"limit": 5},
+			})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result.QueryResult == nil || result.QueryResult.Kind != kind || len(result.QueryResult.Data) == 0 {
+				t.Fatalf("query_result = %#v", result.QueryResult)
+			}
+			if result.CommandOutput.ExitCode != 0 {
+				t.Fatalf("exit = %d stderr=%q", result.CommandOutput.ExitCode, result.CommandOutput.Stderr)
+			}
+		})
 	}
 }
 

@@ -139,6 +139,7 @@ type PeerSmokeResponse struct {
 type ProfileLeaseRequest struct {
 	Profile         string   `json:"profile"`
 	CWD             string   `json:"cwd,omitempty"`
+	CWDScope        string   `json:"cwd_scope,omitempty"`
 	TTLSeconds      int64    `json:"ttl_s"`
 	Capabilities    []string `json:"capabilities,omitempty"`
 	OriginSessionID string   `json:"origin_session_id,omitempty"`
@@ -151,6 +152,7 @@ type ProfileLease struct {
 	OriginName     string    `json:"origin_name,omitempty"`
 	Profile        string    `json:"profile"`
 	CWD            string    `json:"cwd,omitempty"`
+	CWDScope       string    `json:"cwd_scope,omitempty"`
 	Capabilities   []string  `json:"capabilities,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`

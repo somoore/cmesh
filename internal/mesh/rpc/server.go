@@ -166,18 +166,30 @@ func (s *Server) handleListProfileLeases(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
 		return
 	}
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	if s.Leases == nil {
 		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, "profile lease store is not configured")
 		return
 	}
-	leases, err := s.Leases.List(r.URL.Query().Get("include_expired") == "true", time.Now().UTC())
+	leases, err := s.Leases.ListForPeer(policy.LeaseValidation{
+		PeerName:     identity.NodeName,
+		PeerNodeID:   identity.NodeID,
+		PeerStableID: identity.StableID,
+	}, r.URL.Query().Get("include_expired") == "true", time.Now().UTC())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 		return
 	}
+	s.record(r.Context(), audit.Event{
+		Type:           "profile.lease.listed",
+		PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+		PolicyDecision: "allowed",
+		Source:         "mesh_rpc",
+		Extra:          map[string]any{"include_expired": r.URL.Query().Get("include_expired") == "true", "count": len(leases)},
+	})
 	writeJSON(w, http.StatusOK, schema.ProfileLeaseListResponse{Leases: leases})
 }
 
@@ -186,18 +198,41 @@ func (s *Server) handleRevokeProfileLease(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
 		return
 	}
-	if _, ok := s.authenticate(w, r); !ok {
+	identity, ok := s.authenticate(w, r)
+	if !ok {
 		return
 	}
 	if s.Leases == nil {
 		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, "profile lease store is not configured")
 		return
 	}
-	lease, err := s.Leases.Revoke(r.PathValue("lease_id"), time.Now().UTC())
+	lease, err := s.Leases.RevokeForPeer(policy.LeaseValidation{
+		PeerName:     identity.NodeName,
+		PeerNodeID:   identity.NodeID,
+		PeerStableID: identity.StableID,
+	}, r.PathValue("lease_id"), time.Now().UTC())
 	if err != nil {
+		s.record(r.Context(), audit.Event{
+			Type:           "profile.lease.revoked",
+			PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+			PolicyDecision: "denied",
+			Source:         "mesh_rpc",
+			ErrorCode:      string(task.ErrorProfileDenied),
+			ErrorDetail:    err.Error(),
+			Extra:          map[string]any{"lease_id": r.PathValue("lease_id"), "caller_node_id": identity.NodeID, "caller_stable_id": identity.StableID},
+		})
 		writeError(w, http.StatusNotFound, task.ErrorProfileDenied, err.Error())
 		return
 	}
+	s.record(r.Context(), audit.Event{
+		Type:           "profile.lease.revoked",
+		PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+		Profile:        lease.Profile,
+		PolicyDecision: "allowed",
+		Source:         "mesh_rpc",
+		Claims:         append([]string(nil), lease.Capabilities...),
+		Extra:          map[string]any{"lease_id": lease.LeaseID, "caller_node_id": identity.NodeID, "caller_stable_id": identity.StableID},
+	})
 	writeJSON(w, http.StatusOK, lease)
 }
 
@@ -224,6 +259,13 @@ func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, re
 		return schema.ProfileLease{}, fmt.Errorf("profile %q requires cwd for lease scope", profileName)
 	}
 	normalizedCWD := strings.TrimSpace(req.CWD)
+	cwdScope := strings.TrimSpace(req.CWDScope)
+	if cwdScope == "" {
+		cwdScope = "exact"
+	}
+	if cwdScope != "exact" && cwdScope != "recursive" {
+		return schema.ProfileLease{}, fmt.Errorf("cwd_scope must be exact or recursive")
+	}
 	if normalizedCWD != "" {
 		normalized, err := policy.NormalizeCWD(req.CWD)
 		if err != nil {
@@ -240,6 +282,7 @@ func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, re
 		PeerStableID: identity.StableID,
 		Profile:      profileName,
 		CWD:          normalizedCWD,
+		CWDScope:     cwdScope,
 		Capabilities: profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
 	}, ttl, time.Now().UTC())
 	if err != nil {
@@ -1632,6 +1675,9 @@ func resultAsTask(result runner.Result) *task.ResultEnvelope {
 		VerificationRequired:    result.VerificationRequired,
 		RecommendedOriginChecks: result.RecommendedOriginChecks,
 		RunnerExtra:             result.RunnerExtra,
+	}
+	if result.QueryResult != nil {
+		out.QueryResult = &task.QueryResult{Kind: result.QueryResult.Kind, Data: result.QueryResult.Data}
 	}
 	return &out
 }

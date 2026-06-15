@@ -70,6 +70,9 @@
     "command_output": {
       "$ref": "#/$defs/command_output"
     },
+    "query_result": {
+      "$ref": "#/$defs/query_result"
+    },
     "worker_summary_untrusted": {
       "type": "string",
       "maxLength": 6000,
@@ -240,6 +243,22 @@
         "duration_s": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "query_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "data"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
         }
       }
     },

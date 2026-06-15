@@ -74,6 +74,7 @@ type ProfileConfig struct {
 	AllowedPeers          []string          `toml:"allowed_peers"`
 	RequireExplicit       bool              `toml:"require_explicit"`
 	RequireLease          bool              `toml:"require_lease"`
+	Risk                  string            `toml:"risk"`
 	Bare                  bool              `toml:"bare"`
 	Writes                string            `toml:"writes"`
 	Shell                 string            `toml:"shell"`
@@ -271,6 +272,9 @@ func (c *Config) ApplyDefaults(configDir string) error {
 				prof.EnforcementConfidence = "medium"
 			}
 		}
+		if prof.Risk == "" {
+			prof.Risk = profiledefs.RiskForConfig(name, prof.Capabilities, prof.Writes, prof.Shell, prof.Network)
+		}
 		c.Profiles[name] = prof
 	}
 	return nil
@@ -340,6 +344,17 @@ func (c *Config) Validate() error {
 		}
 		if err := profiledefs.ValidateSemantics(name, prof.Runner, prof.Capabilities, prof.Writes, prof.Shell, prof.Network, prof.GitPush, prof.RequireExplicit, prof.EnforcementConfidence); err != nil {
 			return err
+		}
+		switch prof.Risk {
+		case "", profiledefs.RiskLow, profiledefs.RiskMedium, profiledefs.RiskHigh:
+		default:
+			return fmt.Errorf("profiles.%s.risk must be low, medium, or high", name)
+		}
+		if prof.Risk == profiledefs.RiskHigh && (name == profiledefs.RepoDev || name == profiledefs.DesktopControl || name == profiledefs.SystemChange) && (!prof.RequireExplicit || !prof.RequireLease) {
+			return fmt.Errorf("profiles.%s risk=high must require explicit selection and a lease", name)
+		}
+		if prof.Risk == profiledefs.RiskMedium && (name == profiledefs.QueryNetwork || name == profiledefs.QueryShell) && !prof.RequireExplicit {
+			return fmt.Errorf("profiles.%s risk=medium must require explicit selection", name)
 		}
 	}
 	for name, runner := range c.Runners {

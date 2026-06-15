@@ -33,6 +33,7 @@ type GuideItem struct {
 	RequireExplicit       bool         `json:"require_explicit"`
 	RequireLease          bool         `json:"require_lease"`
 	ConsentRequired       bool         `json:"consent_required"`
+	Risk                  string       `json:"risk"`
 	RecommendedTTL        string       `json:"recommended_ttl,omitempty"`
 	SaferAlternative      string       `json:"safer_alternative,omitempty"`
 	RecommendedFirstTool  string       `json:"recommended_first_tool,omitempty"`
@@ -229,11 +230,12 @@ func guideItem(name string) GuideItem {
 			AvoidWhen:             []string{"you need arbitrary shell commands", "you need file reads beyond probe output"},
 			EnforcementStrength:   StrengthNative,
 			Powers:                PowerSummary{Reads: "bounded machine/repo/network facts", Writes: "none", Deletes: "none", Shell: "none", Network: "bounded network_check only", ProcessDesktopSystem: "none"},
-			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapRepoStatus, CapNetworkCheck},
+			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapMemoryInfo, CapUptime, CapRepoStatus, CapProcessList, CapNetworkCheck, CapPortCheck},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
 			Network:               true,
 			RequireExplicit:       true,
+			Risk:                  RiskMedium,
 			RecommendedFirstTool:  "query_peer",
 			SaferAlternative:      Query,
 			PlainLanguageContract: "Can run deterministic probes including bounded network checks; cannot run shell, write, delete, or invoke an arbitrary agent.",
@@ -247,10 +249,11 @@ func guideItem(name string) GuideItem {
 			AvoidWhen:             []string{"a builtin query can answer it", "the command is not explicitly allowlisted"},
 			EnforcementStrength:   StrengthAllowlisted,
 			Powers:                PowerSummary{Reads: "allowlisted diagnostic command output", Writes: "none", Deletes: "none", Shell: "allowlisted read-only argv only", Network: "none by default", ProcessDesktopSystem: "read-only diagnostics only"},
-			Capabilities:          []string{CapShellReadonly, CapServiceStatus, CapProcessList, CapLogTail},
+			Capabilities:          []string{CapShellReadonly, CapServiceStatus, CapProcessList, CapLogTailBounded, CapLogTail},
 			Writes:                WritesDeny,
 			Shell:                 ShellAllowlisted,
 			RequireExplicit:       true,
+			Risk:                  RiskMedium,
 			RecommendedFirstTool:  "query_peer",
 			SaferAlternative:      Query,
 			PlainLanguageContract: "Can run only allowlisted read diagnostics; write/delete commands and shell metacharacters are denied.",
@@ -267,6 +270,7 @@ func guideItem(name string) GuideItem {
 			Capabilities:          []string{CapReadFiles},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
+			Risk:                  RiskMedium,
 			SaferAlternative:      Query,
 			RecommendedFirstTool:  "inspect_peer",
 			KnownGaps:             []string{"open-ended file read boundaries depend on the selected harness honoring its sandbox"},
@@ -287,6 +291,7 @@ func guideItem(name string) GuideItem {
 			RequireExplicit:       true,
 			RequireLease:          true,
 			ConsentRequired:       true,
+			Risk:                  RiskHigh,
 			RecommendedTTL:        "30m",
 			SaferAlternative:      ReadonlyAgent,
 			KnownGaps:             []string{"repo-dev authority depends on runner and OS account permissions"},
@@ -308,6 +313,7 @@ func guideItem(name string) GuideItem {
 			RequireExplicit:       true,
 			RequireLease:          true,
 			ConsentRequired:       true,
+			Risk:                  RiskHigh,
 			RecommendedTTL:        "15m",
 			SaferAlternative:      RepoDev,
 			KnownGaps:             []string{"desktop control depends on OS session permissions and runner controls"},
@@ -329,6 +335,7 @@ func guideItem(name string) GuideItem {
 			RequireExplicit:       true,
 			RequireLease:          true,
 			ConsentRequired:       true,
+			Risk:                  RiskHigh,
 			RecommendedTTL:        "15m",
 			SaferAlternative:      QueryShell,
 			KnownGaps:             []string{"system changes depend on OS account permissions and may need human approval"},
@@ -343,9 +350,10 @@ func guideItem(name string) GuideItem {
 			AvoidWhen:             []string{"you need open-ended system or file inspection", "you need edits, builds, tests, or shell commands"},
 			EnforcementStrength:   StrengthNative,
 			Powers:                PowerSummary{Reads: "bounded machine/repo facts", Writes: "none", Deletes: "none", Shell: "none", Network: "none", ProcessDesktopSystem: "none"},
-			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapRepoStatus},
+			Capabilities:          []string{CapDiskInfo, CapSystemInfo, CapMemoryInfo, CapUptime, CapRepoStatus, CapProcessList},
 			Writes:                WritesDeny,
 			Shell:                 ShellDeny,
+			Risk:                  RiskLow,
 			RecommendedFirstTool:  "query_peer",
 			PlainLanguageContract: "Can run deterministic builtin probes; cannot run shell, write, delete, or invoke an arbitrary agent.",
 		}

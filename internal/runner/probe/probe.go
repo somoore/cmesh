@@ -15,6 +15,8 @@ import (
 	"cmesh/internal/gitx"
 	"cmesh/internal/profile"
 	"cmesh/internal/runner"
+
+	ps "github.com/mitchellh/go-ps"
 )
 
 const Name = profile.RunnerProbe
@@ -33,7 +35,7 @@ func New(profiles map[string]ProfileConfig) *Runner {
 	if len(profiles) == 0 {
 		profiles = map[string]ProfileConfig{
 			profile.Query: {
-				Capabilities:          []string{profile.CapDiskInfo, profile.CapSystemInfo, profile.CapRepoStatus},
+				Capabilities:          []string{profile.CapDiskInfo, profile.CapSystemInfo, profile.CapMemoryInfo, profile.CapUptime, profile.CapRepoStatus, profile.CapProcessList},
 				MaxOutputBytes:        65536,
 				EnforcementConfidence: "high",
 			},
@@ -86,6 +88,7 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	}
 	started := time.Now()
 	out, err := r.runProbe(req.Context, kind, req.QueryParams, req.CWD)
+	queryData := queryData(out)
 	result := runner.Result{
 		Status: "done",
 		Tests: runner.TestClaims{
@@ -97,6 +100,10 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 			ExitCode:  0,
 			Stdout:    encode(out),
 			DurationS: int64(time.Since(started) / time.Second),
+		},
+		QueryResult: &runner.QueryResult{
+			Kind: kind,
+			Data: queryData,
 		},
 		WorkerSummaryUntrusted:  encode(out),
 		VerificationRequired:    false,
@@ -136,6 +143,33 @@ func (r *Runner) runProbe(ctx context.Context, kind string, params map[string]an
 			"num_cpu":      runtime.NumCPU(),
 			"cwd":          cwd,
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		}, nil
+	case profile.CapMemoryInfo:
+		var mem runtime.MemStats
+		runtime.ReadMemStats(&mem)
+		return map[string]any{
+			"kind":                 kind,
+			"go_alloc_bytes":       mem.Alloc,
+			"go_total_alloc_bytes": mem.TotalAlloc,
+			"go_sys_bytes":         mem.Sys,
+			"go_heap_alloc_bytes":  mem.HeapAlloc,
+			"go_heap_sys_bytes":    mem.HeapSys,
+			"go_heap_idle_bytes":   mem.HeapIdle,
+			"go_heap_inuse_bytes":  mem.HeapInuse,
+			"go_heap_objects":      mem.HeapObjects,
+			"go_gc_count":          mem.NumGC,
+			"generated_at":         time.Now().UTC().Format(time.RFC3339),
+			"measurement_scope":    "cmesh_process_runtime",
+			"system_memory_note":   "native no-shell system memory collection is not available on every platform yet",
+		}, nil
+	case profile.CapUptime:
+		seconds, source := uptimeSeconds()
+		return map[string]any{
+			"kind":             kind,
+			"uptime_seconds":   seconds,
+			"source":           source,
+			"generated_at":     time.Now().UTC().Format(time.RFC3339),
+			"measurement_note": "system uptime when supported, otherwise cmesh process uptime",
 		}, nil
 	case profile.CapDiskInfo:
 		path := stringParam(params, "path")
@@ -189,6 +223,8 @@ func (r *Runner) runProbe(ctx context.Context, kind string, params map[string]an
 			"root":        status.Root,
 		}, nil
 	case profile.CapNetworkCheck:
+		fallthrough
+	case profile.CapPortCheck:
 		host := stringParam(params, "host")
 		if host == "" {
 			host = stringParam(params, "address")
@@ -221,9 +257,72 @@ func (r *Runner) runProbe(ctx context.Context, kind string, params map[string]an
 			"reachable":   true,
 			"duration_ms": time.Since(started).Milliseconds(),
 		}, nil
+	case profile.CapProcessList:
+		limit := intParam(params, "limit")
+		if limit <= 0 || limit > 100 {
+			limit = 50
+		}
+		processes, source, err := processList(ctx, limit)
+		if err != nil {
+			return nil, runner.E(runner.ErrWorkerFailed, "probe process_list", err)
+		}
+		return map[string]any{
+			"kind":         kind,
+			"limit":        limit,
+			"count":        len(processes),
+			"source":       source,
+			"processes":    processes,
+			"bounded":      true,
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+		}, nil
 	default:
 		return nil, runner.E(runner.ErrProfileDenied, "probe query", fmt.Errorf("unsupported query kind %q", kind))
 	}
+}
+
+func queryData(values map[string]any) map[string]any {
+	out := map[string]any{}
+	for key, value := range values {
+		if key == "kind" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+var processStartedAt = time.Now()
+
+func uptimeSeconds() (int64, string) {
+	if runtime.GOOS == "linux" {
+		if body, err := os.ReadFile("/proc/uptime"); err == nil {
+			fields := strings.Fields(string(body))
+			if len(fields) > 0 {
+				if seconds, err := strconv.ParseFloat(fields[0], 64); err == nil {
+					return int64(seconds), "/proc/uptime"
+				}
+			}
+		}
+	}
+	return int64(time.Since(processStartedAt) / time.Second), "cmesh_process"
+}
+
+func processList(_ context.Context, limit int) ([]map[string]any, string, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	processes, err := ps.Processes()
+	if err != nil {
+		return nil, "go-ps", err
+	}
+	var out []map[string]any
+	for _, proc := range processes {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, map[string]any{"pid": proc.Pid(), "ppid": proc.PPid(), "name": proc.Executable()})
+	}
+	return out, "go-ps", nil
 }
 
 func validateDiskPath(path string) error {
