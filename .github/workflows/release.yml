@@ -319,5 +319,6 @@ jobs:
           fi
           gh release create "${{ needs.validate.outputs.tag_name }}" dist/* \
             --verify-tag \
+            --prerelease \
             --title "${{ needs.validate.outputs.tag_name }}" \
             --notes-file dist/release-notes.md
