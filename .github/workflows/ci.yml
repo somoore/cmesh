@@ -25,7 +25,92 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-        run: echo "markdown_only=$(sh scripts/markdown-only-change.sh)" >> "$GITHUB_OUTPUT"
+        shell: bash
+        run: |
+          set -euo pipefail
+          markdown_only=false
+
+          check_path() {
+            local path=$1
+            if [[ "$path" != *.md ]]; then
+              markdown_only=false
+            fi
+          }
+
+          if [ -n "${BASE_SHA:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            base="$BASE_SHA"
+            head="$HEAD_SHA"
+            if [[ "$base" =~ ^0+$ ]]; then
+              if git rev-parse -q --verify "$head^" >/dev/null; then
+                base="$head^"
+              else
+                echo "markdown_only=false" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            fi
+
+            any=false
+            markdown_only=true
+            while IFS= read -r -d '' status; do
+              any=true
+              paths=()
+              case "$status" in
+                R*|C*)
+                  IFS= read -r -d '' old_path
+                  IFS= read -r -d '' new_path
+                  paths=("$old_path" "$new_path")
+                  ;;
+                *)
+                  IFS= read -r -d '' path
+                  paths=("$path")
+                  ;;
+              esac
+              for path in "${paths[@]}"; do
+                check_path "$path"
+              done
+            done < <(git diff --name-status -z -M -C "$base" "$head")
+
+            if [ "$any" != true ]; then
+              markdown_only=false
+            fi
+          fi
+          echo "markdown_only=$markdown_only" >> "$GITHUB_OUTPUT"
+
+      - name: Supply-chain policy
+        if: steps.changes.outputs.markdown_only == 'true'
+        run: |
+          set -eu
+
+          at='@'
+          colon=':'
+          latest='latest'
+
+          if git grep -n "${at}${latest}" -- .; then
+            echo "floating module or tool reference found"
+            exit 1
+          fi
+
+          if git grep -n "${colon}${latest}" -- .; then
+            echo "floating container image reference found"
+            exit 1
+          fi
+
+          for workflow in .github/workflows/*.yml .github/workflows/*.yaml; do
+            [ -e "$workflow" ] || continue
+            awk '
+              /^[[:space:]]*uses:/ {
+                ref=$0
+                sub(/^[[:space:]]*uses:[[:space:]]*/, "", ref)
+                gsub(/["'\'']/, "", ref)
+                if (ref ~ /^\.\//) next
+                if (ref !~ /@[0-9a-f]{40}$/) {
+                  print FILENAME ":" FNR ": unpinned action reference: " ref
+                  bad=1
+                }
+              }
+              END { exit bad }
+            ' "$workflow"
+          done
 
       - name: Set up Go
         if: steps.changes.outputs.markdown_only != 'true'
@@ -40,4 +125,4 @@ jobs:
 
       - name: Skip markdown-only change
         if: steps.changes.outputs.markdown_only == 'true'
-        run: echo "Skipping Go tests for markdown-only change"
+        run: echo "Skipping Go tests after supply-chain policy passed for markdown-only change"
