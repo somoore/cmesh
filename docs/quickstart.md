@@ -46,7 +46,7 @@ The installer puts `cmesh` on your PATH, then shows a short picker of the AI cod
 To install a specific release instead of the newest published release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.1 sh
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.2 sh
 ```
 
 ### Linux
@@ -60,7 +60,7 @@ The installer puts `cmesh` on your PATH, then shows a short picker of the AI cod
 To install a specific release instead of the newest published release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.1 sh
+curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | CMESH_VERSION=v0.1.0-prealpha.2 sh
 ```
 
 ### Windows
@@ -74,7 +74,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubus
 To install a specific release instead of the newest published release:
 
 ```powershell
-$env:CMESH_VERSION = "v0.1.0-prealpha.1"; powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.ps1 | iex"
+$env:CMESH_VERSION = "v0.1.0-prealpha.2"; powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.ps1 | iex"
 ```
 
 If you added cmesh to PATH for the first time, **open a new terminal** so the PATH change takes effect before running `cmesh` by name.
