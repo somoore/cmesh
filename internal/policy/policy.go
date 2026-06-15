@@ -222,7 +222,7 @@ func NormalizeCWD(path string) (string, error) {
 		return "", err
 	}
 	real = filepath.Clean(real)
-	if runtime.GOOS == "windows" {
+	if pathComparisonIsCaseInsensitive(runtime.GOOS) {
 		real = strings.ToLower(real)
 	}
 	return real, nil
@@ -239,7 +239,7 @@ func pathAllowed(cwd string, patterns []string) bool {
 			continue
 		}
 		abs = filepath.Clean(abs)
-		if runtime.GOOS == "windows" {
+		if pathComparisonIsCaseInsensitive(runtime.GOOS) {
 			abs = strings.ToLower(abs)
 		}
 		if strings.HasSuffix(abs, string(filepath.Separator)+"**") {
@@ -269,10 +269,14 @@ func normalizeAllowedRoot(path string) (string, error) {
 		return "", err
 	}
 	real = filepath.Clean(real)
-	if runtime.GOOS == "windows" {
+	if pathComparisonIsCaseInsensitive(runtime.GOOS) {
 		real = strings.ToLower(real)
 	}
 	return real, nil
+}
+
+func pathComparisonIsCaseInsensitive(goos string) bool {
+	return goos == "windows" || goos == "darwin"
 }
 
 // SmokeCWD returns a concrete, existing directory that this node's own inbound

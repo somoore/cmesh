@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type LeaseValidation struct {
 	CWD            string
 	Capability     string
 	Capabilities   []string
+	CWDScope       string
 	EffectiveCWD   string
 	EffectivePeer  string
 	EffectiveLease *schema.ProfileLease
@@ -63,7 +65,8 @@ func (s *ProfileLeaseStore) Issue(req LeaseValidation, ttl time.Duration, now ti
 		OriginStableID: strings.TrimSpace(req.PeerStableID),
 		OriginName:     strings.TrimSpace(req.PeerName),
 		Profile:        req.Profile,
-		CWD:            strings.TrimSpace(req.CWD),
+		CWD:            normalizeLeasePath(req.CWD),
+		CWDScope:       normalizeCWDScope(req.CWDScope),
 		Capabilities:   append([]string(nil), req.Capabilities...),
 		CreatedAt:      now.UTC(),
 		ExpiresAt:      now.UTC().Add(ttl),
@@ -110,7 +113,7 @@ func (s *ProfileLeaseStore) ValidateProfileLease(req LeaseValidation) (LeaseVali
 		if !leaseMatchesPeer(lease, req) {
 			return req, fmt.Errorf("lease %q was not issued to this origin peer", leaseID)
 		}
-		if strings.TrimSpace(lease.CWD) != "" && !profileContextCWDAllowed(req.CWD, lease.CWD) {
+		if strings.TrimSpace(lease.CWD) != "" && !profileContextCWDAllowed(normalizeLeasePath(req.CWD), normalizeLeasePath(lease.CWD), lease.CWDScope) {
 			return req, fmt.Errorf("lease %q is scoped to cwd %q", leaseID, lease.CWD)
 		}
 		if strings.TrimSpace(req.Capability) != "" && len(lease.Capabilities) > 0 && !contains(lease.Capabilities, req.Capability) {
@@ -123,7 +126,7 @@ func (s *ProfileLeaseStore) ValidateProfileLease(req LeaseValidation) (LeaseVali
 	return req, fmt.Errorf("lease %q was not issued by this worker", leaseID)
 }
 
-func (s *ProfileLeaseStore) Revoke(leaseID string, now time.Time) (schema.ProfileLease, error) {
+func (s *ProfileLeaseStore) RevokeAnyForLocalOperator(leaseID string, now time.Time) (schema.ProfileLease, error) {
 	leaseID = strings.TrimSpace(leaseID)
 	if leaseID == "" {
 		return schema.ProfileLease{}, errors.New("lease id is required")
@@ -142,7 +145,34 @@ func (s *ProfileLeaseStore) Revoke(leaseID string, now time.Time) (schema.Profil
 	return revoked, err
 }
 
-func (s *ProfileLeaseStore) List(includeExpired bool, now time.Time) ([]schema.ProfileLease, error) {
+func (s *ProfileLeaseStore) RevokeForPeer(identity LeaseValidation, leaseID string, now time.Time) (schema.ProfileLease, error) {
+	leaseID = strings.TrimSpace(leaseID)
+	if leaseID == "" {
+		return schema.ProfileLease{}, errors.New("lease id is required")
+	}
+	var revoked schema.ProfileLease
+	err := s.update(func(file profileLeaseFile) (profileLeaseFile, error) {
+		for i := range file.Leases {
+			if file.Leases[i].LeaseID != leaseID {
+				continue
+			}
+			if !leaseMatchesPeer(file.Leases[i], identity) {
+				return file, fmt.Errorf("lease %q was not issued to this origin peer", leaseID)
+			}
+			file.Leases[i].RevokedAt = now.UTC()
+			revoked = file.Leases[i]
+			return file, nil
+		}
+		return file, fmt.Errorf("lease %q not found", leaseID)
+	})
+	return revoked, err
+}
+
+func (s *ProfileLeaseStore) Revoke(leaseID string, now time.Time) (schema.ProfileLease, error) {
+	return s.RevokeAnyForLocalOperator(leaseID, now)
+}
+
+func (s *ProfileLeaseStore) ListAllForLocalOperator(includeExpired bool, now time.Time) ([]schema.ProfileLease, error) {
 	file, err := s.read()
 	if err != nil {
 		return nil, err
@@ -155,6 +185,24 @@ func (s *ProfileLeaseStore) List(includeExpired bool, now time.Time) ([]schema.P
 		out = append(out, lease)
 	}
 	return out, nil
+}
+
+func (s *ProfileLeaseStore) ListForPeer(identity LeaseValidation, includeExpired bool, now time.Time) ([]schema.ProfileLease, error) {
+	leases, err := s.ListAllForLocalOperator(includeExpired, now)
+	if err != nil {
+		return nil, err
+	}
+	var out []schema.ProfileLease
+	for _, lease := range leases {
+		if leaseMatchesPeer(lease, identity) {
+			out = append(out, lease)
+		}
+	}
+	return out, nil
+}
+
+func (s *ProfileLeaseStore) List(includeExpired bool, now time.Time) ([]schema.ProfileLease, error) {
+	return s.ListAllForLocalOperator(includeExpired, now)
 }
 
 type profileLeaseFile struct {
@@ -245,11 +293,53 @@ func firstNonEmptyLease(values ...string) string {
 	return ""
 }
 
-func profileContextCWDAllowed(requested, leased string) bool {
+func profileContextCWDAllowed(requested, leased, scope string) bool {
 	requested = strings.TrimSpace(requested)
 	leased = strings.TrimSpace(leased)
 	if leased == "" || requested == "" {
 		return true
 	}
-	return filepath.Clean(requested) == filepath.Clean(leased)
+	requested = filepath.Clean(requested)
+	leased = filepath.Clean(leased)
+	if strings.EqualFold(normalizeCWDScope(scope), "recursive") {
+		return samePath(requested, leased) || strings.HasPrefix(pathForCompare(requested), pathForCompare(leased)+string(filepath.Separator))
+	}
+	return samePath(requested, leased)
+}
+
+func normalizeLeasePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = path
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	return filepath.Clean(abs)
+}
+
+func normalizeCWDScope(scope string) string {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	switch scope {
+	case "recursive":
+		return "recursive"
+	default:
+		return "exact"
+	}
+}
+
+func samePath(a, b string) bool {
+	return pathForCompare(a) == pathForCompare(b)
+}
+
+func pathForCompare(path string) string {
+	path = filepath.Clean(path)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(path)
+	}
+	return path
 }

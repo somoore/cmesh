@@ -66,6 +66,7 @@ func RenderProfileTOML(tmpl Template) string {
 	writeBool(&b, "git_push", tmpl.GitPush)
 	writeBool(&b, "require_explicit", tmpl.RequireExplicit)
 	writeBool(&b, "require_lease", tmpl.RequireLease)
+	writeKV(&b, "risk", defaultString(tmpl.Risk, RiskForProfile(tmpl.Name)))
 	writeKV(&b, "max_runtime", defaultString(tmpl.MaxRuntime, "30s"))
 	if tmpl.MaxOutputBytes > 0 {
 		fmt.Fprintf(&b, "max_output_bytes = %d\n", tmpl.MaxOutputBytes)

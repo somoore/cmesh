@@ -40,6 +40,9 @@ func TestShellRunnerAllowsAllowlistedCommand(t *testing.T) {
 	if result.CommandOutput.ExitCode != 0 || result.RunnerExtra["no_writes"] != true {
 		t.Fatalf("result = %+v", result)
 	}
+	if result.QueryResult == nil || result.QueryResult.Kind != profile.CapShellReadonly || result.QueryResult.Data["bounded"] != true {
+		t.Fatalf("query_result = %#v", result.QueryResult)
+	}
 }
 
 func TestShellRunnerUsesOnlyProfileAsDefault(t *testing.T) {

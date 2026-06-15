@@ -393,6 +393,8 @@ func cmdDoctor(args []string) error {
 			return nil
 		case "runner":
 			return cmdDoctorRunner(args[1:])
+		case "profile":
+			return cmdDoctorProfile(args[1:])
 		case "service-context":
 			return cmdDoctorServiceContext(args[1:])
 		}
@@ -519,6 +521,98 @@ func cmdDoctorRunner(args []string) error {
 		return errors.New("doctor runner found problems")
 	}
 	return nil
+}
+
+func cmdDoctorProfile(args []string) error {
+	fs := flag.NewFlagSet("doctor profile", flag.ExitOnError)
+	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := parseInterspersedFlags(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: cmesh doctor profile <profile> [--config path]")
+	}
+	cfg, err := config.Load(*configPath)
+	checks := []doctor.Check{{Name: "config", OK: err == nil, Detail: "valid"}}
+	profileName := fs.Arg(0)
+	if err != nil {
+		checks[0].Detail = ""
+		checks[0].Err = err.Error()
+	} else {
+		checks = append(checks, doctorProfileChecks(cfg, profileName)...)
+	}
+	if *jsonOut {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks})
+	}
+	fmt.Printf("cmesh doctor profile %s\n\n", profileName)
+	for _, check := range checks {
+		printCheck(check.Name, check.OK, firstNonEmpty(check.Detail, check.Err))
+	}
+	if !checksOK(checks) {
+		return errors.New("doctor profile found problems")
+	}
+	return nil
+}
+
+func doctorProfileChecks(cfg *config.Config, profileName string) []doctor.Check {
+	prof, ok := cfg.Profiles[profileName]
+	if !ok {
+		return []doctor.Check{{Name: "profile.exists", OK: false, Err: "profile is not configured"}}
+	}
+	caps := profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims)
+	checks := []doctor.Check{
+		{Name: "profile.exists", OK: true, Detail: profileName},
+		{Name: "profile.runner", OK: prof.Runner != "", Detail: prof.Runner},
+		{Name: "profile.capabilities", OK: len(caps) > 0, Detail: strings.Join(caps, ",")},
+		{Name: "profile.risk", OK: prof.Risk != "", Detail: prof.Risk},
+	}
+	if _, ok := cfg.Runners[prof.Runner]; !ok {
+		checks = append(checks, doctor.Check{Name: "runner.configured", OK: false, Err: "runner is not configured"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "runner.configured", OK: true, Detail: prof.Runner})
+	}
+	switch profileName {
+	case profiledefs.Query:
+		checks = append(checks,
+			doctor.Check{Name: "query.runner_probe", OK: prof.Runner == profiledefs.RunnerProbe, Detail: prof.Runner},
+			doctor.Check{Name: "query.writes_deny", OK: prof.Writes == profiledefs.WritesDeny, Detail: prof.Writes},
+			doctor.Check{Name: "query.shell_deny", OK: prof.Shell == profiledefs.ShellDeny, Detail: prof.Shell},
+			doctor.Check{Name: "query.network_false", OK: !prof.Network, Detail: fmt.Sprint(prof.Network)},
+			doctor.Check{Name: "query.risk_low", OK: prof.Risk == profiledefs.RiskLow, Detail: prof.Risk},
+		)
+	case profiledefs.QueryShell:
+		checks = append(checks,
+			doctor.Check{Name: "query_shell.runner_shell", OK: prof.Runner == profiledefs.RunnerShell, Detail: prof.Runner},
+			doctor.Check{Name: "query_shell.shell_allowlisted", OK: prof.Shell == profiledefs.ShellAllowlisted, Detail: prof.Shell},
+			doctor.Check{Name: "query_shell.writes_deny", OK: prof.Writes == profiledefs.WritesDeny, Detail: prof.Writes},
+			doctor.Check{Name: "query_shell.require_explicit", OK: prof.RequireExplicit, Detail: fmt.Sprint(prof.RequireExplicit)},
+			doctor.Check{Name: "query_shell.max_output_set", OK: prof.MaxOutputBytes > 0, Detail: fmt.Sprint(prof.MaxOutputBytes)},
+			doctor.Check{Name: "query_shell.max_runtime_set", OK: prof.MaxRuntime.Duration > 0, Detail: prof.MaxRuntime.String()},
+			doctor.Check{Name: "query_shell.audit_loud", OK: prof.AuditLevel == "loud", Detail: prof.AuditLevel},
+			doctor.Check{Name: "query_shell.allowlist_present", OK: shellPolicyHasAllowedCommands(prof.ShellPolicy), Detail: prof.ShellPolicy.Mode},
+			doctor.Check{Name: "query_shell.denied_patterns_present", OK: len(prof.ShellPolicy.DeniedPatterns) > 0, Detail: fmt.Sprint(len(prof.ShellPolicy.DeniedPatterns))},
+		)
+	}
+	if prof.Risk == profiledefs.RiskHigh {
+		checks = append(checks,
+			doctor.Check{Name: "risk_high.require_explicit", OK: prof.RequireExplicit, Detail: fmt.Sprint(prof.RequireExplicit)},
+			doctor.Check{Name: "risk_high.require_lease", OK: prof.RequireLease, Detail: fmt.Sprint(prof.RequireLease)},
+		)
+	}
+	if err := profiledefs.ValidateSemantics(profileName, prof.Runner, caps, prof.Writes, prof.Shell, prof.Network, prof.GitPush, prof.RequireExplicit, prof.EnforcementConfidence); err != nil {
+		checks = append(checks, doctor.Check{Name: "profile.semantics", OK: false, Err: err.Error()})
+	} else {
+		checks = append(checks, doctor.Check{Name: "profile.semantics", OK: true, Detail: "valid"})
+	}
+	return checks
+}
+
+func shellPolicyHasAllowedCommands(policy config.ShellPolicyConfig) bool {
+	if len(policy.AllowedCommands) > 0 {
+		return true
+	}
+	return len(policy.Windows.AllowedCommands) > 0 || len(policy.Darwin.AllowedCommands) > 0 || len(policy.Linux.AllowedCommands) > 0
 }
 
 func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.Registry) []doctor.Check {
@@ -1082,7 +1176,14 @@ func cmdStatus(args []string) error {
 		return err
 	}
 	if *jsonOut {
-		return json.NewEncoder(os.Stdout).Encode(tasks)
+		profiles, _ := cliActiveProfileSummaries(cfg)
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"tasks": tasks, "profiles": profiles})
+	}
+	if profiles, err := cliActiveProfileSummaries(cfg); err == nil {
+		printCLIProfileSummary(profiles)
+		if len(tasks) > 0 {
+			fmt.Println()
+		}
 	}
 	if len(tasks) == 0 {
 		fmt.Println("no tasks")
@@ -1915,6 +2016,7 @@ type cliProfileContext struct {
 type cliProfilePeer struct {
 	Profile   string    `json:"profile"`
 	CWD       string    `json:"cwd,omitempty"`
+	CWDScope  string    `json:"cwd_scope,omitempty"`
 	Scope     string    `json:"scope,omitempty"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	LeaseID   string    `json:"lease_id,omitempty"`
@@ -1937,7 +2039,7 @@ func cmdProfile(args []string) error {
 			return json.NewEncoder(os.Stdout).Encode(map[string]any{"templates": templates})
 		}
 		for _, tmpl := range templates {
-			fmt.Printf("%-16s %-6s %s\n", tmpl.Name, tmpl.EnforcementConfidence, tmpl.Description)
+			fmt.Printf("%-16s %-6s %-6s %s\n", tmpl.Name, firstNonEmpty(tmpl.Risk, profiledefs.RiskForProfile(tmpl.Name)), tmpl.EnforcementConfidence, tmpl.Description)
 		}
 		return nil
 	case "generate":
@@ -2068,6 +2170,7 @@ func cmdProfile(args []string) error {
 	case "current":
 		fs := flag.NewFlagSet("profile current", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		jsonOut := fs.Bool("json", false, "print JSON")
 		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
 			return err
 		}
@@ -2079,11 +2182,21 @@ func cmdProfile(args []string) error {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(os.Stdout).Encode(ctxFile)
+		summaries, err := cliActiveProfileSummaries(cfg)
+		if err != nil {
+			return err
+		}
+		if *jsonOut {
+			return json.NewEncoder(os.Stdout).Encode(map[string]any{"default_profile": ctxFile.DefaultProfile, "peers": summaries, "raw_context": ctxFile})
+		}
+		fmt.Printf("Default profile: %s\n\n", firstNonEmpty(ctxFile.DefaultProfile, profiledefs.Query))
+		printCLIProfileSummary(summaries)
+		return nil
 	case "use":
 		fs := flag.NewFlagSet("profile use", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
 		cwd := fs.String("cwd", "", "optional cwd scope note")
+		cwdScope := fs.String("cwd-scope", "exact", "cwd lease scope: exact or recursive")
 		ttlText := fs.String("ttl", "", "optional lease TTL such as 30m; required for profiles with require_lease=true")
 		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
 			return err
@@ -2114,6 +2227,9 @@ func cmdProfile(args []string) error {
 		if prof.RequireLease && ttl <= 0 {
 			return fmt.Errorf("profile %q requires --ttl to create an active lease", profileName)
 		}
+		if *cwdScope != "exact" && *cwdScope != "recursive" {
+			return fmt.Errorf("--cwd-scope must be exact or recursive")
+		}
 		ctxFile, err := readCLIProfileContext(cfg)
 		if err != nil {
 			return err
@@ -2122,7 +2238,7 @@ func cmdProfile(args []string) error {
 			ctxFile.Peers = map[string]cliProfilePeer{}
 		}
 		now := time.Now().UTC()
-		entry := cliProfilePeer{Profile: profileName, CWD: strings.TrimSpace(*cwd), Scope: "global", UpdatedAt: now}
+		entry := cliProfilePeer{Profile: profileName, CWD: strings.TrimSpace(*cwd), CWDScope: strings.TrimSpace(*cwdScope), Scope: "global", UpdatedAt: now}
 		if ttl > 0 && !prof.RequireLease {
 			entry.Scope = "session"
 			entry.ExpiresAt = now.Add(ttl)
@@ -2135,6 +2251,7 @@ func cmdProfile(args []string) error {
 			lease, err := meshrpc.NewClient("http://"+net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port))).IssueProfileLease(context.Background(), schema.ProfileLeaseRequest{
 				Profile:         profileName,
 				CWD:             strings.TrimSpace(*cwd),
+				CWDScope:        strings.TrimSpace(*cwdScope),
 				TTLSeconds:      int64(ttl / time.Second),
 				Capabilities:    profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
 				OriginSessionID: "cli_profile_use",
@@ -2144,6 +2261,7 @@ func cmdProfile(args []string) error {
 			}
 			entry.Scope = "worker_lease"
 			entry.CWD = strings.TrimSpace(lease.CWD)
+			entry.CWDScope = strings.TrimSpace(lease.CWDScope)
 			entry.ExpiresAt = lease.ExpiresAt
 			entry.LeaseID = lease.LeaseID
 		}
@@ -2161,6 +2279,7 @@ func cmdProfile(args []string) error {
 	case "reset":
 		fs := flag.NewFlagSet("profile reset", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
+		all := fs.Bool("all", false, "reset all active profiles to query and revoke owned worker leases")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -2172,7 +2291,9 @@ func cmdProfile(args []string) error {
 		if err != nil {
 			return err
 		}
-		if fs.NArg() == 0 {
+		var report profileResetReport
+		if *all || fs.NArg() == 0 {
+			report = revokeCLIProfileLeases(context.Background(), cfg, ctxFile)
 			ctxFile.Peers = map[string]cliProfilePeer{}
 		} else {
 			delete(ctxFile.Peers, fs.Arg(0))
@@ -2181,7 +2302,16 @@ func cmdProfile(args []string) error {
 		if err := writeCLIProfileContext(cfg, ctxFile); err != nil {
 			return err
 		}
-		fmt.Println("reset")
+		recordCLIProfileReset(cfg, report)
+		if *all || fs.NArg() == 0 {
+			fmt.Println("All local active profile contexts reset to query.")
+			fmt.Printf("Revoked %d elevated worker leases.\n", report.Revoked)
+			if report.Failed > 0 {
+				fmt.Printf("Warning: failed to revoke %d remote lease(s).\n", report.Failed)
+			}
+		} else {
+			fmt.Println("reset")
+		}
 		return nil
 	default:
 		return fmt.Errorf("unknown profile command %q", args[0])
@@ -2220,6 +2350,128 @@ func writeCLIProfileContext(cfg *config.Config, ctxFile cliProfileContext) error
 		return err
 	}
 	return os.WriteFile(path, append(body, '\n'), 0o600)
+}
+
+type cliActiveProfileSummary struct {
+	Peer          string     `json:"peer"`
+	ActiveProfile string     `json:"active_profile"`
+	ProfileSource string     `json:"profile_source"`
+	Scope         string     `json:"scope"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	ExpiresInS    int64      `json:"expires_in_s,omitempty"`
+	Risk          string     `json:"risk"`
+	Elevated      bool       `json:"elevated"`
+	CWD           string     `json:"cwd_scope,omitempty"`
+	CWDScope      string     `json:"cwd_scope_mode,omitempty"`
+	LeaseID       string     `json:"profile_context_id,omitempty"`
+}
+
+func cliActiveProfileSummaries(cfg *config.Config) ([]cliActiveProfileSummary, error) {
+	ctxFile, err := readCLIProfileContext(cfg)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	var peers []string
+	for name := range cfg.Peers {
+		peers = append(peers, name)
+	}
+	sort.Strings(peers)
+	out := make([]cliActiveProfileSummary, 0, len(peers))
+	for _, peer := range peers {
+		entry, ok := ctxFile.Peers[peer]
+		profileName := firstNonEmpty(ctxFile.DefaultProfile, profiledefs.Query)
+		source := "default"
+		scope := "default"
+		activeEntry := false
+		if ok && strings.TrimSpace(entry.Profile) != "" && (entry.ExpiresAt.IsZero() || now.Before(entry.ExpiresAt)) {
+			profileName = strings.TrimSpace(entry.Profile)
+			source = firstNonEmpty(entry.Scope, "active_context")
+			scope = firstNonEmpty(entry.Scope, "active_context")
+			activeEntry = true
+		}
+		prof := cfg.Profiles[profileName]
+		risk := firstNonEmpty(prof.Risk, profiledefs.RiskForConfig(profileName, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network), profiledefs.RiskLow)
+		summary := cliActiveProfileSummary{
+			Peer:          peer,
+			ActiveProfile: profileName,
+			ProfileSource: source,
+			Scope:         scope,
+			Risk:          risk,
+			Elevated:      risk == profiledefs.RiskMedium || risk == profiledefs.RiskHigh,
+			CWDScope:      "exact",
+		}
+		if activeEntry {
+			summary.CWD = entry.CWD
+			summary.CWDScope = firstNonEmpty(entry.CWDScope, "exact")
+			summary.LeaseID = entry.LeaseID
+		}
+		if activeEntry && !entry.ExpiresAt.IsZero() && now.Before(entry.ExpiresAt) {
+			expiresAt := entry.ExpiresAt
+			summary.ExpiresAt = &expiresAt
+			summary.ExpiresInS = int64(time.Until(entry.ExpiresAt) / time.Second)
+			if summary.ExpiresInS < 0 {
+				summary.ExpiresInS = 0
+			}
+		}
+		out = append(out, summary)
+	}
+	return out, nil
+}
+
+func printCLIProfileSummary(summaries []cliActiveProfileSummary) {
+	if len(summaries) == 0 {
+		fmt.Println("Profiles: no configured peers")
+		return
+	}
+	fmt.Printf("%-18s %-18s %-14s %-8s %-6s\n", "Peer", "Active profile", "Scope", "Expires", "Risk")
+	for _, summary := range summaries {
+		expires := "-"
+		if summary.ExpiresInS > 0 {
+			expires = fmt.Sprintf("%dm", (summary.ExpiresInS+59)/60)
+		}
+		fmt.Printf("%-18s %-18s %-14s %-8s %-6s\n", summary.Peer, summary.ActiveProfile, firstNonEmpty(summary.Scope, summary.ProfileSource), expires, firstNonEmpty(summary.Risk, profiledefs.RiskLow))
+	}
+}
+
+type profileResetReport struct {
+	Revoked int
+	Failed  int
+	Errors  []string
+}
+
+func revokeCLIProfileLeases(ctx context.Context, cfg *config.Config, ctxFile cliProfileContext) profileResetReport {
+	var report profileResetReport
+	for peerName, entry := range ctxFile.Peers {
+		if strings.TrimSpace(entry.LeaseID) == "" {
+			continue
+		}
+		peer, ok := cfg.Peers[peerName]
+		if !ok {
+			report.Failed++
+			report.Errors = append(report.Errors, "unknown peer "+peerName)
+			continue
+		}
+		port := firstNonZero(peer.Port, config.DefaultMeshPort)
+		client := meshrpc.NewClient("http://" + net.JoinHostPort(peer.Address, fmt.Sprintf("%d", port)))
+		if _, err := client.RevokeProfileLease(ctx, entry.LeaseID); err != nil {
+			report.Failed++
+			report.Errors = append(report.Errors, peerName+": "+err.Error())
+			continue
+		}
+		report.Revoked++
+	}
+	return report
+}
+
+func recordCLIProfileReset(cfg *config.Config, report profileResetReport) {
+	writer := audit.NewWriter(cfg.Audit.Path, cfg.Node.ID)
+	_, _ = writer.Append(audit.Event{
+		Type:           "profile.context.reset",
+		PolicyDecision: "allowed",
+		Source:         "cli",
+		Extra:          map[string]any{"revoked": report.Revoked, "failed": report.Failed, "errors": report.Errors},
+	})
 }
 
 func profileContextPath(cfg *config.Config) string {

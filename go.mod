@@ -4,6 +4,7 @@ go 1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.5.0
+	github.com/mitchellh/go-ps v1.0.0
 	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.44.0
 	modernc.org/sqlite v1.52.0
@@ -25,7 +26,6 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
-	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect

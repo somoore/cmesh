@@ -294,20 +294,20 @@ func GenerateConfig(opts InitOptions, machine Machine, runners []RunnerStatus, p
 	for _, profileName := range profiles {
 		switch profileName {
 		case profiledefs.Query:
-			writeProfile(&b, profiledefs.Query, profiledefs.RunnerProbe, "Deterministic read-only machine queries. No shell, no writes.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapRepoStatus}, nil, false, false, false, "deny", "deny", false, false, "30s", 65536, "normal", "high")
+			writeProfile(&b, profiledefs.Query, profiledefs.RunnerProbe, "Deterministic read-only machine queries. No shell, no writes.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapMemoryInfo, profiledefs.CapUptime, profiledefs.CapRepoStatus, profiledefs.CapProcessList}, nil, false, false, false, "deny", "deny", false, false, "30s", 65536, "normal", "high")
 			runnersToWrite[profiledefs.RunnerProbe] = []string{"builtin"}
 		case profiledefs.QueryNetwork:
-			writeProfile(&b, profiledefs.QueryNetwork, profiledefs.RunnerProbe, "Deterministic read-only queries plus bounded network checks.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapRepoStatus, profiledefs.CapNetworkCheck}, nil, true, false, false, "deny", "deny", true, false, "30s", 65536, "loud", "high")
+			writeProfile(&b, profiledefs.QueryNetwork, profiledefs.RunnerProbe, "Deterministic read-only queries plus bounded network checks.", []string{"query"}, []string{profiledefs.CapDiskInfo, profiledefs.CapSystemInfo, profiledefs.CapMemoryInfo, profiledefs.CapUptime, profiledefs.CapRepoStatus, profiledefs.CapProcessList, profiledefs.CapNetworkCheck, profiledefs.CapPortCheck}, nil, true, false, false, "deny", "deny", true, false, "30s", 65536, "loud", "high")
 			runnersToWrite[profiledefs.RunnerProbe] = []string{"builtin"}
 		case profiledefs.QueryShell:
-			writeProfile(&b, profiledefs.QueryShell, profiledefs.RunnerShell, "Allowlisted read-oriented diagnostics. No writes.", []string{"query"}, []string{profiledefs.CapShellReadonly, profiledefs.CapServiceStatus, profiledefs.CapProcessList, profiledefs.CapLogTail}, nil, true, false, false, "deny", "allowlisted", false, false, "30s", 65536, "loud", "medium")
+			writeProfile(&b, profiledefs.QueryShell, profiledefs.RunnerShell, "Allowlisted read-oriented diagnostics. No writes.", []string{"query"}, []string{profiledefs.CapShellReadonly, profiledefs.CapServiceStatus, profiledefs.CapProcessList, profiledefs.CapLogTailBounded, profiledefs.CapLogTail}, nil, true, false, false, "deny", "allowlisted", false, false, "30s", 65536, "loud", "medium")
 			writeShellPolicy(&b, profiledefs.QueryShell)
 			runnersToWrite[profiledefs.RunnerShell] = shellRunnerCommand()
 		case profiledefs.ReadonlyAgent:
-			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "allow", false, false, "30m", 1<<20, "normal", "medium")
+			writeProfile(&b, profiledefs.ReadonlyAgent, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
 			runnersToWrite[runnerName] = runnerCommand
 		case profiledefs.LegacyReadonly:
-			writeProfile(&b, profiledefs.LegacyReadonly, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "allow", false, false, "30m", 1<<20, "normal", "medium")
+			writeProfile(&b, profiledefs.LegacyReadonly, runnerName, "Agent-assisted open-ended read-only inspection. Prefer query when deterministic probes are enough.", []string{"inspect"}, []string{profiledefs.CapReadFiles}, nil, false, false, false, "deny", "deny", false, false, "30m", 1<<20, "normal", "medium")
 			runnersToWrite[runnerName] = runnerCommand
 		case profiledefs.RepoDev, profiledefs.LegacyDev:
 			writeProfile(&b, profiledefs.RepoDev, runnerName, "Agent-assisted repo-local edits and test commands inside allowed cwd.", []string{"build", "modify"}, []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo}, profileAllowedPeers, true, true, false, "repo_only", "allow", false, false, "2h", 1<<20, "loud", "medium")
@@ -641,6 +641,7 @@ func writeProfile(b *strings.Builder, name, runner, description string, intents,
 	writeKV(b, "shell", shell)
 	writeBool(b, "network", network)
 	writeBool(b, "git_push", gitPush)
+	writeKV(b, "risk", profiledefs.RiskForConfig(name, capabilities, writes, shell, network))
 	writeKV(b, "max_runtime", maxRuntime)
 	if maxOutputBytes > 0 {
 		writeInt64(b, "max_output_bytes", maxOutputBytes)

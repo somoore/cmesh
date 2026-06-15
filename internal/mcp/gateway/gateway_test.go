@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -653,6 +654,51 @@ func TestQueryPeerUsesActiveProfileContext(t *testing.T) {
 	}
 	if got.Profile != profiledefs.QueryShell || got.ProfileSource != "active_context" || got.CWD != root || got.TaskKind != "query" {
 		t.Fatalf("query_peer did not inherit active context: %+v", got)
+	}
+}
+
+func TestQueryPeerDoesNotAutoRouteIntoExplicitProfile(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	g.Config.Profiles[profiledefs.Query] = config.ProfileConfig{
+		Runner:       profiledefs.RunnerProbe,
+		Capabilities: []string{profiledefs.CapDiskInfo},
+		Writes:       profiledefs.WritesDeny,
+		Shell:        profiledefs.ShellDeny,
+		Risk:         profiledefs.RiskLow,
+	}
+	g.Config.Profiles[profiledefs.QueryNetwork] = config.ProfileConfig{
+		Runner:          profiledefs.RunnerProbe,
+		Capabilities:    []string{profiledefs.CapNetworkCheck},
+		Writes:          profiledefs.WritesDeny,
+		Shell:           profiledefs.ShellDeny,
+		Network:         true,
+		RequireExplicit: true,
+		Risk:            profiledefs.RiskMedium,
+	}
+	g.Config.Runners[profiledefs.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profiledefs.Query}
+	called := false
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		t.Fatalf("query_peer silently routed into query-network")
+	}))
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"worker": {Name: "worker", NodeID: "worker-node", Address: host, Port: port}}
+
+	resp, err := g.queryPeerCall(ctx, QueryPeerRequest{Peer: "worker", Kind: profiledefs.CapNetworkCheck})
+	if err != nil {
+		t.Fatalf("queryPeerCall err=%v", err)
+	}
+	if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorProfileDenied {
+		t.Fatalf("query_peer should deny silent escalation, got %+v", resp)
+	}
+	if called {
+		t.Fatal("worker was called despite denial")
+	}
+	payload, ok := resp.Result.(map[string]any)
+	if !ok || payload["nothing_executed"] != true || !strings.Contains(fmt.Sprint(payload["suggested_command"]), "query-network") {
+		t.Fatalf("denial payload = %#v", resp.Result)
 	}
 }
 

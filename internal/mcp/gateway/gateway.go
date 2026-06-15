@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,6 +88,7 @@ type ProfileUseRequest struct {
 	Peer                   string                             `json:"peer"`
 	Profile                string                             `json:"profile"`
 	CWD                    string                             `json:"cwd,omitempty"`
+	CWDScope               string                             `json:"cwd_scope,omitempty"`
 	TTL                    string                             `json:"ttl,omitempty"`
 	ProfileAcknowledgement profiledefs.ProfileAcknowledgement `json:"profile_acknowledgement,omitempty"`
 }
@@ -131,6 +133,7 @@ type profileContextFile struct {
 type profileContextPeer struct {
 	Profile   string    `json:"profile"`
 	CWD       string    `json:"cwd,omitempty"`
+	CWDScope  string    `json:"cwd_scope,omitempty"`
 	Scope     string    `json:"scope,omitempty"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	LeaseID   string    `json:"lease_id,omitempty"`
@@ -142,6 +145,7 @@ type resolvedProfileContext struct {
 	Source    string
 	ContextID string
 	CWD       string
+	CWDScope  string
 }
 
 type ToolResponse struct {
@@ -453,14 +457,22 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return ToolResponse{OK: true, Result: map[string]string{"harness": req.Harness, "manual_url": gatewayURL}}, nil
 	case "list_peers":
 		type peer struct {
-			Name    string `json:"name"`
-			NodeID  string `json:"node_id,omitempty"`
-			Address string `json:"address"`
-			Port    int    `json:"port"`
+			Name          string `json:"name"`
+			NodeID        string `json:"node_id,omitempty"`
+			Address       string `json:"address"`
+			Port          int    `json:"port"`
+			ActiveProfile string `json:"active_profile"`
+			ProfileSource string `json:"profile_source"`
+			Elevated      bool   `json:"elevated"`
+			Risk          string `json:"risk"`
+			ExpiresInS    int64  `json:"expires_in_s,omitempty"`
+			CWD           string `json:"cwd_scope,omitempty"`
+			CWDScopeMode  string `json:"cwd_scope_mode,omitempty"`
 		}
 		var peers []peer
 		for pname, cfg := range g.Config.Peers {
-			peers = append(peers, peer{Name: firstNonEmpty(cfg.Name, pname), NodeID: cfg.NodeID, Address: cfg.Address, Port: cfg.Port})
+			meta := g.activeProfileSummary(pname)
+			peers = append(peers, peer{Name: firstNonEmpty(cfg.Name, pname), NodeID: cfg.NodeID, Address: cfg.Address, Port: cfg.Port, ActiveProfile: meta.Profile, ProfileSource: meta.Source, Elevated: meta.Elevated, Risk: meta.Risk, ExpiresInS: meta.ExpiresInS, CWD: meta.CWD, CWDScopeMode: meta.CWDScope})
 		}
 		return ToolResponse{OK: true, Result: peers}, nil
 	case "peer_info":
@@ -595,14 +607,22 @@ func (g *Gateway) taskCatalog(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) listPeers(w http.ResponseWriter, r *http.Request) {
 	type peer struct {
-		Name    string `json:"name"`
-		NodeID  string `json:"node_id,omitempty"`
-		Address string `json:"address"`
-		Port    int    `json:"port"`
+		Name          string `json:"name"`
+		NodeID        string `json:"node_id,omitempty"`
+		Address       string `json:"address"`
+		Port          int    `json:"port"`
+		ActiveProfile string `json:"active_profile"`
+		ProfileSource string `json:"profile_source"`
+		Elevated      bool   `json:"elevated"`
+		Risk          string `json:"risk"`
+		ExpiresInS    int64  `json:"expires_in_s,omitempty"`
+		CWD           string `json:"cwd_scope,omitempty"`
+		CWDScopeMode  string `json:"cwd_scope_mode,omitempty"`
 	}
 	var peers []peer
 	for name, cfg := range g.Config.Peers {
-		peers = append(peers, peer{Name: firstNonEmpty(cfg.Name, name), NodeID: cfg.NodeID, Address: cfg.Address, Port: cfg.Port})
+		meta := g.activeProfileSummary(name)
+		peers = append(peers, peer{Name: firstNonEmpty(cfg.Name, name), NodeID: cfg.NodeID, Address: cfg.Address, Port: cfg.Port, ActiveProfile: meta.Profile, ProfileSource: meta.Source, Elevated: meta.Elevated, Risk: meta.Risk, ExpiresInS: meta.ExpiresInS, CWD: meta.CWD, CWDScopeMode: meta.CWDScope})
 	}
 	writeTool(w, ToolResponse{OK: true, Result: peers})
 }
@@ -780,7 +800,7 @@ func (g *Gateway) queryPeerCall(ctx context.Context, req QueryPeerRequest) (Tool
 		profileName = firstNonEmpty(resolved.Profile, profiledefs.Query)
 		profileSource = resolved.Source
 		profileContextID = resolved.ContextID
-		if !profileContextCWDAllowed(req.CWD, resolved.CWD) {
+		if !profileContextCWDAllowed(req.CWD, resolved.CWD, resolved.CWDScope) {
 			return toolFailure(task.ErrorProfileDenied, fmt.Sprintf("active profile lease for %q is scoped to cwd %q; requested cwd %q", resolved.Profile, resolved.CWD, req.CWD))
 		}
 		if strings.TrimSpace(req.CWD) == "" && strings.TrimSpace(resolved.CWD) != "" {
@@ -789,9 +809,22 @@ func (g *Gateway) queryPeerCall(ctx context.Context, req QueryPeerRequest) (Tool
 	}
 	if !g.profileGrantsCapability(profileName, kind) {
 		if routedProfile := g.typedProfileForCapability(kind, profileName); routedProfile != "" {
+			if prof, ok := g.Config.Profiles[routedProfile]; ok && (prof.RequireExplicit || prof.RequireLease) {
+				return profileDeniedWithGuidance(req.Peer, profileName, routedProfile, kind, req.CWD), nil
+			}
+			if g.profileRiskRank(routedProfile) > g.profileRiskRank(profileName) {
+				return profileDeniedWithGuidance(req.Peer, profileName, routedProfile, kind, req.CWD), nil
+			}
 			return g.routeQueryToTypedProfile(ctx, req, profileName, routedProfile, kind)
 		}
-		return ToolResponse{OK: false, Error: &ToolError{
+		if suggested := g.profileForDeniedCapability(kind); suggested != "" {
+			return profileDeniedWithGuidance(req.Peer, profileName, suggested, kind, req.CWD), nil
+		}
+		return ToolResponse{OK: false, Result: map[string]any{
+			"error":            "profile_denied",
+			"detail":           "kind " + strconv.Quote(kind) + " is not a typed query capability under profile " + strconv.Quote(profileName),
+			"nothing_executed": true,
+		}, Error: &ToolError{
 			Code:   task.ErrorProfileDenied,
 			Detail: "kind " + strconv.Quote(kind) + " is not a typed query capability under profile " + strconv.Quote(profileName) + "; use inspect_peer with readonly-agent for open-ended read-only inspection, or configure a typed probe profile that grants this capability",
 		}}, nil
@@ -832,11 +865,12 @@ func (g *Gateway) profileGrantsCapability(profileName, capability string) bool {
 
 func (g *Gateway) typedProfileForCapability(capability, currentProfile string) string {
 	candidates := map[string][]string{
-		profiledefs.CapNetworkCheck:  {profiledefs.QueryNetwork},
-		profiledefs.CapShellReadonly: {profiledefs.QueryShell},
-		profiledefs.CapServiceStatus: {profiledefs.QueryShell},
-		profiledefs.CapProcessList:   {profiledefs.QueryShell},
-		profiledefs.CapLogTail:       {profiledefs.QueryShell},
+		profiledefs.CapNetworkCheck:   {profiledefs.QueryNetwork},
+		profiledefs.CapPortCheck:      {profiledefs.QueryNetwork},
+		profiledefs.CapShellReadonly:  {profiledefs.QueryShell},
+		profiledefs.CapServiceStatus:  {profiledefs.QueryShell},
+		profiledefs.CapLogTail:        {profiledefs.QueryShell},
+		profiledefs.CapLogTailBounded: {profiledefs.QueryShell},
 	}
 	for _, profileName := range candidates[capability] {
 		if profileName == currentProfile {
@@ -847,6 +881,64 @@ func (g *Gateway) typedProfileForCapability(capability, currentProfile string) s
 		}
 	}
 	return ""
+}
+
+func (g *Gateway) profileForDeniedCapability(capability string) string {
+	for _, candidate := range []string{profiledefs.Query, profiledefs.QueryNetwork, profiledefs.QueryShell, profiledefs.RepoDev, profiledefs.DesktopControl, profiledefs.SystemChange} {
+		if g.profileGrantsCapability(candidate, capability) {
+			return candidate
+		}
+	}
+	switch capability {
+	case profiledefs.CapNetworkCheck, profiledefs.CapPortCheck:
+		return profiledefs.QueryNetwork
+	case profiledefs.CapServiceStatus, profiledefs.CapLogTail, profiledefs.CapLogTailBounded, profiledefs.CapShellReadonly:
+		return profiledefs.QueryShell
+	case profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo:
+		return profiledefs.RepoDev
+	default:
+		return ""
+	}
+}
+
+func (g *Gateway) profileRiskRank(profileName string) int {
+	prof, ok := g.Config.Profiles[profileName]
+	if !ok {
+		return 99
+	}
+	risk := firstNonEmpty(prof.Risk, profiledefs.RiskForConfig(profileName, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network))
+	switch risk {
+	case profiledefs.RiskLow:
+		return 0
+	case profiledefs.RiskMedium:
+		return 1
+	case profiledefs.RiskHigh:
+		return 2
+	default:
+		return 99
+	}
+}
+
+func profileDeniedWithGuidance(peer, activeProfile, requiredProfile, kind, cwd string) ToolResponse {
+	detail := fmt.Sprintf("%s requires profile %s, but active profile is %s.", kind, requiredProfile, activeProfile)
+	ttl := "15m"
+	if requiredProfile == profiledefs.RepoDev {
+		ttl = "30m"
+	}
+	parts := []string{"cmesh", "profile", "use", strings.TrimSpace(peer), requiredProfile, "--ttl", ttl}
+	if strings.TrimSpace(cwd) != "" && requiredProfile == profiledefs.RepoDev {
+		parts = append(parts, "--cwd", strings.TrimSpace(cwd))
+	}
+	suggested := setupinstall.ShellCommand(parts)
+	return ToolResponse{OK: false, Result: map[string]any{
+		"error":             "profile_denied",
+		"detail":            detail,
+		"nothing_executed":  true,
+		"suggested_command": suggested,
+	}, Error: &ToolError{
+		Code:   task.ErrorProfileDenied,
+		Detail: detail + "\nEnable it temporarily with:\n  " + suggested + "\nNothing was executed.",
+	}}
 }
 
 func (g *Gateway) routeQueryToTypedProfile(ctx context.Context, req QueryPeerRequest, requestedProfile, routedProfile, kind string) (ToolResponse, error) {
@@ -957,7 +1049,63 @@ func (g *Gateway) profileCurrentCall(_ context.Context, _ json.RawMessage) (Tool
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
-	return ToolResponse{OK: true, Result: ctxFile}, nil
+	summaries := map[string]activeProfileSummary{}
+	for peer := range g.Config.Peers {
+		summaries[peer] = g.activeProfileSummary(peer)
+	}
+	return ToolResponse{OK: true, Result: map[string]any{
+		"default_profile": ctxFile.DefaultProfile,
+		"peers":           summaries,
+		"raw_context":     ctxFile,
+	}}, nil
+}
+
+type activeProfileSummary struct {
+	Peer         string     `json:"peer,omitempty"`
+	Profile      string     `json:"active_profile"`
+	Source       string     `json:"profile_source"`
+	Elevated     bool       `json:"elevated"`
+	Risk         string     `json:"risk"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	ExpiresInS   int64      `json:"expires_in_s,omitempty"`
+	CWD          string     `json:"cwd_scope,omitempty"`
+	CWDScope     string     `json:"cwd_scope_mode,omitempty"`
+	LeaseID      string     `json:"profile_context_id,omitempty"`
+	RequireLease bool       `json:"require_lease"`
+	ExplicitOnly bool       `json:"require_explicit"`
+	Capabilities []string   `json:"capabilities,omitempty"`
+}
+
+func (g *Gateway) activeProfileSummary(peer string) activeProfileSummary {
+	resolved := g.resolveProfileContext(peer)
+	profileName := firstNonEmpty(resolved.Profile, g.defaultProfile(), profiledefs.Query)
+	prof := g.Config.Profiles[profileName]
+	risk := strings.TrimSpace(prof.Risk)
+	if risk == "" {
+		risk = profiledefs.RiskForConfig(profileName, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
+	}
+	out := activeProfileSummary{
+		Peer:         strings.TrimSpace(peer),
+		Profile:      profileName,
+		Source:       resolved.Source,
+		Elevated:     risk == profiledefs.RiskMedium || risk == profiledefs.RiskHigh,
+		Risk:         risk,
+		CWD:          resolved.CWD,
+		CWDScope:     firstNonEmpty(resolved.CWDScope, "exact"),
+		LeaseID:      resolved.ContextID,
+		RequireLease: prof.RequireLease,
+		ExplicitOnly: prof.RequireExplicit,
+		Capabilities: profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
+	}
+	if entry, ok := g.activeProfileContextEntry(peer); ok && !entry.ExpiresAt.IsZero() {
+		expiresAt := entry.ExpiresAt
+		out.ExpiresAt = &expiresAt
+		out.ExpiresInS = int64(time.Until(entry.ExpiresAt) / time.Second)
+		if out.ExpiresInS < 0 {
+			out.ExpiresInS = 0
+		}
+	}
+	return out
 }
 
 func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (ToolResponse, error) {
@@ -987,6 +1135,13 @@ func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (To
 	if prof.RequireLease && ttl <= 0 {
 		return toolFailure(task.ErrorProfileDenied, "profile "+profileName+" requires ttl to create an active lease")
 	}
+	cwdScope := strings.TrimSpace(req.CWDScope)
+	if cwdScope == "" {
+		cwdScope = "exact"
+	}
+	if cwdScope != "exact" && cwdScope != "recursive" {
+		return toolFailure(task.ErrorProfileDenied, "cwd_scope must be exact or recursive")
+	}
 	if problems := profiledefs.AcknowledgementProblems([]string{profileName}, []profiledefs.ProfileAcknowledgement{req.ProfileAcknowledgement}); len(problems) > 0 {
 		return toolFailure(task.ErrorProfileAckRequired, strings.Join(problems, "; "))
 	}
@@ -998,7 +1153,7 @@ func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (To
 		ctxFile.Peers = map[string]profileContextPeer{}
 	}
 	now := time.Now().UTC()
-	entry := profileContextPeer{Profile: profileName, CWD: strings.TrimSpace(req.CWD), Scope: "global", UpdatedAt: now}
+	entry := profileContextPeer{Profile: profileName, CWD: strings.TrimSpace(req.CWD), CWDScope: cwdScope, Scope: "global", UpdatedAt: now}
 	if ttl > 0 && !prof.RequireLease {
 		entry.Scope = "session"
 		entry.ExpiresAt = now.Add(ttl)
@@ -1011,6 +1166,7 @@ func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (To
 		lease, err := client.IssueProfileLease(ctx, schema.ProfileLeaseRequest{
 			Profile:         profileName,
 			CWD:             strings.TrimSpace(req.CWD),
+			CWDScope:        cwdScope,
 			TTLSeconds:      int64(ttl / time.Second),
 			Capabilities:    profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims),
 			OriginSessionID: "profile_use",
@@ -1020,6 +1176,7 @@ func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (To
 		}
 		entry.Scope = "worker_lease"
 		entry.CWD = strings.TrimSpace(lease.CWD)
+		entry.CWDScope = strings.TrimSpace(lease.CWDScope)
 		entry.ExpiresAt = lease.ExpiresAt
 		entry.LeaseID = lease.LeaseID
 	}
@@ -1028,7 +1185,7 @@ func (g *Gateway) profileUseCall(ctx context.Context, req ProfileUseRequest) (To
 	if err := g.writeProfileContext(ctxFile); err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
-	return ToolResponse{OK: true, Result: map[string]any{"peer": peer, "profile": profileName, "cwd": strings.TrimSpace(req.CWD), "profile_source": "active_context", "profile_context_id": entry.LeaseID, "expires_at": entry.ExpiresAt}}, nil
+	return ToolResponse{OK: true, Result: map[string]any{"peer": peer, "profile": profileName, "cwd": strings.TrimSpace(req.CWD), "cwd_scope": entry.CWDScope, "profile_source": "active_context", "profile_context_id": entry.LeaseID, "expires_at": entry.ExpiresAt}}, nil
 }
 
 func (g *Gateway) profileConfigureCall(req ProfileConfigureRequest) (ToolResponse, error) {
@@ -1080,16 +1237,63 @@ func (g *Gateway) profileResetCall(_ context.Context, peer string) (ToolResponse
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	peer = strings.TrimSpace(peer)
+	report := map[string]any{"revoked": 0, "failed": 0}
 	if peer == "" {
+		report = g.revokeActiveProfileLeases(ctxFile)
 		ctxFile.Peers = map[string]profileContextPeer{}
 	} else {
+		if entry, ok := ctxFile.Peers[peer]; ok && strings.TrimSpace(entry.LeaseID) != "" {
+			report = g.revokeProfileLease(peer, entry.LeaseID)
+		}
 		delete(ctxFile.Peers, peer)
 	}
 	ctxFile.UpdatedAt = time.Now().UTC()
 	if err := g.writeProfileContext(ctxFile); err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
-	return ToolResponse{OK: true, Result: ctxFile}, nil
+	g.recordProfileReset(report)
+	return ToolResponse{OK: true, Result: map[string]any{"default_profile": profiledefs.Query, "context": ctxFile, "lease_revocation": report}}, nil
+}
+
+func (g *Gateway) revokeActiveProfileLeases(ctxFile profileContextFile) map[string]any {
+	revoked := 0
+	var errorsOut []string
+	for peer, entry := range ctxFile.Peers {
+		if strings.TrimSpace(entry.LeaseID) == "" {
+			continue
+		}
+		report := g.revokeProfileLease(peer, entry.LeaseID)
+		if n, _ := report["revoked"].(int); n > 0 {
+			revoked += n
+		}
+		if errText, _ := report["error"].(string); errText != "" {
+			errorsOut = append(errorsOut, peer+": "+errText)
+		}
+	}
+	return map[string]any{"revoked": revoked, "failed": len(errorsOut), "errors": errorsOut}
+}
+
+func (g *Gateway) revokeProfileLease(peer, leaseID string) map[string]any {
+	client, err := g.client(peer)
+	if err != nil {
+		return map[string]any{"revoked": 0, "failed": 1, "error": err.Error()}
+	}
+	if _, err := client.RevokeProfileLease(context.Background(), leaseID); err != nil {
+		return map[string]any{"revoked": 0, "failed": 1, "error": err.Error()}
+	}
+	return map[string]any{"revoked": 1, "failed": 0}
+}
+
+func (g *Gateway) recordProfileReset(report map[string]any) {
+	if g.Audit == nil {
+		return
+	}
+	_, _ = g.Audit.Append(audit.Event{
+		Type:           "profile.context.reset",
+		PolicyDecision: "allowed",
+		Source:         "mcp_gateway",
+		Extra:          report,
+	})
 }
 
 func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolResponse, error) {
@@ -1125,7 +1329,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		req.Profile = resolved.Profile
 		req.ProfileSource = resolved.Source
 		req.ProfileContextID = resolved.ContextID
-		if !profileContextCWDAllowed(req.CWD, resolved.CWD) {
+		if !profileContextCWDAllowed(req.CWD, resolved.CWD, resolved.CWDScope) {
 			return toolFailure(task.ErrorProfileDenied, fmt.Sprintf("active profile lease for %q is scoped to cwd %q; requested cwd %q", resolved.Profile, resolved.CWD, req.CWD))
 		}
 		if strings.TrimSpace(req.CWD) == "" && strings.TrimSpace(resolved.CWD) != "" {
@@ -1133,7 +1337,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		}
 	} else if req.ProfileSource == "" {
 		if resolved := g.resolveProfileContext(req.Peer); resolved.Profile == req.Profile && resolved.ContextID != "" {
-			if !profileContextCWDAllowed(req.CWD, resolved.CWD) {
+			if !profileContextCWDAllowed(req.CWD, resolved.CWD, resolved.CWDScope) {
 				return toolFailure(task.ErrorProfileDenied, fmt.Sprintf("active profile lease for %q is scoped to cwd %q; requested cwd %q", resolved.Profile, resolved.CWD, req.CWD))
 			}
 			req.ProfileSource = resolved.Source
@@ -1809,6 +2013,7 @@ func (g *Gateway) resolveProfileContext(peer string) resolvedProfileContext {
 					Source:    "active_context",
 					ContextID: strings.TrimSpace(entry.LeaseID),
 					CWD:       strings.TrimSpace(entry.CWD),
+					CWDScope:  strings.TrimSpace(entry.CWDScope),
 				}
 			}
 		}
@@ -1819,11 +2024,35 @@ func (g *Gateway) resolveProfileContext(peer string) resolvedProfileContext {
 	return resolvedProfileContext{Profile: g.defaultProfile(), Source: "default_profile"}
 }
 
-func profileContextCWDAllowed(requested, leased string) bool {
+func (g *Gateway) activeProfileContextEntry(peer string) (profileContextPeer, bool) {
+	ctxFile, err := g.readProfileContext()
+	if err != nil {
+		return profileContextPeer{}, false
+	}
+	entry, ok := ctxFile.Peers[strings.TrimSpace(peer)]
+	if !ok || strings.TrimSpace(entry.Profile) == "" {
+		return profileContextPeer{}, false
+	}
+	if !entry.ExpiresAt.IsZero() && !time.Now().UTC().Before(entry.ExpiresAt) {
+		return profileContextPeer{}, false
+	}
+	return entry, true
+}
+
+func profileContextCWDAllowed(requested, leased, scope string) bool {
 	requested = strings.TrimSpace(requested)
 	leased = strings.TrimSpace(leased)
 	if requested == "" || leased == "" {
 		return true
+	}
+	requested = filepath.Clean(requested)
+	leased = filepath.Clean(leased)
+	if strings.EqualFold(strings.TrimSpace(scope), "recursive") {
+		cmpReq, cmpLease := requested, leased
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+			cmpReq, cmpLease = strings.ToLower(cmpReq), strings.ToLower(cmpLease)
+		}
+		return cmpReq == cmpLease || strings.HasPrefix(cmpReq, cmpLease+string(filepath.Separator))
 	}
 	return strings.EqualFold(requested, leased)
 }

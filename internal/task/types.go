@@ -85,6 +85,7 @@ type ResultEnvelope struct {
 	FilesChanged            []string               `json:"files_changed,omitempty"`
 	Tests                   TestClaims             `json:"tests"`
 	CommandOutput           CommandOutput          `json:"command_output,omitempty"`
+	QueryResult             *QueryResult           `json:"query_result,omitempty"`
 	WorkerSummaryUntrusted  string                 `json:"worker_summary_untrusted,omitempty"`
 	Usage                   Usage                  `json:"usage"`
 	VerificationRequired    bool                   `json:"verification_required"`
@@ -100,6 +101,11 @@ type CommandOutput struct {
 	StdoutRef string `json:"stdout_ref,omitempty"`
 	StderrRef string `json:"stderr_ref,omitempty"`
 	DurationS int64  `json:"duration_s"`
+}
+
+type QueryResult struct {
+	Kind string                 `json:"kind"`
+	Data map[string]interface{} `json:"data"`
 }
 
 type TestClaims struct {

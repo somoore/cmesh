@@ -107,6 +107,17 @@ func TestInboundRejectsDisallowedCWD(t *testing.T) {
 	}
 }
 
+func TestPathComparisonCaseInsensitivePlatforms(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin"} {
+		if !pathComparisonIsCaseInsensitive(goos) {
+			t.Fatalf("%s should use case-insensitive path comparison", goos)
+		}
+	}
+	if pathComparisonIsCaseInsensitive("linux") {
+		t.Fatal("linux should keep case-sensitive path comparison")
+	}
+}
+
 func TestQueryTaskRequiresSafeRunnerDenyWriteProfileAndCapability(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
