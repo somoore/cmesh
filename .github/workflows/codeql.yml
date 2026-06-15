@@ -20,17 +20,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
         with:
+          fetch-depth: 0
           persist-credentials: false
 
+      - name: Detect markdown-only change
+        id: changes
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: echo "markdown_only=$(sh scripts/markdown-only-change.sh)" >> "$GITHUB_OUTPUT"
+
       - name: Initialize CodeQL
+        if: steps.changes.outputs.markdown_only != 'true'
         uses: github/codeql-action/init@96a56f9e1619f4ee5970aabb968dc392d1e9b425
         with:
           languages: go
 
       - name: Autobuild
+        if: steps.changes.outputs.markdown_only != 'true'
         uses: github/codeql-action/autobuild@96a56f9e1619f4ee5970aabb968dc392d1e9b425
 
       - name: Analyze
+        if: steps.changes.outputs.markdown_only != 'true'
         uses: github/codeql-action/analyze@96a56f9e1619f4ee5970aabb968dc392d1e9b425
         with:
           upload: false
+
+      - name: Skip markdown-only change
+        if: steps.changes.outputs.markdown_only == 'true'
+        run: echo "Skipping CodeQL for markdown-only change"
