@@ -190,6 +190,30 @@ func TestClaudeGetOutputIsSetupStdioRequiresUserScope(t *testing.T) {
 		t.Fatalf("pending/rejected entries must not verify as usable setup servers")
 	}
 
+	markerPendingUser := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  - Pending approval",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if claudeGetOutputIsSetupStdio(markerPendingUser, "/opt/cmesh") {
+		t.Fatalf("marker-prefixed pending entries must not verify as usable setup servers")
+	}
+
+	markerRejectedUser := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  - Rejected",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if claudeGetOutputIsSetupStdio(markerRejectedUser, "/opt/cmesh") {
+		t.Fatalf("marker-prefixed rejected entries must not verify as usable setup servers")
+	}
+
 	userSetup := strings.Join([]string{
 		"cmesh:",
 		"  Scope: User",
