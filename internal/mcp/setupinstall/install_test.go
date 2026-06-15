@@ -46,6 +46,10 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 	claudePath := filepath.Join(dir, "claude")
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"add\" ] && [ \"$3\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' '  -s, --scope <scope>  Configuration scope (local, user, or project)'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
 		"  printf '%s\\n' 'cmesh:' '  Scope: User' '  Type: stdio' '  Command: /opt/cmesh' '  Args: mcp --stdio'\n" +
 		"fi\n"
@@ -63,7 +67,7 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	body := string(bodyBytes)
-	for _, scope := range claudeInstallCleanupScopes {
+	for _, scope := range []string{"user", "local"} {
 		if !strings.Contains(body, "mcp remove --scope "+scope+" cmesh\n") {
 			t.Fatalf("remove command for scope %q missing from log:\n%s", scope, body)
 		}
@@ -88,6 +92,10 @@ func TestInstallClaudeFailsWhenProjectScopeStillShadowsSetupServer(t *testing.T)
 	claudePath := filepath.Join(dir, "claude")
 	script := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"add\" ] && [ \"$3\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' '  -s, --scope <scope>  Configuration scope (local, user, or project)'\n" +
+		"  exit 0\n" +
+		"fi\n" +
 		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
 		"  printf '%s\\n' 'cmesh:' '  Scope: Project' '  Type: http' '  URL: http://127.0.0.1:7777/mcp'\n" +
 		"fi\n"
@@ -109,6 +117,76 @@ func TestInstallClaudeFailsWhenProjectScopeStillShadowsSetupServer(t *testing.T)
 	}
 	if strings.Contains(string(bodyBytes), "mcp remove --scope project cmesh\n") {
 		t.Fatalf("installClaude must not remove project-scoped MCP config:\n%s", bodyBytes)
+	}
+}
+
+func TestInstallClaudeCleansLegacyPrivateProjectScope(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "claude-args.log")
+	claudePath := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"add\" ] && [ \"$3\" = \"--help\" ]; then\n" +
+		"  printf '%s\\n' '  -s, --scope <scope>  Configuration scope (project or user)'\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
+		"  printf '%s\\n' 'cmesh:' '  Scope: User' '  Type: stdio' '  Command: /opt/cmesh' '  Args: mcp --stdio'\n" +
+		"fi\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result := installClaude(Agent{ID: "claude-code", Name: "Claude Code", Found: true}, "/opt/cmesh")
+	if !result.OK {
+		t.Fatalf("installClaude failed: %+v", result)
+	}
+	bodyBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(bodyBytes), "mcp remove --scope project cmesh\n") {
+		t.Fatalf("legacy private project scope should be cleaned:\n%s", bodyBytes)
+	}
+}
+
+func TestClaudeGetOutputIsSetupStdioRequiresUserScope(t *testing.T) {
+	projectShadow := strings.Join([]string{
+		"cmesh:",
+		"  Scope: Project",
+		"  Type: stdio",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if claudeGetOutputIsSetupStdio(projectShadow, "/opt/cmesh") {
+		t.Fatalf("project-scoped entry must not verify as the user setup server")
+	}
+
+	pendingUser := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  Status: Pending approval",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if claudeGetOutputIsSetupStdio(pendingUser, "/opt/cmesh") {
+		t.Fatalf("pending/rejected entries must not verify as usable setup servers")
+	}
+
+	userSetup := strings.Join([]string{
+		"cmesh:",
+		"  Scope: User",
+		"  Type: stdio",
+		"  Command: /opt/cmesh",
+		"  Args: mcp --stdio",
+	}, "\n")
+	if !claudeGetOutputIsSetupStdio(userSetup, "/opt/cmesh") {
+		t.Fatalf("user-scoped stdio setup server should verify")
 	}
 }
 

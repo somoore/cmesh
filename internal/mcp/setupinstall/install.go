@@ -141,9 +141,10 @@ func installClaude(agent Agent, cmeshPath string) Result {
 	}
 	// A stale local HTTP gateway entry overrides the user-scoped stdio setup
 	// server inside that project and shows up in Claude as reconnecting when no
-	// daemon is running yet. Sweep only user/local entries here: project scope is
-	// a shared .mcp.json file and must not be modified by this per-user installer.
-	for _, scope := range claudeInstallCleanupScopes {
+	// daemon is running yet. Modern Claude uses local for that private scope;
+	// older Claude called the same private scope project. Do not remove modern
+	// project scope because that is shared .mcp.json configuration.
+	for _, scope := range claudeInstallCleanupScopes(claude) {
 		_ = exec.Command(claude, "mcp", "remove", "--scope", scope, ServerName).Run()
 	}
 	cmd := exec.Command(claude, "mcp", "add", "--scope", "user", ServerName, "--", cmeshPath, "mcp", "--stdio")
@@ -162,20 +163,44 @@ func installClaude(agent Agent, cmeshPath string) Result {
 }
 
 // claudeInstallCleanupScopes are private scopes the per-user installer may
-// replace automatically. Do not include "project": that is VCS-shared .mcp.json.
-var claudeInstallCleanupScopes = []string{"user", "local"}
+// replace automatically. Current Claude Code uses "local" for private
+// per-project entries and "project" for VCS-shared .mcp.json. Older Claude Code
+// versions used "project" for the private per-project scope, before "local"
+// existed; keep cleaning that legacy private scope without touching modern
+// shared project config.
+func claudeInstallCleanupScopes(claude string) []string {
+	scopes := []string{"user", "local"}
+	out, err := exec.Command(claude, "mcp", "add", "--help").CombinedOutput()
+	if err != nil {
+		return scopes
+	}
+	help := strings.ToLower(string(out))
+	if strings.Contains(help, "--scope") && !strings.Contains(help, "local") {
+		scopes = append(scopes, "project")
+	}
+	return scopes
+}
 
 func claudeResolvesToSetupStdio(claude, cmeshPath string) bool {
 	out, err := exec.Command(claude, "mcp", "get", ServerName).CombinedOutput()
 	if err != nil {
 		return false
 	}
-	body := string(out)
+	return claudeGetOutputIsSetupStdio(string(out), cmeshPath)
+}
+
+func claudeGetOutputIsSetupStdio(body, cmeshPath string) bool {
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, "scope: user") ||
+		strings.Contains(lower, "pending") ||
+		strings.Contains(lower, "rejected") ||
+		strings.Contains(lower, "http://") ||
+		strings.Contains(lower, "https://") {
+		return false
+	}
 	return strings.Contains(body, cmeshPath) &&
 		strings.Contains(body, "mcp") &&
-		strings.Contains(body, "--stdio") &&
-		!strings.Contains(strings.ToLower(body), "http://") &&
-		!strings.Contains(strings.ToLower(body), "https://")
+		strings.Contains(body, "--stdio")
 }
 
 func installCodex(agent Agent, cmeshPath string) Result {
