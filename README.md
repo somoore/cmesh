@@ -15,9 +15,7 @@ Use cmesh to ask the datacenter server to inspect /srv/myapp and check why the d
 
 Your agent keeps running on your Mac. The work runs on the server. In testing, cmesh has run Linux builds, inspected services, and changed a Windows wallpaper — all driven from a Mac over the tailnet.
 
-## Experimental — read this
-
-cmesh causes real changes on real machines. **Do not use it on anything you love:** machines, repos, credentials, or data you cannot afford to lose. This is not enterprise remote management; it is an experimental agent delegation mesh for trusted private networks, and every worker profile is real authority on that machine. Start on trusted machines with narrow peer and cwd allowlists and the `query` profile. See [docs/security.md](docs/security.md).
+> <strong><font color="#0969da">Experimental - read this:</font></strong> cmesh causes real changes on real machines. **Do not use it on anything you love:** machines, repos, credentials, or data you cannot afford to lose. This is not enterprise remote management; it is an experimental agent delegation mesh for trusted private networks, and every worker profile is real authority on that machine. Start on trusted machines with narrow peer and cwd allowlists and the `query` profile. See [docs/security.md](docs/security.md).
 
 ## How the handoff works
 
