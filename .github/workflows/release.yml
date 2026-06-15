@@ -97,12 +97,26 @@ jobs:
       - name: Test
         run: make test
 
+  release-approval:
+    name: approve release
+    runs-on: ubuntu-24.04
+    needs:
+      - validate
+      - test
+    permissions:
+      contents: read
+    environment:
+      name: release-approval
+    steps:
+      - name: Release approved
+        run: echo "Release ${{ needs.validate.outputs.tag_name }} approved"
+
   build-portable:
     name: build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ubuntu-24.04
     needs:
       - validate
-      - test
+      - release-approval
     permissions:
       contents: read
     strategy:
@@ -147,7 +161,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     needs:
       - validate
-      - test
+      - release-approval
     permissions:
       contents: read
     environment: release-signing
