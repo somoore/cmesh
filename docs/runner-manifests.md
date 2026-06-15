@@ -138,3 +138,8 @@ What did cmesh allow?
 What controls did the runner claim to use?
 What actually happened?
 ```
+
+## See also
+
+- [Configuration](configuration.md) — how profile claims, `bare`, and `enforcement_confidence` are set in the config file.
+- [Security](security.md) — why manifests are treated as evidence, not enforcement, and where that boundary sits.

@@ -227,3 +227,10 @@ Before relying on a node as a worker:
 - Audit logs are being written.
 - You can retrieve task status and result after restarting the origin daemon.
 - A different allowed peer cannot fetch or cancel another peer's task.
+
+## See also
+
+- [Architecture](architecture.md) — how the trust boundary is realized across the two MCP surfaces and the mesh RPC transport.
+- [Tailscale grants](tailscale-grants.md) — the network-admission layer that sits in front of cmesh policy.
+- [Configuration](configuration.md) — the policy, profile, and peer fields you tune to keep the boundary narrow.
+- [Runner manifests](runner-manifests.md) — the evidence model that keeps profile claims honest.

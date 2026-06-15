@@ -108,3 +108,8 @@ schemas                    JSON Schemas
 examples                   runnable config and Tailscale grant examples
 docs                       architecture and operator guidance
 ```
+
+## See also
+
+- [Release process](release.md) — how the checks above feed into tagged, signed releases.
+- [Architecture](architecture.md) — the system the package map implements.

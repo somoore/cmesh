@@ -123,3 +123,8 @@ If a tailnet still uses legacy ACLs, the equivalent network rule is:
 ```
 
 Use grants where available.
+
+## See also
+
+- [Security](security.md) — how network admission sits in front of cmesh's own policy and identity checks.
+- [Configuration](configuration.md) — the `[tailscale]` bind settings and the policy this network layer complements.
