@@ -44,7 +44,11 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "claude-args.log")
 	claudePath := filepath.Join(dir, "claude")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n"
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
+		"  printf '%s\\n' 'cmesh:' '  Scope: User' '  Type: stdio' '  Command: /opt/cmesh' '  Args: mcp --stdio'\n" +
+		"fi\n"
 	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -59,13 +63,52 @@ func TestInstallClaudeRegistersSetupStdioServer(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	body := string(bodyBytes)
-	for _, scope := range claudeScopes {
+	for _, scope := range claudeInstallCleanupScopes {
 		if !strings.Contains(body, "mcp remove --scope "+scope+" cmesh\n") {
 			t.Fatalf("remove command for scope %q missing from log:\n%s", scope, body)
 		}
 	}
+	if strings.Contains(body, "mcp remove --scope project cmesh\n") {
+		t.Fatalf("installClaude must not remove project-scoped MCP config:\n%s", body)
+	}
 	if !strings.Contains(body, "mcp add --scope user cmesh -- /opt/cmesh mcp --stdio\n") {
 		t.Fatalf("setup stdio add command missing from log:\n%s", body)
+	}
+	if !strings.Contains(body, "mcp get cmesh\n") {
+		t.Fatalf("setup stdio verification command missing from log:\n%s", body)
+	}
+}
+
+func TestInstallClaudeFailsWhenProjectScopeStillShadowsSetupServer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "claude-args.log")
+	claudePath := filepath.Join(dir, "claude")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> " + shellQuote(logPath) + "\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
+		"  printf '%s\\n' 'cmesh:' '  Scope: Project' '  Type: http' '  URL: http://127.0.0.1:7777/mcp'\n" +
+		"fi\n"
+	if err := os.WriteFile(claudePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	result := installClaude(Agent{ID: "claude-code", Name: "Claude Code", Found: true}, "/opt/cmesh")
+	if result.OK {
+		t.Fatalf("installClaude must fail when project scope still shadows user stdio: %+v", result)
+	}
+	if !strings.Contains(result.Detail, "project-scoped cmesh entry") {
+		t.Fatalf("installClaude detail should explain project-scope shadowing: %+v", result)
+	}
+	bodyBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(bodyBytes), "mcp remove --scope project cmesh\n") {
+		t.Fatalf("installClaude must not remove project-scoped MCP config:\n%s", bodyBytes)
 	}
 }
 
