@@ -133,9 +133,47 @@ func TestClaudeProfileForDenyWriteDisallowsWriteAndShellTools(t *testing.T) {
 		t.Fatal("claude-code runner not registered")
 	}
 	flags := strings.Join(run.Manifest().Profiles["readonly"].NativeFlags, " ")
-	for _, want := range []string{"--permission-mode plan", "--disallowedTools", "Bash", "Write", "Edit"} {
+	for _, want := range []string{"--permission-mode plan", "--disallowedTools", "Bash", "PowerShell", "Write", "Edit"} {
 		if !strings.Contains(flags, want) {
 			t.Fatalf("native flags %q missing %q", flags, want)
+		}
+	}
+}
+
+func TestClaudeProfileForRepoDevAllowsNoninteractiveRepoEditsAndShell(t *testing.T) {
+	cfg := &config.Config{
+		Profiles: map[string]config.ProfileConfig{
+			profiledefs.RepoDev: {
+				Runner:                claudecode.Name,
+				Claims:                []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+				Writes:                profiledefs.WritesRepoOnly,
+				Shell:                 profiledefs.ShellAllow,
+				RequireExplicit:       true,
+				RequireLease:          true,
+				EnforcementConfidence: "medium",
+			},
+		},
+		Runners: map[string]config.RunnerConfig{
+			claudecode.Name: {Command: []string{"claude"}, DefaultProfile: profiledefs.RepoDev},
+		},
+	}
+	reg, err := buildRunners(cfg)
+	if err != nil {
+		t.Fatalf("buildRunners: %v", err)
+	}
+	run, ok := reg.Get(claudecode.Name)
+	if !ok {
+		t.Fatal("claude-code runner not registered")
+	}
+	flags := strings.Join(run.Manifest().Profiles[profiledefs.RepoDev].NativeFlags, " ")
+	for _, want := range []string{"--permission-mode acceptEdits", "--allowedTools", "Bash", "PowerShell"} {
+		if !strings.Contains(flags, want) {
+			t.Fatalf("native flags %q missing %q", flags, want)
+		}
+	}
+	for _, unwanted := range []string{"--disallowedTools", "Write", "--permission-mode plan"} {
+		if strings.Contains(flags, unwanted) {
+			t.Fatalf("native flags %q unexpectedly contain %q", flags, unwanted)
 		}
 	}
 }

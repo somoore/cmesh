@@ -637,13 +637,14 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		ProfileContextID: req.ProfileContextID,
 	}
 	decision := s.Policy.CheckInbound(intent)
+	effectiveCWD := firstNonEmpty(decision.NormalizedCWD, req.CWD)
 	rec := task.Record{
 		ID:               req.TaskID,
 		OriginNodeID:     firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID, identity.NodeID),
 		OriginSessionID:  firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
 		WorkerNodeID:     s.Config.Node.ID,
 		State:            task.StateQueued,
-		CWD:              req.CWD,
+		CWD:              effectiveCWD,
 		Runner:           firstNonEmpty(req.Runner, runnerFromProfile(s.Config, req.Profile)),
 		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
 		ProfileEffective: decision.EffectiveProfile,

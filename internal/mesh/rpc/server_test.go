@@ -612,6 +612,74 @@ func TestWorkerIssuedLeaseRequiredForLeasedProfile(t *testing.T) {
 	waitForTerminalTask(t, server, "task-real-lease")
 }
 
+func TestCreateTaskPassesNormalizedLeasedCWDToRunner(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "allowed-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	run := &captureRequestRunner{requests: make(chan runner.RunRequest, 1)}
+	server := newTestServer(t, root, run)
+	server.Config.Profiles[profiledefs.RepoDev] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Claims:          []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Writes:          profiledefs.WritesRepoOnly,
+		Shell:           profiledefs.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+		MaxRuntime:      config.Duration{Duration: time.Minute},
+	}
+	server.Policy = policy.NewWithLeaseValidator(server.Config, server.Leases)
+
+	leaseBody := `{"profile":"repo-dev","cwd":` + strconv.Quote(link) + `,"ttl_s":1800}`
+	leaseReq := httptest.NewRequest(http.MethodPost, "/v1/profile-leases", strings.NewReader(leaseBody))
+	leaseReq.RemoteAddr = "100.64.0.1:12345"
+	leaseRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(leaseRes, leaseReq)
+	if leaseRes.Code != http.StatusCreated {
+		t.Fatalf("lease status = %d, body = %s", leaseRes.Code, leaseRes.Body.String())
+	}
+	var lease schema.ProfileLease
+	if err := json.Unmarshal(leaseRes.Body.Bytes(), &lease); err != nil {
+		t.Fatalf("decode lease: %v", err)
+	}
+
+	createBody := `{
+		"task_id":"task-normalized-cwd",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-normalized",
+		"prompt":"write inside the approved cwd",
+		"cwd":` + strconv.Quote(link) + `,
+		"runner":"fake",
+		"profile":"repo-dev",
+		"profile_context_id":` + strconv.Quote(lease.LeaseID) + `,
+		"allow_dirty":true,
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-normalized"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+
+	normalizedRoot, err := policy.NormalizeCWD(root)
+	if err != nil {
+		t.Fatalf("NormalizeCWD root: %v", err)
+	}
+	select {
+	case req := <-run.requests:
+		if req.CWD != normalizedRoot {
+			t.Fatalf("runner cwd = %q, want normalized approved cwd %q", req.CWD, normalizedRoot)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner was not invoked")
+	}
+	waitForTerminalTask(t, server, "task-normalized-cwd")
+}
+
 func TestCreateTaskDeniesUnavailableProfileWithoutRunner(t *testing.T) {
 	root := t.TempDir()
 	run := &countingRunner{}

@@ -25,6 +25,23 @@ func TestArgvIncludesTaskMCPConfigStrictly(t *testing.T) {
 	}
 }
 
+func TestArgvIncludesPermissionModeAndAllowedTools(t *testing.T) {
+	run := New(Config{Command: []string{"claude", "-p"}})
+	argv := run.argv(runner.RunRequest{}, ProfileConfig{
+		PermissionMode: "acceptEdits",
+		AllowedTools:   []string{"Bash", "PowerShell"},
+	})
+
+	for _, want := range []string{"--permission-mode", "acceptEdits", "--allowedTools", "Bash,PowerShell"} {
+		if !slices.Contains(argv, want) {
+			t.Fatalf("argv missing %q: %#v", want, argv)
+		}
+	}
+	if slices.Contains(argv, "--disallowedTools") {
+		t.Fatalf("argv unexpectedly disallows tools: %#v", argv)
+	}
+}
+
 func TestRunSendsPromptOnStdin(t *testing.T) {
 	run := New(Config{
 		Command: []string{"sh", "-c", "cat"},
