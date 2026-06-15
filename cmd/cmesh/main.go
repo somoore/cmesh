@@ -2657,9 +2657,12 @@ func codexSandboxForProfile(profile config.ProfileConfig, goos string) string {
 	if profile.Writes == "deny" {
 		return "read-only"
 	}
-	if goos == "windows" {
-		return "danger-full-access"
-	}
+	// Never silently substitute "danger-full-access" (which disables Codex's
+	// filesystem and network sandbox entirely). A write-permitting profile must
+	// get the cwd-scoped "workspace-write" sandbox on every OS, so a remotely
+	// delegated edit task cannot read/modify/exfiltrate outside the workspace.
+	// If a given Codex build cannot honor workspace-write, it should error rather
+	// than escalate authority behind the operator's back.
 	return "workspace-write"
 }
 

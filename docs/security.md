@@ -75,7 +75,7 @@ Task lookup operations are scoped the same way: the original origin can fetch it
 
 Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and registers a task-scoped cmesh MCP gateway for supported agent runners. Claude Code loads a strict task MCP config file; Codex ignores ambient user MCP config for that invocation and injects the local cmesh gateway with `bearer_token_env_var = "CMESH_TASK_TOKEN"`. MCP calls from the worker therefore carry the token structurally even when the gateway requires `host_token`.
 
-Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. They are ignored when a task token is present, and they are not authoritative for subdelegation policy. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance.
+Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. On the local subdelegation path they are ignored when a task token is present, and they are never authoritative for **authorization**. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance. On the direct mesh-RPC path these fields are also non-authoritative for authorization: the inbound peer gate, profile-level `allowed_peers`, and task ownership all key on the `whois`-authenticated peer's **unique** node identity (node id / stable id / DNS label) — never on the request-supplied `origin_node_id`, and never on a shared Tailscale tag. The fields feed only audit display and the advisory hop/cycle backstops described below.
 
 ### A valid peer asking for too much
 
@@ -86,8 +86,10 @@ A legitimate peer can still be denied. cmesh checks:
 - requested profile;
 - effective profile ceiling;
 - runner availability;
-- token-backed hop limit;
-- token-backed cycle detection.
+- hop limit;
+- cycle detection.
+
+The hop limit and cycle check are **token-backed on the local subdelegation path** (the gateway derives provenance from the per-task token, so model-supplied chain fields cannot influence them). On the **direct mesh-RPC ingress path** there is no shared cross-mesh token: Tailscale `whois` authenticates only the immediate (last-hop) caller, so hop count and the delegation chain beyond that last hop are taken from the request and are advisory loop/depth backstops, not authenticated guarantees. This does not enable privilege escalation — authorization (peer allowlist, profile `allowed_peers`, cwd, profile ceiling, leases) keys only on the whois-authenticated peer identity, never on the request-supplied origin or chain. See [Known gaps](#known-gaps).
 
 If any check fails, the task reaches a queryable terminal state such as `denied` or `failed`.
 
@@ -201,11 +203,14 @@ When a workflow can use scoped credentials, prefer them over inherited auth: bar
 These are areas that still need hardening before cmesh should be treated as mature security infrastructure:
 
 - No full OS sandbox wrapper yet for macOS Seatbelt, Linux systemd sandboxing, or Windows restricted users/job objects.
+- Runner subprocesses inherit the daemon's environment and run as the daemon user. Concurrent tasks on one worker therefore share a trust domain: a task's runner can read another in-flight task's environment or per-task token files. Treat concurrent tasks on a worker as mutually trusting, and do not place unrelated secrets in the daemon's environment (see [Service credentials](#service-credentials)).
+- On the direct mesh-RPC path, hop limit and cycle detection beyond the authenticated last hop are advisory (no cross-mesh token exists to authenticate the full chain). They are loop/depth backstops, not authenticated guarantees; authorization itself never depends on them. Keep `hop_limit` low and disable subdelegation unless needed.
 - Peer discovery is available for onboarding, but discovered peers are not trusted merely because they are visible. Keep generated policy narrow and review allowed peers.
 - No per-human authorization layer for shared team tailnets.
 - No remote interactive permission prompt forwarding.
 - No signed runner manifest verification.
 - No policy engine for prompt-content risk classification.
+- The audit log is append-only and resistant to truncation by non-daemon users, but it is not tamper-evident against a compromised daemon user (no hash-chaining or signatures).
 - No formal external security audit.
 
 These gaps do not make the design pointless. They define the boundary: cmesh is a serious delegation control plane, but it should be deployed with conservative profiles and narrow policies until those layers mature.

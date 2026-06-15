@@ -34,12 +34,17 @@ make build VERSION=v0.1.0
 
 Artifacts are written to `dist/`:
 
-- `cmesh-vX.Y.Z-darwin-amd64.tar.gz`
-- `cmesh-vX.Y.Z-darwin-arm64.tar.gz`
-- `cmesh-vX.Y.Z-linux-amd64.tar.gz`
-- `cmesh-vX.Y.Z-linux-arm64.tar.gz`
-- `cmesh-vX.Y.Z-windows-amd64.tar.gz`
+- `cmesh_darwin_amd64.tar.gz`
+- `cmesh_darwin_arm64.tar.gz`
+- `cmesh_linux_amd64.tar.gz`
+- `cmesh_linux_arm64.tar.gz`
+- `cmesh_windows_amd64.tar.gz`
+- `cmesh_windows_arm64.tar.gz`
 - `checksums.txt`
+
+The release tag supplies the version. Archive names intentionally match the
+installer scripts so `CMESH_REPO=owner/repo scripts/install.sh` and
+`scripts/install.ps1` can download the right asset for the host platform.
 
 ## Signing
 
@@ -49,6 +54,34 @@ Each signed artifact gets:
 
 - `.sig` signature file;
 - `.pem` signing certificate file.
+
+macOS release binaries are also signed with a Developer ID Application
+certificate and submitted to Apple's notarization service before publication.
+
+Required GitHub environment/secrets:
+
+- `release-signing` environment;
+- `RELEASE_SSH_ALLOWED_SIGNERS` repository secret containing the SSH
+  allowed-signers entry that verifies release tags;
+- `MACOS_DEVELOPER_ID_APPLICATION_IDENTITY`;
+- `MACOS_DEVELOPER_ID_APPLICATION_P12_BASE64`;
+- `MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD`;
+- `APPLE_API_KEY_ID`;
+- `APPLE_API_ISSUER_ID`;
+- `APPLE_API_KEY_P8_BASE64`.
+
+Create `MACOS_DEVELOPER_ID_APPLICATION_P12_BASE64` from the exported Developer
+ID Application `.p12` with:
+
+```bash
+base64 -i developer-id-application.p12 | pbcopy
+```
+
+Create `RELEASE_SSH_ALLOWED_SIGNERS` from the SSH signing key with:
+
+```bash
+printf '* %s\n' "$(cat ~/.ssh/id_ed25519_signing.pub)"
+```
 
 ## Cut a release
 

@@ -40,9 +40,10 @@ func TestCodexSandboxForProfileKeepsDenyWriteReadOnlyOnWindows(t *testing.T) {
 	if got != "read-only" {
 		t.Fatalf("deny-write Windows Codex profile sandbox = %q, want read-only", got)
 	}
+	// Write-permitting profiles must NOT silently disable the sandbox on Windows.
 	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows")
-	if got != "danger-full-access" {
-		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want danger-full-access", got)
+	if got != "workspace-write" {
+		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want workspace-write (never danger-full-access)", got)
 	}
 }
 
@@ -194,9 +195,11 @@ func TestFailedCheckSummaryIncludesCheckDetails(t *testing.T) {
 	}
 }
 
-func TestCodexSandboxForProfileUsesServiceSafeWindowsMode(t *testing.T) {
-	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "danger-full-access" {
-		t.Fatalf("windows codex sandbox = %q, want danger-full-access", got)
+func TestCodexSandboxForProfileUsesWorkspaceWriteEverywhere(t *testing.T) {
+	// A write-permitting profile must get the cwd-scoped workspace-write sandbox
+	// on every OS, including Windows — never danger-full-access.
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "workspace-write" {
+		t.Fatalf("windows codex sandbox = %q, want workspace-write", got)
 	}
 	if got := codexSandboxForProfile(config.ProfileConfig{}, "linux"); got != "workspace-write" {
 		t.Fatalf("linux codex sandbox = %q, want workspace-write", got)
@@ -380,7 +383,7 @@ func TestFailClosedRestartMarksQueuedAndRunningTasksFailed(t *testing.T) {
 			t.Fatalf("Close store: %v", err)
 		}
 	})
-	for _, id := range []string{"queued-task", "running-task"} {
+	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask"} {
 		if _, err := st.BeginDispatch(ctx, task.Record{
 			ID:               id,
 			OriginNodeID:     "origin",
@@ -396,14 +399,14 @@ func TestFailClosedRestartMarksQueuedAndRunningTasksFailed(t *testing.T) {
 			t.Fatalf("BeginDispatch %s: %v", id, err)
 		}
 	}
-	if _, err := st.UpdateTaskState(ctx, "running-task", store.StateUpdate{State: task.StateRunning}); err != nil {
+	if _, err := st.UpdateTaskState(ctx, "tsk_runningtask", store.StateUpdate{State: task.StateRunning}); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
 	writer := audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), "worker")
 	if err := failClosedRestart(ctx, t.TempDir(), st, writer); err != nil {
 		t.Fatalf("failClosedRestart: %v", err)
 	}
-	for _, id := range []string{"queued-task", "running-task"} {
+	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask"} {
 		rec, err := st.GetTask(ctx, id)
 		if err != nil {
 			t.Fatalf("GetTask %s: %v", id, err)

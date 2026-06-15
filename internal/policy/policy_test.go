@@ -37,6 +37,45 @@ func TestInboundRejectsSpoofedOriginNodeID(t *testing.T) {
 	}
 }
 
+// Regression: a profile scoped via profile-level allowed_peers must not be
+// usable by a peer that merely claims the privileged origin via OriginNodeID
+// (a request-body field). Authorization must key on the authenticated peer.
+func TestProfileAllowedPeersIgnoresSpoofedOriginNodeID(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	// Both peers are allowed at the top level; the scoped profile is restricted
+	// to mac-studio only.
+	cfg.Policy.AllowedPeers = []string{"mac-studio", "untrusted-laptop"}
+	cfg.Profiles["scoped"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Claims:       []string{"read_files"},
+		AllowedPeers: []string{"mac-studio"},
+	}
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName:     "untrusted-laptop", // authenticated identity
+		PeerNodeID:   "untrusted-laptop",
+		CWD:          root,
+		Profile:      "scoped",
+		OriginNodeID: "mac-studio", // attacker-supplied claim — must be ignored
+	})
+	if decision.Allowed {
+		t.Fatalf("profile-level allowed_peers was bypassed via spoofed OriginNodeID: %+v", decision)
+	}
+	if decision.Code != "profile_denied" {
+		t.Fatalf("expected profile_denied, got %+v", decision)
+	}
+	// Sanity: the genuinely-allowed peer still passes.
+	ok := New(cfg).CheckInbound(TaskIntent{
+		PeerName:   "mac-studio",
+		PeerNodeID: "mac-studio",
+		CWD:        root,
+		Profile:    "scoped",
+	})
+	if !ok.Allowed {
+		t.Fatalf("expected the scoped peer to be allowed: %+v", ok)
+	}
+}
+
 func TestInboundAllowsTrustedPeerTag(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)

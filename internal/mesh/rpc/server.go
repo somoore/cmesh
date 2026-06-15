@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,7 +80,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// ReadTimeout bounds the full request read (headers + body) so a peer cannot
+	// hold a connection open by dribbling the body (Slowloris). IdleTimeout reaps
+	// idle keep-alive connections. WriteTimeout is intentionally left unset: the
+	// long-poll endpoints (wait/timeout_s) legitimately hold the response open,
+	// and each handler already bounds its own work via request context deadlines.
+	server := &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -573,6 +584,23 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 			return
 		}
+	} else if !task.ValidID(req.TaskID) {
+		// A caller-supplied task_id flows into filepath.Join for logs, artifacts,
+		// worktrees, and task-token files. Reject anything that is not a
+		// system-minted id before it can become a path-traversal primitive.
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "malformed task_id")
+		return
+	}
+	if req.FollowupTaskID != "" && !task.ValidID(req.FollowupTaskID) {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "malformed followup_task_id")
+		return
+	}
+	if req.FollowupBaseCommit != "" && !isGitObjectish(req.FollowupBaseCommit) {
+		// followup_base_commit is passed to git as a revision argument. Constrain
+		// it to a hex object id so it cannot be interpreted as a git option
+		// (e.g. a leading-dash value) or otherwise steer the git invocation.
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "malformed followup_base_commit")
+		return
 	}
 	if err := validateOriginClaims(&req, identity); err != nil {
 		s.record(r.Context(), audit.Event{
@@ -719,6 +747,15 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		defer s.unregisterRunningTask(outcome.Task.ID)
+		// net/http recovers panics inside handlers, but this task runs in a
+		// detached goroutine. Without recovery, a panic anywhere in runTask
+		// (runner, git prep, result marshaling) would crash the whole daemon and
+		// kill every in-flight task. Recover, fail this one task, and stay up.
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.failTask(context.Background(), outcome.Task, task.ErrorWorkerFailed, fmt.Sprintf("task panicked: %v", rec))
+			}
+		}()
 		s.runTask(runCtx, outcome.Task, req)
 	}()
 	if req.Wait {
@@ -820,6 +857,10 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	}
 	updated, err := s.Store.UpdateTaskState(context.Background(), rec.ID, store.StateUpdate{State: task.StateRunning})
 	if err != nil {
+		// The task token and context/MCP-config files were already written above.
+		// Don't leak them: drive a terminal state and remove the secrets even
+		// though this state write failed (failTask also calls removeTaskSecrets).
+		s.failTask(context.Background(), rec, task.ErrorWorkerFailed, err.Error())
 		return
 	}
 	rec = updated
@@ -928,11 +969,16 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	const maxListLimit = 200
 	limit := 20
 	if value := r.URL.Query().Get("limit"); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
 			limit = parsed
 		}
+	}
+	if limit > maxListLimit {
+		// Cap caller-supplied limits so a peer cannot force an oversized query/alloc.
+		limit = maxListLimit
 	}
 	tasks, err := s.Store.RecentTasks(r.Context(), limit)
 	if err != nil {
@@ -1397,6 +1443,15 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) (tsid.Iden
 	return id, true
 }
 
+// gitObjectishRE matches a full or abbreviated git object id (hex, 7-64 chars).
+// followup_base_commit is restricted to this so it can never be read by git as
+// an option (e.g. "--upload-pack=...") rather than a revision.
+var gitObjectishRE = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+
+func isGitObjectish(s string) bool {
+	return gitObjectishRE.MatchString(s)
+}
+
 func validateOriginClaims(req *schema.CreateTaskRequest, identity tsid.Identity) error {
 	origin := firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID)
 	if req.OriginNodeID != "" && req.Provenance.OriginNodeID != "" && req.OriginNodeID != req.Provenance.OriginNodeID {
@@ -1409,7 +1464,10 @@ func validateOriginClaims(req *schema.CreateTaskRequest, identity tsid.Identity)
 		req.OriginSessionID = req.Provenance.OriginSessionID
 	}
 	if len(req.Provenance.DelegationChain) == 0 {
-		if origin != "" && !matchesIdentityClaim(origin, identity) {
+		// origin becomes the task's ownership key, so it must equal a unique node
+		// identity of the authenticated caller — never a shared tag (which would
+		// let any tag-sharing peer claim ownership of this task later).
+		if origin != "" && !matchesNodeIdentity(origin, identity) {
 			return fmt.Errorf("origin_node_id %q does not match authenticated peer", origin)
 		}
 		origin = firstNonEmpty(origin, identity.NodeID, identity.NodeName, identity.StableID)
@@ -1423,7 +1481,7 @@ func validateOriginClaims(req *schema.CreateTaskRequest, identity tsid.Identity)
 		return err
 	}
 	lastHop := req.Provenance.DelegationChain[len(req.Provenance.DelegationChain)-1]
-	if !matchesIdentityClaim(lastHop, identity) {
+	if !matchesNodeIdentity(lastHop, identity) {
 		return fmt.Errorf("delegation_chain last hop %q does not match authenticated peer", lastHop)
 	}
 	if origin == "" {
@@ -1468,27 +1526,49 @@ func (s *Server) authorizeTaskAccess(w http.ResponseWriter, r *http.Request, ide
 }
 
 func taskAccessibleTo(rec task.Record, identity tsid.Identity) bool {
-	if matchesIdentityClaim(rec.OriginNodeID, identity) {
+	// Ownership must resolve to a unique node identity. Tags are shared across
+	// machines, so tag matching here would let any peer carrying a shared tag
+	// read or cancel another peer's task — use the tag-free matcher.
+	if matchesNodeIdentity(rec.OriginNodeID, identity) {
 		return true
 	}
 	if len(rec.DelegationChain) >= 2 {
 		requester := rec.DelegationChain[len(rec.DelegationChain)-2]
-		if matchesIdentityClaim(requester, identity) {
+		if matchesNodeIdentity(requester, identity) {
 			return true
 		}
 	}
 	return false
 }
 
-func matchesIdentityClaim(value string, identity tsid.Identity) bool {
+// matchesNodeIdentity matches a claimed identity value against the authenticated
+// peer's UNIQUE identifiers only (node id / stable id / DNS name / DNS label).
+// It deliberately excludes Tailscale tags, which are shared across machines and
+// therefore unsafe for ownership or origin authorization.
+func matchesNodeIdentity(value string, identity tsid.Identity) bool {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return false
 	}
-	candidates := []string{identity.NodeID, identity.NodeName, identity.StableID, identity.DNSName}
-	candidates = append(candidates, identity.Tags...)
-	for _, candidate := range candidates {
-		if strings.EqualFold(value, strings.TrimSpace(candidate)) {
+	for _, candidate := range []string{identity.NodeID, identity.NodeName, identity.StableID, identity.DNSName} {
+		if candidate != "" && strings.EqualFold(value, strings.TrimSpace(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesIdentityClaim matches against unique identifiers AND shared tags. Use
+// it only for matching against operator-configured, trusted values (e.g. a
+// [peers.*] entry), never for authorization decisions keyed on request-supplied
+// claims — for those use matchesNodeIdentity.
+func matchesIdentityClaim(value string, identity tsid.Identity) bool {
+	if matchesNodeIdentity(value, identity) {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	for _, tag := range identity.Tags {
+		if tag != "" && strings.EqualFold(value, strings.TrimSpace(tag)) {
 			return true
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -129,6 +130,21 @@ func NewID() (string, error) {
 	return "tsk_" + strings.ToLower(encoded), nil
 }
 
+// idRE matches the task IDs this system mints: a "tsk_" prefix followed by
+// lowercase base32 (RFC 4648 alphabet, no padding). Validating against it is a
+// security control, not cosmetics: task IDs flow into filepath.Join for log,
+// artifact, worktree, and token paths, so an unconstrained caller-supplied ID
+// (e.g. one containing "../") would be a path-traversal / arbitrary-file-write
+// primitive on the worker. Any externally accepted task or follow-up id MUST
+// pass ValidID before it is used to build a path.
+var idRE = regexp.MustCompile(`^tsk_[a-z2-7]{1,64}$`)
+
+// ValidID reports whether id is a well-formed, system-minted task id safe to
+// use in filesystem paths. Reject anything else at trust boundaries.
+func ValidID(id string) bool {
+	return idRE.MatchString(id)
+}
+
 func DeterministicID(parts ...string) string {
 	h := sha256.New()
 	for _, part := range parts {
@@ -194,6 +210,9 @@ func ValidTransition(from, to State) bool {
 func (r Record) ValidateNew() error {
 	if strings.TrimSpace(r.ID) == "" {
 		return errors.New("task id is required")
+	}
+	if !ValidID(r.ID) {
+		return errors.New("task id is malformed")
 	}
 	if strings.TrimSpace(r.OriginNodeID) == "" {
 		return errors.New("origin node id is required")
