@@ -102,10 +102,11 @@ type ShellOSPolicyConfig struct {
 }
 
 type RunnerConfig struct {
-	Command        []string `toml:"command"`
-	DefaultProfile string   `toml:"default_profile"`
-	ManifestPath   string   `toml:"manifest_path"`
-	Concurrency    int      `toml:"concurrency"`
+	Command               []string `toml:"command"`
+	DefaultProfile        string   `toml:"default_profile"`
+	ManifestPath          string   `toml:"manifest_path"`
+	Concurrency           int      `toml:"concurrency"`
+	AllowDangerFullAccess bool     `toml:"allow_danger_full_access"`
 }
 
 type PeerConfig struct {

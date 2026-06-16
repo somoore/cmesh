@@ -28,6 +28,7 @@ import (
 	"cmesh/internal/runner"
 	"cmesh/internal/store"
 	"cmesh/internal/task"
+	"cmesh/internal/version"
 )
 
 const (
@@ -138,6 +139,9 @@ func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
 		NodeID:         s.Config.Node.ID,
 		NodeName:       s.Config.Node.Name,
 		StableID:       stableID,
+		CmeshVersion:   version.Version,
+		CmeshCommit:    version.Commit,
+		CmeshDate:      version.Date,
 		SchemaVersions: []string{schema.Version},
 		Runners:        runners,
 		Capabilities:   []string{"tasks", "audit", "idempotency", "policy", "runner_manifests", "task_list", "transcripts", "git_bundle_artifacts", "long_poll_status", "peer_smoke", "profile_leases"},

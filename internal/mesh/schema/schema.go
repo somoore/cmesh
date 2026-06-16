@@ -21,6 +21,9 @@ type HelloResponse struct {
 	NodeID         string    `json:"node_id"`
 	NodeName       string    `json:"node_name"`
 	StableID       string    `json:"stable_id,omitempty"`
+	CmeshVersion   string    `json:"cmesh_version,omitempty"`
+	CmeshCommit    string    `json:"cmesh_commit,omitempty"`
+	CmeshDate      string    `json:"cmesh_date,omitempty"`
 	SchemaVersions []string  `json:"schema_versions"`
 	Runners        []Runner  `json:"runners"`
 	Capabilities   []string  `json:"capabilities"`

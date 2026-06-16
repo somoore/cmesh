@@ -404,46 +404,24 @@ func cmdDoctor(args []string) error {
 	fs := flag.NewFlagSet("doctor", flag.ExitOnError)
 	configPath := fs.String("config", config.DefaultPath(), "path to cmesh config")
 	jsonOut := fs.Bool("json", false, "print JSON")
+	skipRunnerSmoke := fs.Bool("skip-runner-smoke", false, "skip invoking agent runner smoke prompts")
+	runnerTimeoutSeconds := fs.Int("runner-timeout", 60, "agent runner smoke timeout in seconds")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	status := onboard.Detect(ctx, *configPath, false)
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	status := onboard.Detect(statusCtx, *configPath, false)
+	statusCancel()
 	cfg, cfgErr := config.Load(*configPath)
 	var runnerChecks []doctor.Check
 	if cfgErr == nil {
-		reg, err := buildRunners(cfg)
-		if err != nil {
+		if _, err := buildRunners(cfg); err != nil {
 			runnerChecks = append(runnerChecks, doctor.Check{Name: "runners", OK: false, Err: err.Error()})
 		} else {
-			for _, manifest := range reg.Manifests() {
-				run, _ := reg.Get(manifest.Runner)
-				profileChecked := false
-				for profileName, pcfg := range cfg.Profiles {
-					if pcfg.Runner != manifest.Runner {
-						continue
-					}
-					profileChecked = true
-					err := run.Check(profileName)
-					check := doctor.Check{Name: "runner." + manifest.Runner + "." + profileName, OK: err == nil}
-					if err != nil {
-						check.Err = err.Error()
-					} else {
-						check.Detail = "available"
-					}
-					runnerChecks = append(runnerChecks, check)
-				}
-				if !profileChecked {
-					err := run.Check("")
-					check := doctor.Check{Name: "runner." + manifest.Runner, OK: err == nil}
-					if err != nil {
-						check.Err = err.Error()
-					} else {
-						check.Detail = "available"
-					}
-					runnerChecks = append(runnerChecks, check)
-				}
+			for _, runnerName := range activeRunnerNames(cfg) {
+				runnerCtx, runnerCancel := context.WithTimeout(context.Background(), time.Duration(*runnerTimeoutSeconds+5)*time.Second)
+				runnerChecks = append(runnerChecks, doctorRunnerChecks(runnerCtx, cfg, runnerName, !*skipRunnerSmoke, time.Duration(*runnerTimeoutSeconds)*time.Second, false)...)
+				runnerCancel()
 			}
 		}
 	}
@@ -451,7 +429,9 @@ func cmdDoctor(args []string) error {
 	if cfg != nil {
 		meshPort = cfg.Node.MeshPort
 	}
-	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: meshPort, AcceptExistingMeshService: true})
+	tailscaleCtx, tailscaleCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	tailscaleReport := doctor.Tailscale(tailscaleCtx, doctor.TailscaleOptions{MeshPort: meshPort, AcceptExistingMeshService: true})
+	tailscaleCancel()
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"status":    status,
@@ -510,7 +490,7 @@ func cmdDoctorRunner(args []string) error {
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+5)*time.Second)
 		defer cancel()
-		checks = append(checks, doctorRunnerChecks(ctx, cfg, fs.Arg(0), !*skipSmoke, time.Duration(*timeoutSeconds)*time.Second)...)
+		checks = append(checks, doctorRunnerChecks(ctx, cfg, fs.Arg(0), !*skipSmoke, time.Duration(*timeoutSeconds)*time.Second, true)...)
 	}
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks})
@@ -657,6 +637,13 @@ func daemonPreflightChecks(ctx context.Context, cfg *config.Config, reg *runner.
 			checks = append(checks, doctor.Check{Name: "runner." + runnerName + ".executable", OK: true, Detail: resolved})
 		}
 		checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+		if runnerName == codex.Name {
+			checks = append(checks, codexTaskScopedDoctorChecks(ctx, cfg, rcfg)...)
+			smoke, smokeResult := runnerSmokeCheckWithResult(ctx, reg, runnerName, 60*time.Second, filepath.Join(cfg.Node.DataDir, "preflight"))
+			checks = append(checks, smoke)
+			checks = append(checks, codexRuntimeSandboxCheck(codexDefaultProfileSandbox(cfg, rcfg), smokeResult))
+			continue
+		}
 		checks = append(checks, runnerSmokeCheck(ctx, reg, runnerName, 60*time.Second, filepath.Join(cfg.Node.DataDir, "preflight")))
 	}
 	return checks
@@ -696,7 +683,7 @@ func failedCheckSummary(checks []doctor.Check) string {
 	return strings.Join(failed, "; ")
 }
 
-func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration) []doctor.Check {
+func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration, requireAbsoluteRunner bool) []doctor.Check {
 	var checks []doctor.Check
 	rcfg, ok := cfg.Runners[runnerName]
 	checks = append(checks, doctor.Check{Name: "runner configured", OK: ok, Detail: runnerName})
@@ -734,20 +721,22 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	} else {
 		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: true, Detail: resolved})
 	}
-	checks = append(checks, doctor.Check{
+	absoluteCheck := doctor.Check{
 		Name:   "runner executable absolute",
 		OK:     filepath.IsAbs(exe),
 		Detail: exe,
-	})
-	if !filepath.IsAbs(exe) {
+	}
+	if !filepath.IsAbs(exe) && !requireAbsoluteRunner {
+		absoluteCheck.OK = true
+		absoluteCheck.Detail = "resolved via PATH: " + firstNonEmpty(resolved, exe)
+	}
+	checks = append(checks, absoluteCheck)
+	if !filepath.IsAbs(exe) && requireAbsoluteRunner {
 		checks[len(checks)-1].Err = "configure an absolute runner path for service use"
 		checks[len(checks)-1].Detail = firstNonEmpty(resolved, exe)
 	}
 	if runtime.GOOS == "windows" {
 		checks = append(checks, windowsServiceUserChecks()...)
-	}
-	if runnerName == codex.Name {
-		checks = append(checks, codexTaskScopedChecks(ctx, rcfg)...)
 	}
 	reg, err := buildRunners(cfg)
 	if err != nil {
@@ -755,6 +744,9 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 		return checks
 	}
 	checks = append(checks, runnerProfileChecks(cfg, reg, runnerName)...)
+	if runnerName == codex.Name {
+		checks = append(checks, codexTaskScopedDoctorChecks(ctx, cfg, rcfg)...)
+	}
 	if !runSmoke {
 		checks = append(checks,
 			doctor.Check{Name: "runner auth works", OK: true, Detail: "skipped"},
@@ -763,13 +755,121 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 		)
 		return checks
 	}
-	smoke := runnerSmokeCheck(ctx, reg, runnerName, timeout, "")
+	smoke, smokeResult := runnerSmokeCheckWithResult(ctx, reg, runnerName, timeout, "")
 	checks = append(checks,
 		doctor.Check{Name: "runner auth works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 		doctor.Check{Name: "prompt via stdin works", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 		doctor.Check{Name: "smoke response verified", OK: smoke.OK, Detail: smoke.Detail, Err: smoke.Err},
 	)
+	if runnerName == codex.Name {
+		checks = append(checks, codexRuntimeSandboxCheck(codexDefaultProfileSandbox(cfg, rcfg), smokeResult))
+	}
 	return checks
+}
+
+func codexTaskScopedDoctorChecks(ctx context.Context, cfg *config.Config, rcfg config.RunnerConfig) []doctor.Check {
+	profiles := map[string]codex.ProfileConfig{}
+	var profileNames []string
+	for pname, pcfg := range cfg.Profiles {
+		if pcfg.Runner != codex.Name {
+			continue
+		}
+		network := "disabled_or_limited"
+		if pcfg.Network {
+			network = "enabled_by_profile"
+		}
+		profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS, rcfg.AllowDangerFullAccess), Approval: "never", Network: network}
+		profileNames = append(profileNames, pname)
+	}
+	if len(profiles) == 0 {
+		return []doctor.Check{
+			{Name: "runner.codex.task_scoped_ignore_rules", OK: true, Detail: "no codex profiles configured"},
+			{Name: "runner.codex.task_scoped_sandbox", OK: true, Detail: "no codex profiles configured"},
+			{Name: "runner.codex.task_scoped_sandbox_mode", OK: true, Detail: "no codex profiles configured"},
+		}
+	}
+	sort.Strings(profileNames)
+	profileName := rcfg.DefaultProfile
+	if _, ok := profiles[profileName]; !ok {
+		profileName = profileNames[0]
+	}
+	run := codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
+	argv, err := run.TaskScopedArgv(profileName, ".", "http://127.0.0.1:7777/mcp")
+	if err != nil {
+		return []doctor.Check{{Name: "runner.codex.task_scoped_ignore_rules", OK: false, Err: err.Error()}}
+	}
+	execAt := argIndex(argv, "exec")
+	rulesAt := argIndex(argv, "--ignore-rules")
+	checks := []doctor.Check{{
+		Name:   "runner.codex.task_scoped_ignore_rules",
+		OK:     execAt >= 0 && rulesAt > execAt,
+		Detail: "--ignore-rules after exec",
+	}}
+	if !checks[0].OK {
+		checks[0].Detail = strings.Join(argv, " ")
+		checks[0].Err = "task-scoped Codex argv must include --ignore-rules after exec"
+	}
+	checks = append(checks, codexTaskScopedSandboxChecks(argv, profiles[profileName].Sandbox)...)
+	checks = append(checks, codexExecIgnoreRulesSupportCheck(ctx, argv))
+	return checks
+}
+
+func codexTaskScopedSandboxChecks(argv []string, sandbox string) []doctor.Check {
+	execAt := argIndex(argv, "exec")
+	sandboxAt := argIndex(argv, "--sandbox")
+	sandboxModeAt := argIndex(argv, "sandbox_mode=\""+sandbox+"\"")
+	checks := []doctor.Check{
+		{
+			Name:   "runner.codex.task_scoped_sandbox",
+			OK:     sandbox == "" || (sandboxAt >= 0 && sandboxAt < execAt && sandboxAt+1 < len(argv) && argv[sandboxAt+1] == sandbox),
+			Detail: "--sandbox " + sandbox + " before exec",
+		},
+		{
+			Name:   "runner.codex.task_scoped_sandbox_mode",
+			OK:     sandbox == "" || (sandboxModeAt >= 0 && sandboxModeAt > execAt),
+			Detail: "sandbox_mode=\"" + sandbox + "\"",
+		},
+	}
+	if !checks[0].OK {
+		checks[0].Detail = strings.Join(argv, " ")
+		checks[0].Err = "task-scoped Codex argv must include the profile sandbox before exec"
+	}
+	if !checks[1].OK {
+		checks[1].Detail = strings.Join(argv, " ")
+		checks[1].Err = "task-scoped Codex argv must include an authoritative sandbox_mode config override"
+	}
+	return checks
+}
+
+func codexExecIgnoreRulesSupportCheck(ctx context.Context, argv []string) doctor.Check {
+	execAt := argIndex(argv, "exec")
+	if len(argv) == 0 || execAt < 0 {
+		return doctor.Check{Name: "runner.codex.exec_ignore_rules_supported", OK: false, Err: "could not build codex exec argv"}
+	}
+	helpArgv := make([]string, 0, execAt+3)
+	helpArgv = append(helpArgv, argv[:execAt+1]...)
+	helpArgv = append(helpArgv, "--ignore-rules", "--help")
+	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(checkCtx, helpArgv[0], helpArgv[1:]...)
+	output, err := cmd.CombinedOutput()
+	text := string(output)
+	if err != nil {
+		return doctor.Check{Name: "runner.codex.exec_ignore_rules_supported", OK: false, Detail: strings.Join(helpArgv, " "), Err: oneLine(firstNonEmpty(text, err.Error()))}
+	}
+	if !strings.Contains(text, "--ignore-rules") {
+		return doctor.Check{Name: "runner.codex.exec_ignore_rules_supported", OK: false, Detail: strings.Join(helpArgv, " "), Err: "help output did not include --ignore-rules"}
+	}
+	return doctor.Check{Name: "runner.codex.exec_ignore_rules_supported", OK: true, Detail: "--ignore-rules"}
+}
+
+func argIndex(argv []string, needle string) int {
+	for i, arg := range argv {
+		if arg == needle {
+			return i
+		}
+	}
+	return -1
 }
 
 func runnerProfileChecks(cfg *config.Config, reg *runner.Registry, runnerName string) []doctor.Check {
@@ -804,62 +904,22 @@ func runnerProfileChecks(cfg *config.Config, reg *runner.Registry, runnerName st
 	return checks
 }
 
-func codexTaskScopedChecks(ctx context.Context, rcfg config.RunnerConfig) []doctor.Check {
-	var checks []doctor.Check
-	checks = append(checks, codexTaskScopedPlacementCheck(rcfg.Command))
-
-	if len(rcfg.Command) == 0 {
-		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: "runner command is empty"})
-		return checks
-	}
-	helpArgv := codex.PreviewExecHelpArgv(rcfg.Command)
-	helpCmd := exec.CommandContext(ctx, helpArgv[0], helpArgv[1:]...)
-	out, err := helpCmd.CombinedOutput()
-	if err != nil {
-		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: firstNonEmpty(strings.TrimSpace(string(out)), err.Error())})
-		return checks
-	}
-	if strings.Contains(string(out), "--ignore-rules") {
-		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: true, Detail: "codex exec --help includes --ignore-rules"})
-	} else {
-		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: "codex exec --help does not list --ignore-rules"})
-	}
-	return checks
-}
-
-func codexTaskScopedPlacementCheck(command []string) doctor.Check {
-	argv := codex.PreviewTaskScopedArgv(command, codex.ProfileConfig{Sandbox: "workspace-write", Approval: "never"})
-	execIdx := indexString(argv, "exec")
-	ignoreRulesIdx := indexString(argv, "--ignore-rules")
-	placementOK := execIdx >= 0 && ignoreRulesIdx > execIdx
-	placementDetail := strings.Join(argv, " ")
-	check := doctor.Check{Name: "codex task-scoped --ignore-rules placement", OK: placementOK, Detail: placementDetail}
-	if !placementOK {
-		check.Err = "--ignore-rules must be generated after `exec` for task-scoped Codex runs"
-		check.Detail = placementDetail
-	}
+func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration, logDir string) doctor.Check {
+	check, _ := runnerSmokeCheckWithResult(ctx, reg, runnerName, timeout, logDir)
 	return check
 }
 
-func indexString(values []string, needle string) int {
-	for i, value := range values {
-		if value == needle {
-			return i
-		}
-	}
-	return -1
-}
-
-func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration, logDir string) doctor.Check {
+func runnerSmokeCheckWithResult(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration, logDir string) (doctor.Check, runner.Result) {
 	run, ok := reg.Get(runnerName)
 	if !ok {
-		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: "runner not registered"}
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: "runner not registered"}, runner.Result{}
 	}
 	if runnerName == probe.Name {
-		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: true, Detail: "builtin deterministic probes; prompt smoke not applicable"}
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: true, Detail: "builtin deterministic probes; prompt smoke not applicable"}, runner.Result{}
 	}
 	if runnerName == shell.Name {
-		return shellRunnerSmokeCheck(ctx, run, timeout, logDir)
+		check, result := shellRunnerSmokeCheckWithResult(ctx, run, timeout, logDir)
+		return check, result
 	}
 	result, err := run.Run(runner.RunRequest{
 		Context:     ctx,
@@ -879,7 +939,7 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 		if result.CommandOutput.StdoutRef != "" || result.CommandOutput.StderrRef != "" {
 			detail += " (" + strings.TrimSpace(result.CommandOutput.StdoutRef+" "+result.CommandOutput.StderrRef) + ")"
 		}
-		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: detail}
+		return doctor.Check{Name: "runner." + runnerName + ".smoke", OK: false, Err: detail}, result
 	}
 	output := commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
 	detail := oneLine(firstNonEmpty(output, result.WorkerSummaryUntrusted))
@@ -892,10 +952,15 @@ func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName stri
 		check.Detail = ""
 		check.Err = fmt.Sprintf("expected raw command artifact with exit=0 and %q, got exit=%d output=%q", smokeExpectedResponse, result.CommandOutput.ExitCode, output)
 	}
-	return check
+	return check, result
 }
 
 func shellRunnerSmokeCheck(ctx context.Context, run runner.Runner, timeout time.Duration, logDir string) doctor.Check {
+	check, _ := shellRunnerSmokeCheckWithResult(ctx, run, timeout, logDir)
+	return check
+}
+
+func shellRunnerSmokeCheckWithResult(ctx context.Context, run runner.Runner, timeout time.Duration, logDir string) (doctor.Check, runner.Result) {
 	command := "df"
 	if runtime.GOOS == "windows" {
 		command = "Get-PSDrive"
@@ -916,12 +981,65 @@ func shellRunnerSmokeCheck(ctx context.Context, run runner.Runner, timeout time.
 		if output != "" {
 			detail += ": " + output
 		}
-		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: detail}
+		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: detail}, result
 	}
 	if result.CommandOutput.ExitCode != 0 {
-		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: fmt.Sprintf("expected allowlisted command exit=0, got exit=%d", result.CommandOutput.ExitCode)}
+		return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: false, Err: fmt.Sprintf("expected allowlisted command exit=0, got exit=%d", result.CommandOutput.ExitCode)}, result
 	}
-	return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: true, Detail: "allowlisted diagnostic ok"}
+	return doctor.Check{Name: "runner." + shell.Name + ".smoke", OK: true, Detail: "allowlisted diagnostic ok"}, result
+}
+
+func codexDefaultProfileSandbox(cfg *config.Config, rcfg config.RunnerConfig) string {
+	profileName := rcfg.DefaultProfile
+	if _, ok := cfg.Profiles[profileName]; !ok {
+		for name, profile := range cfg.Profiles {
+			if profile.Runner == codex.Name {
+				profileName = name
+				break
+			}
+		}
+	}
+	profile, ok := cfg.Profiles[profileName]
+	if !ok {
+		return ""
+	}
+	return codexSandboxForProfile(profile, runtime.GOOS, rcfg.AllowDangerFullAccess)
+}
+
+func codexRuntimeSandboxCheck(expected string, result runner.Result) doctor.Check {
+	check := doctor.Check{Name: "runner.codex.runtime_sandbox", OK: false}
+	if expected == "" {
+		check.OK = true
+		check.Detail = "skipped"
+		return check
+	}
+	output := commandOutputText(result.CommandOutput.Stdout, result.CommandOutput.Stderr)
+	if output == "" {
+		output = result.WorkerSummaryUntrusted
+	}
+	want := "sandbox: " + expected
+	if strings.Contains(output, want) {
+		check.OK = true
+		check.Detail = want
+		return check
+	}
+	if got := firstSandboxBannerLine(output); got != "" {
+		check.Detail = got
+		check.Err = "Codex runtime sandbox did not match expected " + expected
+		return check
+	}
+	check.Err = "Codex runtime sandbox banner was not found"
+	return check
+}
+
+func firstSandboxBannerLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "sandbox: ") {
+			return line
+		}
+	}
+	return ""
 }
 
 func cmdDoctorServiceContext(args []string) error {
@@ -1383,16 +1501,28 @@ func cmdPeers(args []string) error {
 			fmt.Println("  none found")
 		}
 		for _, peer := range discovered {
-			capable := ""
-			if peer.CmeshCapable {
-				capable = " cmesh"
-			} else if peer.Online && strings.TrimSpace(peer.Detail) != "" {
-				capable = " online, no cmesh: " + peer.Detail
-			}
-			fmt.Printf("  - %s  %s%s\n", peer.Name, firstNonEmpty(peer.Address, "no tailnet ip"), capable)
+			fmt.Println(discoveredPeerLine(peer))
 		}
 	}
 	return nil
+}
+
+func discoveredPeerLine(peer onboard.PeerCandidate) string {
+	state := "offline"
+	if peer.Online {
+		state = "online"
+	}
+	capable := "no cmesh"
+	if peer.CmeshCapable {
+		capable = "cmesh"
+	}
+	detail := strings.TrimSpace(peer.Detail)
+	if detail != "" && !peer.CmeshCapable {
+		detail = " (" + detail + ")"
+	} else {
+		detail = ""
+	}
+	return fmt.Sprintf("  - %s  %s  %s  %s%s", peer.Name, firstNonEmpty(peer.Address, "no tailnet ip"), state, capable, detail)
 }
 
 func cmdTest(args []string) error {
@@ -2641,7 +2771,7 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Network {
 					network = "enabled_by_profile"
 				}
-				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS), Approval: "never", Network: network}
+				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS, rcfg.AllowDangerFullAccess), Approval: "never", Network: network}
 			}
 			run := codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
 			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
@@ -2706,16 +2836,17 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	return reg, nil
 }
 
-func codexSandboxForProfile(profile config.ProfileConfig, goos string) string {
-	if profile.Writes == "deny" {
+func codexSandboxForProfile(profile config.ProfileConfig, goos string, allowDangerFullAccess bool) string {
+	if profile.Writes == profiledefs.WritesDeny {
 		return "read-only"
 	}
-	// Never silently substitute "danger-full-access" (which disables Codex's
-	// filesystem and network sandbox entirely). A write-permitting profile must
-	// get the cwd-scoped "workspace-write" sandbox on every OS, so a remotely
-	// delegated edit task cannot read/modify/exfiltrate outside the workspace.
-	// If a given Codex build cannot honor workspace-write, it should error rather
-	// than escalate authority behind the operator's back.
+	if goos == "windows" && allowDangerFullAccess {
+		// Codex CLI v0.139.0 on Windows accepts workspace-write flags but still
+		// starts read-only, which blocks repo-dev shell commands before they run.
+		// Use the only observed non-read-only mode only after an explicit
+		// operator opt-in; the profile remains lease-gated and high-risk.
+		return "danger-full-access"
+	}
 	return "workspace-write"
 }
 
