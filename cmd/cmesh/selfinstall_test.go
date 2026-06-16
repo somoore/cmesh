@@ -83,6 +83,13 @@ func TestSelfInstalledBinary(t *testing.T) {
 	if !selfInstalledBinary(filepath.Join(custom, "cmesh")) {
 		t.Fatalf("expected binary in CMESH_INSTALL_DIR to be self-installed")
 	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir: %v", err)
+	}
+	if !selfInstalledBinary(filepath.Join(home, ".local", "bin", "cmesh.exe")) {
+		t.Fatalf("expected binary in user .local/bin to be self-installed")
+	}
 	if selfInstalledBinary("/opt/random/cmesh") {
 		t.Fatalf("unexpected self-install match for /opt/random")
 	}
