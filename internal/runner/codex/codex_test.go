@@ -66,6 +66,119 @@ func TestArgvBuildsNonInteractiveExecCommand(t *testing.T) {
 	}
 }
 
+func TestArgvNormalizesConfiguredExecOnlyFlags(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ignore-rules"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write", Approval: "never"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--ignore-rules", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvPreservesConfiguredGlobalFlagsBeforeExec(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ask-for-approval", "on-request", "--ignore-rules"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "exec", "--ignore-rules", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvPreservesExecForWrappedCodexCommand(t *testing.T) {
+	run := New(Config{
+		Command: []string{"env", "CODEX_HOME=/tmp/codex", "codex"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvNormalizesWrappedCodexExecOnlyFlags(t *testing.T) {
+	run := New(Config{
+		Command: []string{"env", "CODEX_HOME=/tmp/codex", "codex", "--ignore-rules", "--ask-for-approval", "on-request"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "--ask-for-approval", "on-request", "--sandbox", "workspace-write", "exec", "--ignore-rules", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvNormalizesExecOnlyFlagsBeforeExplicitExec(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ignore-rules", "exec", "--json"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--sandbox", "workspace-write", "exec", "--ignore-rules", "--json", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvNormalizesExecOnlyFlagAliasesAndEqualsForms(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--output-schema=/tmp/schema.json", "--experimental-json", "--full-auto", "-o", "/tmp/out", "--ask-for-approval", "never"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--output-schema=/tmp/schema.json", "--experimental-json", "--full-auto", "-o", "/tmp/out", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestPreviewExecHelpArgvHonorsWrappedCodexCommand(t *testing.T) {
+	got := PreviewExecHelpArgv([]string{"env", "CODEX_HOME=/tmp/codex", "codex"})
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "exec", "--help"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("help argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvKeepsNonCodexCommandPrefixCompatibleWithStdinHarness(t *testing.T) {
+	run := New(Config{
+		Command: []string{"sh", "-c", "cat"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"sh", "-c", "cat", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check", "-c", "sandbox_mode=\"workspace-write\"", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
 func TestArgvDoesNotDuplicateExecSubcommand(t *testing.T) {
 	run := New(Config{
 		Command: []string{"codex", "exec"},
@@ -237,7 +350,36 @@ func TestArgvMovesConfiguredExecOnlyFlagsAfterExec(t *testing.T) {
 	if rulesAt <= execAt {
 		t.Fatalf("--ignore-rules must be an exec flag after exec: %#v", got)
 	}
-	if strings.Count(strings.Join(got, "\x00"), "--ignore-rules") != 1 {
+	if countArg(got, "--ignore-rules") != 1 {
 		t.Fatalf("argv duplicated --ignore-rules: %#v", got)
 	}
+}
+
+func TestArgvDoesNotDuplicateIgnoreRules(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "exec"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write", Approval: "never", ExtraArgs: []string{"--ignore-rules"}},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{
+		Profile: "dev",
+		Metadata: runner.TaskMetadata{
+			MCPURL: "http://127.0.0.1:8888/mcp",
+		},
+	}, run.cfg.Profiles["dev"])
+	if countArg(got, "--ignore-rules") != 1 {
+		t.Fatalf("argv must contain exactly one --ignore-rules: %#v", got)
+	}
+}
+
+func countArg(argv []string, needle string) int {
+	var count int
+	for _, arg := range argv {
+		if arg == needle {
+			count++
+		}
+	}
+	return count
 }
