@@ -191,16 +191,24 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 }
 
 func normalizeExecArgs(argv []string) []string {
-	if len(argv) == 0 || !isCodexCommand(argv[0]) || commandIncludesExec(argv) {
+	codexIndex := codexCommandIndex(argv)
+	if codexIndex < 0 {
 		return argv
 	}
-	beforeExec := []string{argv[0]}
+	execIndex := execIndexAfter(argv, codexIndex)
+	normalizeEnd := len(argv)
+	var trailing []string
+	if execIndex >= 0 {
+		normalizeEnd = execIndex
+		trailing = argv[execIndex+1:]
+	}
+	beforeExec := append([]string(nil), argv[:codexIndex+1]...)
 	afterExec := make([]string, 0, len(argv))
-	for i := 1; i < len(argv); i++ {
+	for i := codexIndex + 1; i < normalizeEnd; i++ {
 		arg := argv[i]
 		if isCodexExecOnlyFlag(arg) {
 			afterExec = append(afterExec, arg)
-			if codexExecOnlyFlagTakesValue(arg) && i+1 < len(argv) {
+			if codexExecOnlyFlagTakesValue(arg) && i+1 < normalizeEnd {
 				i++
 				afterExec = append(afterExec, argv[i])
 			}
@@ -212,7 +220,17 @@ func normalizeExecArgs(argv []string) []string {
 	out = append(out, beforeExec...)
 	out = append(out, "exec")
 	out = append(out, afterExec...)
+	out = append(out, trailing...)
 	return out
+}
+
+func codexCommandIndex(argv []string) int {
+	for i, arg := range argv {
+		if isCodexCommand(arg) {
+			return i
+		}
+	}
+	return -1
 }
 
 func isCodexCommand(command string) bool {
@@ -223,14 +241,17 @@ func isCodexCommand(command string) bool {
 }
 
 func isCodexExecOnlyFlag(arg string) bool {
-	switch arg {
+	switch codexFlagName(arg) {
 	case "--skip-git-repo-check",
 		"--ephemeral",
 		"--ignore-user-config",
 		"--ignore-rules",
 		"--output-schema",
+		"-o",
 		"--color",
 		"--json",
+		"--experimental-json",
+		"--full-auto",
 		"--output-last-message":
 		return true
 	default:
@@ -239,12 +260,20 @@ func isCodexExecOnlyFlag(arg string) bool {
 }
 
 func codexExecOnlyFlagTakesValue(arg string) bool {
-	switch arg {
-	case "--output-schema", "--color", "--output-last-message":
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	switch codexFlagName(arg) {
+	case "--output-schema", "--color", "--output-last-message", "-o":
 		return true
 	default:
 		return false
 	}
+}
+
+func codexFlagName(arg string) string {
+	name, _, _ := strings.Cut(arg, "=")
+	return name
 }
 
 func insertBeforeExec(argv []string, values ...string) []string {
@@ -280,9 +309,14 @@ func hasArg(argv []string, needle string) bool {
 }
 
 func execIndex(argv []string) int {
-	for i, arg := range argv[1:] {
+	return execIndexAfter(argv, 0)
+}
+
+func execIndexAfter(argv []string, start int) int {
+	for i := start + 1; i < len(argv); i++ {
+		arg := argv[i]
 		if arg == "exec" {
-			return i + 1
+			return i
 		}
 	}
 	return -1
@@ -331,6 +365,19 @@ func PreviewTaskScopedArgv(command []string, profile ProfileConfig) []string {
 			MCPURL: "http://127.0.0.1:1/mcp",
 		},
 	}, profile)
+}
+
+// PreviewExecHelpArgv builds the configured Codex command prefix into a
+// non-interactive help probe without launching a worker.
+func PreviewExecHelpArgv(command []string) []string {
+	if len(command) == 0 {
+		return nil
+	}
+	argv := normalizeExecArgs(append([]string(nil), command...))
+	if !commandIncludesExec(argv) {
+		argv = append(argv, "exec")
+	}
+	return append(argv, "--help")
 }
 
 func tomlEscape(value string) string {

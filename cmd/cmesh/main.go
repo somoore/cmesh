@@ -812,7 +812,8 @@ func codexTaskScopedChecks(ctx context.Context, rcfg config.RunnerConfig) []doct
 		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: "runner command is empty"})
 		return checks
 	}
-	helpCmd := exec.CommandContext(ctx, rcfg.Command[0], "exec", "--help")
+	helpArgv := codex.PreviewExecHelpArgv(rcfg.Command)
+	helpCmd := exec.CommandContext(ctx, helpArgv[0], helpArgv[1:]...)
 	out, err := helpCmd.CombinedOutput()
 	if err != nil {
 		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: firstNonEmpty(strings.TrimSpace(string(out)), err.Error())})

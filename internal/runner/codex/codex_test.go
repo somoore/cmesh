@@ -111,6 +111,59 @@ func TestArgvPreservesExecForWrappedCodexCommand(t *testing.T) {
 	}
 }
 
+func TestArgvNormalizesWrappedCodexExecOnlyFlags(t *testing.T) {
+	run := New(Config{
+		Command: []string{"env", "CODEX_HOME=/tmp/codex", "codex", "--ignore-rules", "--ask-for-approval", "on-request"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "--ask-for-approval", "on-request", "exec", "--ignore-rules", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvNormalizesExecOnlyFlagsBeforeExplicitExec(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ignore-rules", "exec", "--json"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "exec", "--ignore-rules", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvNormalizesExecOnlyFlagAliasesAndEqualsForms(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--output-schema=/tmp/schema.json", "--experimental-json", "--full-auto", "-o", "/tmp/out", "--ask-for-approval", "never"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "never", "exec", "--output-schema=/tmp/schema.json", "--experimental-json", "--full-auto", "-o", "/tmp/out", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestPreviewExecHelpArgvHonorsWrappedCodexCommand(t *testing.T) {
+	got := PreviewExecHelpArgv([]string{"env", "CODEX_HOME=/tmp/codex", "codex"})
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "exec", "--help"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("help argv = %#v, want %#v", got, want)
+	}
+}
+
 func TestArgvKeepsNonCodexCommandPrefixCompatibleWithStdinHarness(t *testing.T) {
 	run := New(Config{
 		Command: []string{"sh", "-c", "cat"},
