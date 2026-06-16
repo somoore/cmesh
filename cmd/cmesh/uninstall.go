@@ -85,6 +85,7 @@ func cmdUninstall(args []string) error {
 type cleanupReport struct {
 	removedAgents []string
 	removed       []string
+	scheduled     []string
 	left          []string
 }
 
@@ -97,10 +98,13 @@ func (r *cleanupReport) print() {
 	for _, item := range r.removed {
 		fmt.Printf("  Removed: %s\n", item)
 	}
+	for _, item := range r.scheduled {
+		fmt.Printf("  Scheduled: %s\n", item)
+	}
 	for _, item := range r.left {
 		fmt.Printf("  Left:    %s\n", item)
 	}
-	if len(r.removedAgents) == 0 && len(r.removed) == 0 && len(r.left) == 0 {
+	if len(r.removedAgents) == 0 && len(r.removed) == 0 && len(r.scheduled) == 0 && len(r.left) == 0 {
 		fmt.Println("  Nothing to do.")
 	}
 }
@@ -132,9 +136,6 @@ func removeServiceForUninstall() error {
 		return nil
 	}
 	if runtime.GOOS != "windows" || !svcpkg.IsWindowsElevationRequired(err) {
-		return err
-	}
-	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
 		return err
 	}
 	fmt.Println("Windows will ask for permission to remove the cmesh service.")
@@ -228,7 +229,7 @@ func maybeRemoveBinary(report *cleanupReport) {
 	}
 
 	fmt.Println()
-	ok, err := confirmYesNo(fmt.Sprintf("Remove the cmesh binary (%s)?", exe), true)
+	ok, err := confirmYesNo(fmt.Sprintf("Remove the cmesh binary (%s)?", exe), false)
 	if err != nil || !ok {
 		report.left = append(report.left, "binary "+exe)
 		return
@@ -240,7 +241,15 @@ func maybeRemoveBinary(report *cleanupReport) {
 		return
 	}
 	printCheck("binary", true, detail)
-	report.removed = append(report.removed, "binary "+exe)
+	if binaryRemovalScheduled(detail) {
+		report.scheduled = append(report.scheduled, "binary "+exe)
+	} else {
+		report.removed = append(report.removed, "binary "+exe)
+	}
+}
+
+func binaryRemovalScheduled(detail string) bool {
+	return strings.HasPrefix(detail, "scheduled ")
 }
 
 // selfInstalledBinary reports whether exe lives in a directory self-install
