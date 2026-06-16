@@ -206,6 +206,19 @@ func TestCodexSandboxForProfileUsesWorkspaceWriteEverywhere(t *testing.T) {
 	}
 }
 
+func TestCodexTaskScopedPlacementCheckNormalizesConfiguredExecFlags(t *testing.T) {
+	check := codexTaskScopedPlacementCheck([]string{"codex", "--ignore-rules"})
+	if !check.OK {
+		t.Fatalf("placement check failed: %+v", check)
+	}
+	detail := check.Detail
+	execIdx := strings.Index(detail, " exec ")
+	flagIdx := strings.Index(detail, " --ignore-rules")
+	if execIdx < 0 || flagIdx < execIdx {
+		t.Fatalf("--ignore-rules must appear after exec in %q", detail)
+	}
+}
+
 func TestCleanupTaskArtifactsRemovesRegisteredWorktreeBeforeBranch(t *testing.T) {
 	ctx := context.Background()
 	testutil.EnsureGitOnPath(t)

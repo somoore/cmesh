@@ -145,7 +145,7 @@ func (r *Runner) profile(name string) (ProfileConfig, error) {
 }
 
 func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
-	argv := r.commandPrefix()
+	argv := normalizeExecArgs(r.commandPrefix())
 	if profile.Approval != "" {
 		argv = insertBeforeExec(argv, "--ask-for-approval", profile.Approval)
 	}
@@ -160,6 +160,9 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	}
 	if req.Metadata.MCPURL != "" && !hasArg(argv, "--ignore-user-config") && !hasArg(profile.ExtraArgs, "--ignore-user-config") {
 		argv = append(argv, "--ignore-user-config")
+	}
+	if req.Metadata.MCPURL != "" && !hasArg(argv, "--ignore-rules") && !hasArg(profile.ExtraArgs, "--ignore-rules") {
+		argv = append(argv, "--ignore-rules")
 	}
 	if profile.Model != "" {
 		argv = append(argv, "--model", profile.Model)
@@ -185,6 +188,92 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	argv = append(argv, profile.ExtraArgs...)
 	argv = append(argv, "-")
 	return argv
+}
+
+func normalizeExecArgs(argv []string) []string {
+	codexIndex := codexCommandIndex(argv)
+	if codexIndex < 0 {
+		return argv
+	}
+	execIndex := execIndexAfter(argv, codexIndex)
+	normalizeEnd := len(argv)
+	var trailing []string
+	if execIndex >= 0 {
+		normalizeEnd = execIndex
+		trailing = argv[execIndex+1:]
+	}
+	beforeExec := append([]string(nil), argv[:codexIndex+1]...)
+	afterExec := make([]string, 0, len(argv))
+	for i := codexIndex + 1; i < normalizeEnd; i++ {
+		arg := argv[i]
+		if isCodexExecOnlyFlag(arg) {
+			afterExec = append(afterExec, arg)
+			if codexExecOnlyFlagTakesValue(arg) && i+1 < normalizeEnd {
+				i++
+				afterExec = append(afterExec, argv[i])
+			}
+		} else {
+			beforeExec = append(beforeExec, arg)
+		}
+	}
+	out := make([]string, 0, len(argv)+1)
+	out = append(out, beforeExec...)
+	out = append(out, "exec")
+	out = append(out, afterExec...)
+	out = append(out, trailing...)
+	return out
+}
+
+func codexCommandIndex(argv []string) int {
+	for i, arg := range argv {
+		if isCodexCommand(arg) {
+			return i
+		}
+	}
+	return -1
+}
+
+func isCodexCommand(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	command = strings.TrimSuffix(command, ".exe")
+	command = strings.TrimSuffix(command, ".cmd")
+	return command == "codex" || strings.HasSuffix(command, `/codex`) || strings.HasSuffix(command, `\codex`)
+}
+
+func isCodexExecOnlyFlag(arg string) bool {
+	switch codexFlagName(arg) {
+	case "--skip-git-repo-check",
+		"--ephemeral",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--output-schema",
+		"-o",
+		"--color",
+		"--json",
+		"--experimental-json",
+		"--full-auto",
+		"--output-last-message":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexExecOnlyFlagTakesValue(arg string) bool {
+	if strings.Contains(arg, "=") {
+		return false
+	}
+	switch codexFlagName(arg) {
+	case "--output-schema", "--color", "--output-last-message", "-o":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexFlagName(arg string) string {
+	name, _, _ := strings.Cut(arg, "=")
+	return name
 }
 
 func insertBeforeExec(argv []string, values ...string) []string {
@@ -220,9 +309,14 @@ func hasArg(argv []string, needle string) bool {
 }
 
 func execIndex(argv []string) int {
-	for i, arg := range argv[1:] {
+	return execIndexAfter(argv, 0)
+}
+
+func execIndexAfter(argv []string, start int) int {
+	for i := start + 1; i < len(argv); i++ {
+		arg := argv[i]
 		if arg == "exec" {
-			return i + 1
+			return i
 		}
 	}
 	return -1
@@ -252,6 +346,38 @@ func nativeFlags(profile ProfileConfig) []string {
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
 	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
+}
+
+// PreviewTaskScopedArgv builds the task-scoped argv shape cmesh uses when it
+// injects a per-task MCP server. Doctor uses this to validate flag placement
+// without launching a worker.
+func PreviewTaskScopedArgv(command []string, profile ProfileConfig) []string {
+	run := New(Config{
+		Command:        command,
+		DefaultProfile: "doctor-preview",
+		Profiles: map[string]ProfileConfig{
+			"doctor-preview": profile,
+		},
+	})
+	return run.argv(runner.RunRequest{
+		Profile: "doctor-preview",
+		Metadata: runner.TaskMetadata{
+			MCPURL: "http://127.0.0.1:1/mcp",
+		},
+	}, profile)
+}
+
+// PreviewExecHelpArgv builds the configured Codex command prefix into a
+// non-interactive help probe without launching a worker.
+func PreviewExecHelpArgv(command []string) []string {
+	if len(command) == 0 {
+		return nil
+	}
+	argv := normalizeExecArgs(append([]string(nil), command...))
+	if !commandIncludesExec(argv) {
+		argv = append(argv, "exec")
+	}
+	return append(argv, "--help")
 }
 
 func tomlEscape(value string) string {
