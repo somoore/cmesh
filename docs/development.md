@@ -21,6 +21,7 @@ make test
 ```
 
 `make test` runs formatting checks, module hygiene, supply-chain checks, duplicate-code detection, vulnerability scanning, and unit tests.
+It also lints GitHub Actions workflows with `actionlint` and builds the local CLI binary with the same package entrypoint users install.
 
 For the current hardening paths, the most useful focused checks are:
 
@@ -37,6 +38,16 @@ Those cover stdin runner delivery, semantic smoke helpers, mesh task ownership a
 ```bash
 make fmt
 ```
+
+## Workflow lint
+
+The repository keeps GitHub Actions references pinned and validates workflow syntax locally:
+
+```bash
+make workflow-lint
+```
+
+CI runs on pull requests and on every branch push, including feature branches before a PR exists.
 
 ## Build release artifacts
 
