@@ -66,6 +66,66 @@ func TestArgvBuildsNonInteractiveExecCommand(t *testing.T) {
 	}
 }
 
+func TestArgvNormalizesConfiguredExecOnlyFlags(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ignore-rules"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write", Approval: "never"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "never", "exec", "--ignore-rules", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvPreservesConfiguredGlobalFlagsBeforeExec(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "--ask-for-approval", "on-request", "--ignore-rules"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"codex", "--ask-for-approval", "on-request", "exec", "--ignore-rules", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvPreservesExecForWrappedCodexCommand(t *testing.T) {
+	run := New(Config{
+		Command: []string{"env", "CODEX_HOME=/tmp/codex", "codex"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"env", "CODEX_HOME=/tmp/codex", "codex", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
+func TestArgvKeepsNonCodexCommandPrefixCompatibleWithStdinHarness(t *testing.T) {
+	run := New(Config{
+		Command: []string{"sh", "-c", "cat"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write"},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{Profile: "dev"}, run.cfg.Profiles["dev"])
+	want := []string{"sh", "-c", "cat", "exec", "--sandbox", "workspace-write", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("argv = %#v, want %#v", got, want)
+	}
+}
+
 func TestArgvDoesNotDuplicateExecSubcommand(t *testing.T) {
 	run := New(Config{
 		Command: []string{"codex", "exec"},
@@ -115,6 +175,7 @@ func TestArgvInjectsTaskScopedMCPWithoutLeakingToken(t *testing.T) {
 
 	for _, want := range []string{
 		"--ignore-user-config",
+		"--ignore-rules",
 		"mcp_servers.cmesh.url=\"http://127.0.0.1:8888/mcp\"",
 		"mcp_servers.cmesh.bearer_token_env_var=\"CMESH_TASK_TOKEN\"",
 		"mcp_servers.cmesh.startup_timeout_sec=120",
@@ -126,4 +187,33 @@ func TestArgvInjectsTaskScopedMCPWithoutLeakingToken(t *testing.T) {
 	if strings.Contains(strings.Join(got, " "), "secret-task-token") {
 		t.Fatalf("argv leaked task token: %#v", got)
 	}
+}
+
+func TestArgvDoesNotDuplicateIgnoreRules(t *testing.T) {
+	run := New(Config{
+		Command: []string{"codex", "exec"},
+		Profiles: map[string]ProfileConfig{
+			"dev": {Sandbox: "workspace-write", Approval: "never", ExtraArgs: []string{"--ignore-rules"}},
+		},
+		DefaultProfile: "dev",
+	})
+	got := run.argv(runner.RunRequest{
+		Profile: "dev",
+		Metadata: runner.TaskMetadata{
+			MCPURL: "http://127.0.0.1:8888/mcp",
+		},
+	}, run.cfg.Profiles["dev"])
+	if countArg(got, "--ignore-rules") != 1 {
+		t.Fatalf("argv must contain exactly one --ignore-rules: %#v", got)
+	}
+}
+
+func countArg(argv []string, needle string) int {
+	var count int
+	for _, arg := range argv {
+		if arg == needle {
+			count++
+		}
+	}
+	return count
 }

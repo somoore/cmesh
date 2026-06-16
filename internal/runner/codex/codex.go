@@ -145,7 +145,7 @@ func (r *Runner) profile(name string) (ProfileConfig, error) {
 }
 
 func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
-	argv := r.commandPrefix()
+	argv := normalizeExecArgs(r.commandPrefix())
 	if profile.Approval != "" {
 		argv = insertBeforeExec(argv, "--ask-for-approval", profile.Approval)
 	}
@@ -160,6 +160,9 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	}
 	if req.Metadata.MCPURL != "" && !hasArg(argv, "--ignore-user-config") && !hasArg(profile.ExtraArgs, "--ignore-user-config") {
 		argv = append(argv, "--ignore-user-config")
+	}
+	if req.Metadata.MCPURL != "" && !hasArg(argv, "--ignore-rules") && !hasArg(profile.ExtraArgs, "--ignore-rules") {
+		argv = append(argv, "--ignore-rules")
 	}
 	if profile.Model != "" {
 		argv = append(argv, "--model", profile.Model)
@@ -185,6 +188,63 @@ func (r *Runner) argv(req runner.RunRequest, profile ProfileConfig) []string {
 	argv = append(argv, profile.ExtraArgs...)
 	argv = append(argv, "-")
 	return argv
+}
+
+func normalizeExecArgs(argv []string) []string {
+	if len(argv) == 0 || !isCodexCommand(argv[0]) || commandIncludesExec(argv) {
+		return argv
+	}
+	beforeExec := []string{argv[0]}
+	afterExec := make([]string, 0, len(argv))
+	for i := 1; i < len(argv); i++ {
+		arg := argv[i]
+		if isCodexExecOnlyFlag(arg) {
+			afterExec = append(afterExec, arg)
+			if codexExecOnlyFlagTakesValue(arg) && i+1 < len(argv) {
+				i++
+				afterExec = append(afterExec, argv[i])
+			}
+		} else {
+			beforeExec = append(beforeExec, arg)
+		}
+	}
+	out := make([]string, 0, len(argv)+1)
+	out = append(out, beforeExec...)
+	out = append(out, "exec")
+	out = append(out, afterExec...)
+	return out
+}
+
+func isCodexCommand(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	command = strings.TrimSuffix(command, ".exe")
+	command = strings.TrimSuffix(command, ".cmd")
+	return command == "codex" || strings.HasSuffix(command, `/codex`) || strings.HasSuffix(command, `\codex`)
+}
+
+func isCodexExecOnlyFlag(arg string) bool {
+	switch arg {
+	case "--skip-git-repo-check",
+		"--ephemeral",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"--output-schema",
+		"--color",
+		"--json",
+		"--output-last-message":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexExecOnlyFlagTakesValue(arg string) bool {
+	switch arg {
+	case "--output-schema", "--color", "--output-last-message":
+		return true
+	default:
+		return false
+	}
 }
 
 func insertBeforeExec(argv []string, values ...string) []string {
@@ -252,6 +312,25 @@ func nativeFlags(profile ProfileConfig) []string {
 
 func resultFromProcess(req runner.RunRequest, proc runner.CompletedProcess, argv []string) runner.Result {
 	return runner.ResultFromProcess(Name, proc, argv, req.Prompt)
+}
+
+// PreviewTaskScopedArgv builds the task-scoped argv shape cmesh uses when it
+// injects a per-task MCP server. Doctor uses this to validate flag placement
+// without launching a worker.
+func PreviewTaskScopedArgv(command []string, profile ProfileConfig) []string {
+	run := New(Config{
+		Command:        command,
+		DefaultProfile: "doctor-preview",
+		Profiles: map[string]ProfileConfig{
+			"doctor-preview": profile,
+		},
+	})
+	return run.argv(runner.RunRequest{
+		Profile: "doctor-preview",
+		Metadata: runner.TaskMetadata{
+			MCPURL: "http://127.0.0.1:1/mcp",
+		},
+	}, profile)
 }
 
 func tomlEscape(value string) string {

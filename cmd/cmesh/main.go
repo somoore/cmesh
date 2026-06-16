@@ -746,6 +746,9 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	if runtime.GOOS == "windows" {
 		checks = append(checks, windowsServiceUserChecks()...)
 	}
+	if runnerName == codex.Name {
+		checks = append(checks, codexTaskScopedChecks(ctx, rcfg)...)
+	}
 	reg, err := buildRunners(cfg)
 	if err != nil {
 		checks = append(checks, doctor.Check{Name: "runner auth works", OK: false, Err: err.Error()})
@@ -799,6 +802,51 @@ func runnerProfileChecks(cfg *config.Config, reg *runner.Registry, runnerName st
 		checks = append(checks, check)
 	}
 	return checks
+}
+
+func codexTaskScopedChecks(ctx context.Context, rcfg config.RunnerConfig) []doctor.Check {
+	var checks []doctor.Check
+	checks = append(checks, codexTaskScopedPlacementCheck(rcfg.Command))
+
+	if len(rcfg.Command) == 0 {
+		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: "runner command is empty"})
+		return checks
+	}
+	helpCmd := exec.CommandContext(ctx, rcfg.Command[0], "exec", "--help")
+	out, err := helpCmd.CombinedOutput()
+	if err != nil {
+		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: firstNonEmpty(strings.TrimSpace(string(out)), err.Error())})
+		return checks
+	}
+	if strings.Contains(string(out), "--ignore-rules") {
+		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: true, Detail: "codex exec --help includes --ignore-rules"})
+	} else {
+		checks = append(checks, doctor.Check{Name: "codex supports --ignore-rules", OK: false, Err: "codex exec --help does not list --ignore-rules"})
+	}
+	return checks
+}
+
+func codexTaskScopedPlacementCheck(command []string) doctor.Check {
+	argv := codex.PreviewTaskScopedArgv(command, codex.ProfileConfig{Sandbox: "workspace-write", Approval: "never"})
+	execIdx := indexString(argv, "exec")
+	ignoreRulesIdx := indexString(argv, "--ignore-rules")
+	placementOK := execIdx >= 0 && ignoreRulesIdx > execIdx
+	placementDetail := strings.Join(argv, " ")
+	check := doctor.Check{Name: "codex task-scoped --ignore-rules placement", OK: placementOK, Detail: placementDetail}
+	if !placementOK {
+		check.Err = "--ignore-rules must be generated after `exec` for task-scoped Codex runs"
+		check.Detail = placementDetail
+	}
+	return check
+}
+
+func indexString(values []string, needle string) int {
+	for i, value := range values {
+		if value == needle {
+			return i
+		}
+	}
+	return -1
 }
 
 func runnerSmokeCheck(ctx context.Context, reg *runner.Registry, runnerName string, timeout time.Duration, logDir string) doctor.Check {
@@ -1337,6 +1385,8 @@ func cmdPeers(args []string) error {
 			capable := ""
 			if peer.CmeshCapable {
 				capable = " cmesh"
+			} else if peer.Online && strings.TrimSpace(peer.Detail) != "" {
+				capable = " online, no cmesh: " + peer.Detail
 			}
 			fmt.Printf("  - %s  %s%s\n", peer.Name, firstNonEmpty(peer.Address, "no tailnet ip"), capable)
 		}
