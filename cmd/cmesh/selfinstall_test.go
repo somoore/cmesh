@@ -94,3 +94,12 @@ func TestSelfInstalledBinary(t *testing.T) {
 		t.Fatalf("unexpected self-install match for /opt/random")
 	}
 }
+
+func TestBinaryRemovalScheduled(t *testing.T) {
+	if !binaryRemovalScheduled("scheduled removal after cmesh exits: cmesh.exe") {
+		t.Fatal("expected scheduled removal detail to be detected")
+	}
+	if binaryRemovalScheduled("removed cmesh.exe") {
+		t.Fatal("completed removal detail must not be treated as scheduled")
+	}
+}
