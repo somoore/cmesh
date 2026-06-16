@@ -59,6 +59,7 @@ From there the cmesh MCP wizard drives everything — detecting Tailscale and pe
 
 | Doc | What's inside |
 | --- | --- |
+| [Why cmesh?](ycmesh.md) | The thesis for cmesh over SSH plus tmux |
 | [Concepts](docs/concepts.md) | What cmesh is, why it exists, and the mental models |
 | [Quickstart](docs/quickstart.md) | Install, setup wizard, two-machine handshake |
 | [Architecture](docs/architecture.md) | Surfaces, request lifecycle, trust boundaries, data model |
