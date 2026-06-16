@@ -80,9 +80,24 @@ function Install-File {
     if (-not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $tmp = "$Dst.tmp.$PID"
+    $suffix = [System.Guid]::NewGuid().ToString('N')
+    $tmp = "$Dst.tmp.$suffix"
     Copy-Item -LiteralPath $Src -Destination $tmp -Force
-    Move-Item -LiteralPath $tmp -Destination $Dst -Force
+    $tmpFull = [System.IO.Path]::GetFullPath($tmp)
+    $dstFull = [System.IO.Path]::GetFullPath($Dst)
+    $bak = "$Dst.bak.$suffix"
+    $bakFull = [System.IO.Path]::GetFullPath($bak)
+    try {
+        if (Test-Path -LiteralPath $Dst -PathType Leaf) {
+            [System.IO.File]::Replace($tmpFull, $dstFull, $bakFull)
+            Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+        } else {
+            [System.IO.File]::Move($tmpFull, $dstFull)
+        }
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Install-FromBinary {
