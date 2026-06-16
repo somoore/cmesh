@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"cmesh/internal/config"
@@ -40,6 +41,12 @@ type Options struct {
 type WindowsOptions struct {
 	User     string
 	Password string
+	// UserTask installs a per-user scheduled task instead of an SCM service.
+	// This is the right Windows worker mode when the daemon must inherit the
+	// interactive user's Tailscale and runner auth and survive SSH logout.
+	UserTask bool
+	// Firewall opens the mesh RPC port for the installed cmesh executable.
+	Firewall bool
 	// PasswordEnv and PromptPassword are retained so the CLI can describe how the
 	// password was sourced, but this package never reads the env var or prompts.
 	PasswordEnv    string
@@ -64,22 +71,26 @@ func Install(opts Options) error {
 		return errors.New("service install requires an executable path")
 	}
 	win := opts.Windows
-	if runtime.GOOS != "windows" && (win.User != "" || win.Password != "" || win.PasswordEnv != "" || win.PromptPassword) {
+	if runtime.GOOS != "windows" && (win.User != "" || win.Password != "" || win.UserTask || win.PasswordEnv != "" || win.PromptPassword) {
 		return fmt.Errorf("Windows service account options are only supported on Windows")
 	}
 	switch runtime.GOOS {
 	case "linux":
 		unitDir := filepath.Join(userConfigDir(), "systemd", "user")
 		if err := os.MkdirAll(unitDir, 0o755); err != nil {
-			return err
+			return linuxInstallError("create user systemd directory", unitDir, err)
 		}
 		unitPath := filepath.Join(unitDir, "cmesh.service")
 		body := SystemdUnitBody(exe, configPath)
 		if err := os.WriteFile(unitPath, []byte(body), 0o644); err != nil {
-			return err
+			return linuxInstallError("write user systemd unit", unitPath, err)
 		}
+		// If a prior failed/manual install left cmesh.service masked, enable/start
+		// will fail even though the freshly written user unit is valid. Unmasking
+		// this exact unit is idempotent and scoped to cmesh's own user service.
+		_ = runServiceCommandCapture("systemctl", "--user", "unmask", "cmesh.service")
 		_ = runServiceCommand("systemctl", "--user", "daemon-reload")
-		if err := runServiceCommand("systemctl", "--user", "enable", "cmesh.service"); err != nil {
+		if err := runServiceCommandCapture("systemctl", "--user", "enable", "cmesh.service"); err != nil {
 			return err
 		}
 		fmt.Printf("Installed user systemd service: %s\n", unitPath)
@@ -95,6 +106,12 @@ func Install(opts Options) error {
 		}
 		fmt.Printf("Installed launchd agent: %s\n", plistPath)
 	case "windows":
+		if win.UserTask {
+			if err := installWindowsUserTask(exe, configPath, win.Firewall); err != nil {
+				return err
+			}
+			return nil
+		}
 		cmdLine := ServiceCommandLine(exe, configPath)
 		action := "create"
 		if windowsServiceExists() {
@@ -110,11 +127,16 @@ func Install(opts Options) error {
 		if win.User == "" {
 			fmt.Println("Installed Windows service: cmesh")
 			fmt.Println("Warning: service will run as LocalSystem. Runner auth from your interactive user session will not be available.")
-			fmt.Println(`For Claude Code/Codex auth, reinstall with: cmesh up service install --user ".\YOURUSER" --prompt-password`)
+			fmt.Println("For Claude Code/Codex auth, reinstall with: cmesh up service install --user-task")
 		} else if action == "config" {
 			fmt.Printf("Updated Windows service cmesh to run as %s\n", win.User)
 		} else {
 			fmt.Printf("Installed Windows service cmesh to run as %s\n", win.User)
+		}
+		if win.Firewall {
+			if err := EnsureWindowsFirewallRule(exe, config.DefaultMeshPort); err != nil {
+				return err
+			}
 		}
 	default:
 		return fmt.Errorf("service install is not supported on %s", runtime.GOOS)
@@ -137,6 +159,12 @@ func Start() error {
 		}
 		return runServiceCommand("launchctl", "kickstart", "-k", target)
 	case "windows":
+		if windowsUserTaskExists() {
+			return runServiceCommand("schtasks.exe", "/Run", "/TN", WindowsUserTaskName)
+		}
+		if windowsServiceExists() {
+			return runServiceCommand("sc.exe", "start", "cmesh")
+		}
 		return runServiceCommand("sc.exe", "start", "cmesh")
 	default:
 		return fmt.Errorf("service start is not supported on %s", runtime.GOOS)
@@ -151,6 +179,12 @@ func Stop() error {
 	case "darwin":
 		return runServiceCommand("launchctl", "bootout", launchdDomain()+"/dev.cmesh")
 	case "windows":
+		if windowsUserTaskExists() {
+			return runServiceCommand("schtasks.exe", "/End", "/TN", WindowsUserTaskName)
+		}
+		if windowsServiceExists() {
+			return runServiceCommand("sc.exe", "stop", "cmesh")
+		}
 		return runServiceCommand("sc.exe", "stop", "cmesh")
 	default:
 		return fmt.Errorf("service stop is not supported on %s", runtime.GOOS)
@@ -171,6 +205,18 @@ func Restart() error {
 		// the job unloaded entirely. kickstart -k makes the bootout unnecessary.
 		return Start()
 	case "windows":
+		if windowsUserTaskExists() {
+			_ = runServiceCommand("schtasks.exe", "/End", "/TN", WindowsUserTaskName)
+			time.Sleep(2 * time.Second)
+			return runServiceCommand("schtasks.exe", "/Run", "/TN", WindowsUserTaskName)
+		}
+		if windowsServiceExists() {
+			if err := Stop(); err != nil {
+				return err
+			}
+			time.Sleep(5 * time.Second)
+			return Start()
+		}
 		if err := Stop(); err != nil {
 			return err
 		}
@@ -189,6 +235,12 @@ func Status() error {
 	case "darwin":
 		return runServiceCommand("launchctl", "print", "gui/"+fmt.Sprint(os.Getuid())+"/dev.cmesh")
 	case "windows":
+		if windowsUserTaskExists() {
+			return runServiceCommand("schtasks.exe", "/Query", "/TN", WindowsUserTaskName, "/FO", "LIST")
+		}
+		if windowsServiceExists() {
+			return runServiceCommand("sc.exe", "query", "cmesh")
+		}
 		return runServiceCommand("sc.exe", "query", "cmesh")
 	default:
 		return fmt.Errorf("service status is not supported on %s", runtime.GOOS)
@@ -231,6 +283,12 @@ func Remove() error {
 		}
 		return nil
 	case "windows":
+		if windowsUserTaskExists() {
+			_ = runServiceCommandCapture("schtasks.exe", "/End", "/TN", WindowsUserTaskName)
+			if err := runServiceCommandCapture("schtasks.exe", "/Delete", "/TN", WindowsUserTaskName, "/F"); err != nil {
+				return err
+			}
+		}
 		exists, err := windowsServiceExistsStatus()
 		if err != nil {
 			if isWindowsAccessDeniedError(err) {
@@ -278,6 +336,33 @@ func ServiceCommandLine(exe, configPath string) string {
 	return fmt.Sprintf(`"%s" _service --config "%s"`, exe, configPath)
 }
 
+// WindowsUserTaskName is the per-user scheduled task used for non-admin
+// Windows workers. It runs under the current user so runner auth and PATH match
+// the account that ran cmesh setup.
+const WindowsUserTaskName = "cmesh-daemon"
+
+// WindowsUserTaskCommandLine builds the command persisted in Task Scheduler.
+func WindowsUserTaskCommandLine(exe, configPath string) string {
+	return fmt.Sprintf(`"%s" up --config "%s"`, exe, configPath)
+}
+
+// WindowsUserTaskCreateArgs builds schtasks.exe arguments for a current-user
+// daemon task. The task is also runnable on demand with `schtasks /Run`.
+func WindowsUserTaskCreateArgs(exe, configPath string) []string {
+	return []string{"/Create", "/TN", WindowsUserTaskName, "/TR", WindowsUserTaskCommandLine(exe, configPath), "/SC", "ONLOGON", "/RL", "LIMITED", "/F"}
+}
+
+// WindowsFirewallRuleName returns the stable rule name for the mesh RPC port.
+func WindowsFirewallRuleName(port int) string {
+	return fmt.Sprintf("cmesh mesh %d", port)
+}
+
+// WindowsFirewallRuleArgs builds a narrow inbound firewall rule for cmesh mesh
+// RPC. The local MCP gateway remains loopback-only and is not opened.
+func WindowsFirewallRuleArgs(exe string, port int) []string {
+	return []string{"advfirewall", "firewall", "add", "rule", "name=" + WindowsFirewallRuleName(port), "dir=in", "action=allow", "protocol=TCP", fmt.Sprintf("localport=%d", port), "program=" + exe}
+}
+
 // SystemdUnitBody returns the user systemd unit file contents.
 func SystemdUnitBody(exe, configPath string) string {
 	return fmt.Sprintf("[Unit]\nDescription=cmesh agent mesh daemon\nAfter=network-online.target\n\n[Service]\nExecStart=%s up --config %s\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n", exe, configPath)
@@ -312,6 +397,35 @@ func WindowsServiceSCArgs(action, cmdLine, user, password string) []string {
 		args = append(args, "obj=", user, "password=", password)
 	}
 	return args
+}
+
+func installWindowsUserTask(exe, configPath string, firewall bool) error {
+	if err := runServiceCommand("schtasks.exe", WindowsUserTaskCreateArgs(exe, configPath)...); err != nil {
+		return err
+	}
+	fmt.Printf("Installed Windows user scheduled task: %s\n", WindowsUserTaskName)
+	fmt.Println("This mode runs as the current user, survives SSH logout, and preserves Claude Code/Codex auth.")
+	if firewall {
+		if err := EnsureWindowsFirewallRule(exe, config.DefaultMeshPort); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EnsureWindowsFirewallRule opens the mesh RPC port for the cmesh executable.
+func EnsureWindowsFirewallRule(exe string, port int) error {
+	if err := runServiceCommandCapture("netsh.exe", "advfirewall", "firewall", "show", "rule", "name="+WindowsFirewallRuleName(port)); err == nil {
+		return nil
+	}
+	if err := runServiceCommand("netsh.exe", WindowsFirewallRuleArgs(exe, port)...); err != nil {
+		if isWindowsAccessDeniedError(err) {
+			return fmt.Errorf("opening Windows firewall for cmesh mesh RPC requires Administrator rights. Re-run from an elevated PowerShell or add an inbound allow rule for TCP %d to %s: %w", port, exe, err)
+		}
+		return err
+	}
+	fmt.Printf("Installed Windows firewall rule: %s\n", WindowsFirewallRuleName(port))
+	return nil
 }
 
 // WindowsServiceStartName queries the configured Windows service account.
@@ -404,6 +518,10 @@ func windowsServiceExists() bool {
 	return exists
 }
 
+func windowsUserTaskExists() bool {
+	return runServiceCommandCapture("schtasks.exe", "/Query", "/TN", WindowsUserTaskName) == nil
+}
+
 func windowsServiceExistsStatus() (bool, error) {
 	err := runServiceCommandCapture("sc.exe", "query", "cmesh")
 	if err == nil {
@@ -441,6 +559,13 @@ func runServiceCommandCapture(name string, args ...string) error {
 		return err
 	}
 	return fmt.Errorf("%s %s: %s: %w", name, strings.Join(args, " "), text, err)
+}
+
+func linuxInstallError(action, path string, err error) error {
+	if errors.Is(err, syscall.ENOSPC) {
+		return fmt.Errorf("%s at %s: no space left on device. Free space on the filesystem containing %s, then rerun `cmesh up service install`: %w", action, path, path, err)
+	}
+	return fmt.Errorf("%s at %s: %w", action, path, err)
 }
 
 func xmlPlistString(value string) string {

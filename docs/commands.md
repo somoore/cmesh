@@ -80,7 +80,7 @@ usage: cmesh up service <install|start|stop|restart|status|logs>
 | `status` | Show the service status. |
 | `logs` | Show the service logs. |
 
-`install` accepts Windows service-account flags (ignored on macOS and Linux). A service installed without an explicit user runs as LocalSystem and will not inherit the interactive user's runner auth or PATH.
+`install` accepts Windows-specific flags (ignored on macOS and Linux). On Windows workers, prefer `--user-task` when Claude Code or Codex auth belongs to the interactive user. A traditional SCM service installed without an explicit user runs as LocalSystem and will not inherit the interactive user's runner auth or PATH.
 
 | Flag (install) | Description |
 |---|---|
@@ -89,12 +89,26 @@ usage: cmesh up service <install|start|stop|restart|status|logs>
 | `--password <pw>` | Windows service account password. Prefer `--prompt-password` or `--password-env`. |
 | `--password-env <var>` | Environment variable holding the Windows service account password. |
 | `--prompt-password` | Prompt for the Windows service account password. |
+| `--user-task` | Windows: install a current-user Scheduled Task instead of an SCM service. This preserves the interactive user's Tailscale and runner auth and survives SSH logout. |
+| `--firewall` | Windows: add an inbound firewall rule for the cmesh mesh RPC port (`7778`). Enabled by default for service install; pass `--firewall=false` to skip it. |
 
 ```bash
 cmesh up service install
 cmesh up service status
 cmesh up service restart
 ```
+
+On Windows worker nodes where Claude Code or Codex auth lives in the interactive
+user account, use the current-user task mode:
+
+```powershell
+cmesh up service install --user-task
+cmesh up service start
+```
+
+That mode uses Task Scheduler rather than a foreground SSH-launched process, so
+the daemon keeps running after the SSH session exits. It also installs a narrow
+inbound firewall rule for TCP `7778` when Windows allows it.
 
 ### `cmesh doctor`
 

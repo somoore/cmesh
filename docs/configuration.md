@@ -193,7 +193,14 @@ default_profile = "dev"
 concurrency = 1
 ```
 
-For services, prefer absolute runner paths so the service account does not depend on an interactive shell `PATH`. On Windows, install the service under the same authenticated user account used by the runner:
+For services, prefer absolute runner paths so the service account does not depend on an interactive shell `PATH`. On Windows workers, prefer the current-user Scheduled Task mode when the runner auth belongs to the interactive user:
+
+```powershell
+.\cmesh.exe up service install --user-task
+.\cmesh.exe up service start
+```
+
+That task survives SSH logout and keeps Claude Code or Codex credentials in the same user profile. If you need a traditional SCM service instead, install it under the same authenticated user account used by the runner:
 
 ```powershell
 .\cmesh.exe up service install --user ".\scott" --prompt-password

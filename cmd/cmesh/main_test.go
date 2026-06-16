@@ -555,6 +555,26 @@ func TestResolveWindowsServicePasswordSources(t *testing.T) {
 	}
 }
 
+func TestResolveWindowsServicePasswordRejectsUserTaskWithUser(t *testing.T) {
+	_, err := resolveWindowsServicePassword(serviceInstallOptions{UserTask: true, User: `.\scott`, Password: "secret"})
+	if err == nil {
+		t.Fatal("expected --user-task with --user to fail")
+	}
+	if !strings.Contains(err.Error(), "cannot be combined with --user") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestResolveWindowsServicePasswordAllowsUserTaskWithoutPassword(t *testing.T) {
+	got, err := resolveWindowsServicePassword(serviceInstallOptions{UserTask: true})
+	if err != nil {
+		t.Fatalf("resolveWindowsServicePassword: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("password = %q, want empty for current-user scheduled task", got)
+	}
+}
+
 func TestSchemaSmokeRequestUsesLightweightPrompt(t *testing.T) {
 	req := schemaSmokeRequest(&config.Config{Node: config.NodeConfig{ID: "origin"}}, "peer", "/tmp/repo", "readonly", true, 30)
 	if req.Prompt != "Reply with exactly: cmesh smoke ok" {

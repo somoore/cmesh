@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -37,6 +38,16 @@ func TestSystemdUnitBodyMatchesExpectedLayout(t *testing.T) {
 	want := "[Unit]\nDescription=cmesh agent mesh daemon\nAfter=network-online.target\n\n[Service]\nExecStart=/usr/local/bin/cmesh up --config /home/scott/.config/cmesh/config.toml\nRestart=on-failure\nRestartSec=3\n\n[Install]\nWantedBy=default.target\n"
 	if got != want {
 		t.Fatalf("systemd unit body = %q, want %q", got, want)
+	}
+}
+
+func TestLinuxInstallErrorAddsNoSpaceGuidance(t *testing.T) {
+	err := linuxInstallError("write user systemd unit", "/home/admin/.config/systemd/user/cmesh.service", syscall.ENOSPC)
+	text := err.Error()
+	for _, want := range []string{"write user systemd unit", "no space left on device", "Free space", "cmesh up service install"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("linuxInstallError = %q, missing %q", text, want)
+		}
 	}
 }
 
@@ -90,6 +101,38 @@ func TestWindowsServiceSCArgsWithUser(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("WindowsServiceSCArgs missing %q in %#v", want, got)
 		}
+	}
+}
+
+func TestWindowsUserTaskCommandLineUsesForegroundDaemon(t *testing.T) {
+	got := WindowsUserTaskCommandLine(`C:\Users\scott\.local\bin\cmesh.exe`, `C:\Users\scott\.config\cmesh\config.toml`)
+	want := `"C:\Users\scott\.local\bin\cmesh.exe" up --config "C:\Users\scott\.config\cmesh\config.toml"`
+	if got != want {
+		t.Fatalf("WindowsUserTaskCommandLine = %q, want %q", got, want)
+	}
+	if strings.Contains(got, `_service`) {
+		t.Fatalf("user scheduled task must run foreground up, not SCM entrypoint: %q", got)
+	}
+}
+
+func TestWindowsUserTaskCreateArgs(t *testing.T) {
+	got := strings.Join(WindowsUserTaskCreateArgs(`C:\bin\cmesh.exe`, `C:\cfg.toml`), "\x00")
+	for _, want := range []string{"/Create", "/TN", WindowsUserTaskName, "/TR", `"C:\bin\cmesh.exe" up --config "C:\cfg.toml"`, "/SC", "ONLOGON", "/RL", "LIMITED", "/F"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("WindowsUserTaskCreateArgs missing %q in %#v", want, got)
+		}
+	}
+}
+
+func TestWindowsFirewallRuleArgsAreMeshOnly(t *testing.T) {
+	got := strings.Join(WindowsFirewallRuleArgs(`C:\bin\cmesh.exe`, 7778), "\x00")
+	for _, want := range []string{"advfirewall", "firewall", "add", "rule", "name=cmesh mesh 7778", "dir=in", "action=allow", "protocol=TCP", "localport=7778", `program=C:\bin\cmesh.exe`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("WindowsFirewallRuleArgs missing %q in %#v", want, got)
+		}
+	}
+	if strings.Contains(got, "7777") {
+		t.Fatalf("firewall rule must not expose local MCP gateway: %#v", got)
 	}
 }
 

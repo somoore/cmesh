@@ -138,7 +138,7 @@ Use these responses for stable v1 error codes:
 | `profile_denied` | Stop or pick a narrower profile. Do not escalate permissions automatically. |
 | `cwd_denied` | Stop. Ask the human to adjust cwd policy or choose an allowed cwd. |
 | `dirty_worktree` | Ask whether to allow dirty worktree or clean/commit locally first. |
-| `version_mismatch` | Stop and ask the human to upgrade or align cmesh versions. |
+| `version_mismatch` | Stop and explain that the peer rejected the RPC schema version. Use `peer_info` to compare `schema_versions`; upgrading cmesh is usually the fix when the schemas do not overlap. |
 | `task_conflict` | Stop. The same task ID was replayed with different content. |
 | `timeout` | Check status. If the task is still running, continue polling or cancel based on user intent. |
 | `needs_human` | Stop and ask the human. Do not fabricate permission. |

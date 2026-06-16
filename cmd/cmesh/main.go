@@ -1202,6 +1202,8 @@ func cmdService(args []string) error {
 		password := fs.String("password", "", "Windows service account password; prefer --prompt-password or --password-env")
 		passwordEnv := fs.String("password-env", "", "environment variable containing the Windows service account password")
 		promptPassword := fs.Bool("prompt-password", false, "prompt for the Windows service account password")
+		userTask := fs.Bool("user-task", false, "Windows: install a current-user scheduled task instead of an SCM service")
+		firewall := fs.Bool("firewall", true, "Windows: add an inbound firewall rule for cmesh mesh RPC")
 		if err := parseInterspersedFlags(fs, args[1:]); err != nil {
 			return err
 		}
@@ -1211,6 +1213,8 @@ func cmdService(args []string) error {
 			Password:       *password,
 			PasswordEnv:    *passwordEnv,
 			PromptPassword: *promptPassword,
+			UserTask:       *userTask,
+			Firewall:       *firewall,
 		})
 	case "start":
 		return svcpkg.Start()
@@ -1233,6 +1237,8 @@ type serviceInstallOptions struct {
 	Password       string
 	PasswordEnv    string
 	PromptPassword bool
+	UserTask       bool
+	Firewall       bool
 }
 
 // serviceInstall resolves the Windows service-account password in the CLI layer
@@ -1243,7 +1249,7 @@ func serviceInstall(opts serviceInstallOptions) error {
 	if err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" && (opts.User != "" || opts.Password != "" || opts.PasswordEnv != "" || opts.PromptPassword) {
+	if runtime.GOOS != "windows" && (opts.User != "" || opts.Password != "" || opts.PasswordEnv != "" || opts.PromptPassword || opts.UserTask) {
 		return fmt.Errorf("Windows service account options are only supported on Windows")
 	}
 	password, err := resolveWindowsServicePassword(opts)
@@ -1256,6 +1262,8 @@ func serviceInstall(opts serviceInstallOptions) error {
 		Windows: svcpkg.WindowsOptions{
 			User:           opts.User,
 			Password:       password,
+			UserTask:       opts.UserTask,
+			Firewall:       opts.Firewall,
 			PasswordEnv:    opts.PasswordEnv,
 			PromptPassword: opts.PromptPassword,
 		},
@@ -1268,6 +1276,9 @@ func resolveWindowsServicePassword(opts serviceInstallOptions) (string, error) {
 			return "", fmt.Errorf("Windows service password options require --user")
 		}
 		return "", nil
+	}
+	if opts.UserTask {
+		return "", fmt.Errorf("Windows --user-task runs as the current user and cannot be combined with --user")
 	}
 	methods := 0
 	if opts.Password != "" {
