@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +18,7 @@ import (
 	"cmesh/internal/doctor"
 	"cmesh/internal/gitx"
 	"cmesh/internal/mcp/setupinstall"
+	"cmesh/internal/onboard"
 	profiledefs "cmesh/internal/profile"
 	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
@@ -40,11 +45,182 @@ func TestCodexSandboxForProfileKeepsDenyWriteReadOnlyOnWindows(t *testing.T) {
 	if got != "read-only" {
 		t.Fatalf("deny-write Windows Codex profile sandbox = %q, want read-only", got)
 	}
-	// Write-permitting profiles must NOT silently disable the sandbox on Windows.
 	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows")
-	if got != "workspace-write" {
-		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want workspace-write (never danger-full-access)", got)
+	if got != "danger-full-access" {
+		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want danger-full-access", got)
 	}
+}
+
+func TestCodexTaskScopedDoctorChecksRequireIgnoreRulesAfterExec(t *testing.T) {
+	t.Setenv("CMESH_TEST_CODEX_HELPER", "1")
+	cfg := &config.Config{
+		Profiles: map[string]config.ProfileConfig{
+			profiledefs.RepoDev: {
+				Runner: "codex",
+				Writes: profiledefs.WritesRepoOnly,
+			},
+		},
+	}
+	rcfg := config.RunnerConfig{
+		Command:        []string{os.Args[0], "-test.run=TestCodexHelpHelper", "--", "--ignore-rules"},
+		DefaultProfile: profiledefs.RepoDev,
+	}
+
+	checks := codexTaskScopedDoctorChecks(context.Background(), cfg, rcfg)
+	got := map[string]doctor.Check{}
+	for _, check := range checks {
+		got[check.Name] = check
+	}
+	for _, name := range []string{
+		"runner.codex.task_scoped_ignore_rules",
+		"runner.codex.task_scoped_sandbox",
+		"runner.codex.task_scoped_sandbox_mode",
+		"runner.codex.exec_ignore_rules_supported",
+	} {
+		check, ok := got[name]
+		if !ok {
+			t.Fatalf("missing check %q in %+v", name, checks)
+		}
+		if !check.OK {
+			t.Fatalf("%s failed: %+v", name, check)
+		}
+	}
+}
+
+func TestCodexRuntimeSandboxCheckMatchesBanner(t *testing.T) {
+	check := codexRuntimeSandboxCheck("workspace-write", runner.Result{
+		CommandOutput: runner.CommandOutput{
+			Stderr: "OpenAI Codex\n--------\nsandbox: workspace-write [workdir]\n",
+		},
+	})
+	if !check.OK {
+		t.Fatalf("sandbox check failed: %+v", check)
+	}
+}
+
+func TestCodexRuntimeSandboxCheckRejectsReadOnlyBanner(t *testing.T) {
+	check := codexRuntimeSandboxCheck("workspace-write", runner.Result{
+		CommandOutput: runner.CommandOutput{
+			Stderr: "OpenAI Codex\n--------\nsandbox: read-only\n",
+		},
+	})
+	if check.OK {
+		t.Fatalf("sandbox check unexpectedly passed: %+v", check)
+	}
+	if !strings.Contains(check.Detail, "sandbox: read-only") || !strings.Contains(check.Err, "workspace-write") {
+		t.Fatalf("sandbox check did not report mismatch: %+v", check)
+	}
+}
+
+func TestDoctorCommandJSONIncludesCodexTaskScopedChecks(t *testing.T) {
+	t.Setenv("CMESH_TEST_CODEX_HELPER", "1")
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.toml")
+	body := `[node]
+id = "test"
+name = "test"
+role = "both"
+mesh_port = 7778
+mcp_port = 7777
+data_dir = ` + strconv.Quote(filepath.ToSlash(filepath.Join(root, "data"))) + `
+
+[policy]
+allowed_peers = ["worker"]
+allowed_cwds = [` + strconv.Quote(filepath.ToSlash(root)) + `]
+
+[profiles.repo-dev]
+runner = "codex"
+writes = "repo_only"
+shell = "allow"
+claims = ["read_files", "edit_repo", "execute_in_repo"]
+risk = "high"
+require_explicit = true
+require_lease = true
+
+[runners.codex]
+command = [` + strconv.Quote(os.Args[0]) + `, "-test.run=TestCodexHelpHelper", "--", "--ignore-rules"]
+default_profile = "repo-dev"
+
+[peers.worker]
+name = "worker"
+node_id = "worker"
+address = "127.0.0.1"
+port = 7778
+`
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	output, err := captureStdout(t, func() error {
+		return cmdDoctor([]string{"--config", configPath, "--skip-runner-smoke", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("cmdDoctor: %v\n%s", err, output)
+	}
+	var payload struct {
+		Runners []doctor.Check `json:"runners"`
+	}
+	if err := json.Unmarshal([]byte(output), &payload); err != nil {
+		t.Fatalf("unmarshal doctor output: %v\n%s", err, output)
+	}
+	byName := map[string]doctor.Check{}
+	for _, check := range payload.Runners {
+		byName[check.Name] = check
+	}
+	for _, name := range []string{
+		"runner.codex.task_scoped_ignore_rules",
+		"runner.codex.task_scoped_sandbox",
+		"runner.codex.task_scoped_sandbox_mode",
+		"runner.codex.exec_ignore_rules_supported",
+	} {
+		check, ok := byName[name]
+		if !ok {
+			t.Fatalf("doctor output missing %q: %+v", name, payload.Runners)
+		}
+		if !check.OK {
+			t.Fatalf("doctor check %q failed: %+v", name, check)
+		}
+	}
+}
+
+func captureStdout(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+		_ = r.Close()
+	}()
+	err = fn()
+	if closeErr := w.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	out, readErr := io.ReadAll(r)
+	if readErr != nil && err == nil {
+		err = readErr
+	}
+	return string(out), err
+}
+
+func TestCodexHelpHelper(t *testing.T) {
+	if os.Getenv("CMESH_TEST_CODEX_HELPER") != "1" {
+		return
+	}
+	args := os.Args
+	for i, arg := range args {
+		if arg == "--" {
+			args = args[i+1:]
+			break
+		}
+	}
+	if !testContains(args, "exec") || !testContains(args, "--ignore-rules") || !testContains(args, "--help") {
+		os.Exit(2)
+	}
+	fmt.Fprintln(os.Stdout, "Run Codex non-interactively\n\nOptions:\n      --ignore-rules")
+	os.Exit(0)
 }
 
 func TestProfileConfigureCommandAddsRepoDev(t *testing.T) {
@@ -101,6 +277,19 @@ port = 7778
 	}
 }
 
+func TestDiscoveredPeerLineShowsOnlineCmeshProbeFailure(t *testing.T) {
+	got := discoveredPeerLine(onboard.PeerCandidate{
+		Name:    "win11-desktop",
+		Address: "100.107.159.54",
+		Online:  true,
+		Detail:  `Get "http://100.107.159.54:7778/v1/hello": context deadline exceeded`,
+	})
+	want := `  - win11-desktop  100.107.159.54  online  no cmesh (Get "http://100.107.159.54:7778/v1/hello": context deadline exceeded)`
+	if got != want {
+		t.Fatalf("discoveredPeerLine() = %q, want %q", got, want)
+	}
+}
+
 func testContains(values []string, needle string) bool {
 	for _, value := range values {
 		if value == needle {
@@ -141,7 +330,7 @@ func TestClaudeProfileForDenyWriteDisallowsWriteAndShellTools(t *testing.T) {
 	}
 }
 
-func TestClaudeProfileForRepoDevScopesEditsToCwdAndAllowsShell(t *testing.T) {
+func TestClaudeProfileForRepoDevScopesEditsToCwdAndAllowsShellForWindowsCommand(t *testing.T) {
 	cfg := &config.Config{
 		Profiles: map[string]config.ProfileConfig{
 			profiledefs.RepoDev: {
@@ -155,7 +344,7 @@ func TestClaudeProfileForRepoDevScopesEditsToCwdAndAllowsShell(t *testing.T) {
 			},
 		},
 		Runners: map[string]config.RunnerConfig{
-			claudecode.Name: {Command: []string{"claude"}, DefaultProfile: profiledefs.RepoDev},
+			claudecode.Name: {Command: []string{`C:\Users\scott\AppData\Roaming\npm\claude.cmd`, "-p"}, DefaultProfile: profiledefs.RepoDev},
 		},
 	}
 	reg, err := buildRunners(cfg)
@@ -195,14 +384,15 @@ func TestFailedCheckSummaryIncludesCheckDetails(t *testing.T) {
 	}
 }
 
-func TestCodexSandboxForProfileUsesWorkspaceWriteEverywhere(t *testing.T) {
-	// A write-permitting profile must get the cwd-scoped workspace-write sandbox
-	// on every OS, including Windows — never danger-full-access.
-	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "workspace-write" {
-		t.Fatalf("windows codex sandbox = %q, want workspace-write", got)
+func TestCodexSandboxForProfileUsesWindowsDangerOnlyForWriteProfiles(t *testing.T) {
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "danger-full-access" {
+		t.Fatalf("windows codex sandbox = %q, want danger-full-access", got)
 	}
 	if got := codexSandboxForProfile(config.ProfileConfig{}, "linux"); got != "workspace-write" {
 		t.Fatalf("linux codex sandbox = %q, want workspace-write", got)
+	}
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "darwin"); got != "workspace-write" {
+		t.Fatalf("darwin codex sandbox = %q, want workspace-write", got)
 	}
 }
 

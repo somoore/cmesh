@@ -25,7 +25,33 @@ import (
 	"cmesh/internal/store"
 	"cmesh/internal/task"
 	"cmesh/internal/testutil"
+	"cmesh/internal/version"
 )
+
+func TestHelloIncludesCmeshBuildIdentity(t *testing.T) {
+	oldVersion, oldCommit, oldDate := version.Version, version.Commit, version.Date
+	version.Version = "test-version"
+	version.Commit = "test-commit"
+	version.Date = "2026-06-16T00:00:00Z"
+	t.Cleanup(func() {
+		version.Version, version.Commit, version.Date = oldVersion, oldCommit, oldDate
+	})
+
+	server := newTestServer(t, t.TempDir(), &blockingRunner{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/hello", nil)
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("hello status = %d, body = %s", res.Code, res.Body.String())
+	}
+	var hello schema.HelloResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &hello); err != nil {
+		t.Fatalf("unmarshal hello: %v", err)
+	}
+	if hello.CmeshVersion != "test-version" || hello.CmeshCommit != "test-commit" || hello.CmeshDate != "2026-06-16T00:00:00Z" {
+		t.Fatalf("hello build identity = version %q commit %q date %q", hello.CmeshVersion, hello.CmeshCommit, hello.CmeshDate)
+	}
+}
 
 func TestCancelSignalsRunningTask(t *testing.T) {
 	root := t.TempDir()
