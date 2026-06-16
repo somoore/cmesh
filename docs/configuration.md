@@ -206,6 +206,15 @@ Example Windows runner command:
 command = ["C:\\Users\\scott\\AppData\\Roaming\\npm\\claude.cmd", "-p"]
 ```
 
+Codex write-capable profiles default to `workspace-write`. On Windows, Codex may report `workspace-write` while still starting read-only; use `allow_danger_full_access = true` only when the worker is already isolated by the OS account and cmesh profile leases:
+
+```toml
+[runners.codex]
+command = ["C:\\Users\\scott\\.local\\bin\\codex.cmd"]
+default_profile = "repo-dev"
+allow_danger_full_access = true
+```
+
 Supported runner adapters:
 
 - `claude-code`

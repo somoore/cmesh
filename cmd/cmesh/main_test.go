@@ -41,13 +41,17 @@ func TestActiveRunnerNamesUsesProfileReferencesOnly(t *testing.T) {
 }
 
 func TestCodexSandboxForProfileKeepsDenyWriteReadOnlyOnWindows(t *testing.T) {
-	got := codexSandboxForProfile(config.ProfileConfig{Writes: "deny"}, "windows")
+	got := codexSandboxForProfile(config.ProfileConfig{Writes: "deny"}, "windows", true)
 	if got != "read-only" {
 		t.Fatalf("deny-write Windows Codex profile sandbox = %q, want read-only", got)
 	}
-	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows")
+	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows", true)
 	if got != "danger-full-access" {
-		t.Fatalf("repo-write Windows Codex profile sandbox = %q, want danger-full-access", got)
+		t.Fatalf("repo-write Windows Codex profile sandbox with opt-in = %q, want danger-full-access", got)
+	}
+	got = codexSandboxForProfile(config.ProfileConfig{Writes: "repo_only"}, "windows", false)
+	if got != "workspace-write" {
+		t.Fatalf("repo-write Windows Codex profile sandbox without opt-in = %q, want workspace-write", got)
 	}
 }
 
@@ -83,6 +87,54 @@ func TestCodexTaskScopedDoctorChecksRequireIgnoreRulesAfterExec(t *testing.T) {
 		}
 		if !check.OK {
 			t.Fatalf("%s failed: %+v", name, check)
+		}
+	}
+}
+
+func TestDoctorRunnerChecksAllowPathCommandOutsideServiceMode(t *testing.T) {
+	root := t.TempDir()
+	helper := filepath.Join(root, "codex-helper")
+	body := "#!/bin/sh\nprintf 'Options:\\n      --ignore-rules\\n'\n"
+	if err := os.WriteFile(helper, []byte(body), 0o700); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	cfg := &config.Config{
+		Profiles: map[string]config.ProfileConfig{
+			profiledefs.RepoDev: {
+				Runner: "codex",
+				Writes: profiledefs.WritesRepoOnly,
+			},
+		},
+		Runners: map[string]config.RunnerConfig{
+			"codex": {
+				Command:        []string{"codex-helper"},
+				DefaultProfile: profiledefs.RepoDev,
+			},
+		},
+	}
+
+	checks := doctorRunnerChecks(context.Background(), cfg, "codex", false, time.Second, false)
+	byName := map[string]doctor.Check{}
+	for _, check := range checks {
+		byName[check.Name] = check
+	}
+	pathCheck, ok := byName["runner executable absolute"]
+	if !ok {
+		t.Fatalf("missing runner executable absolute check: %+v", checks)
+	}
+	if !pathCheck.OK {
+		t.Fatalf("top-level doctor path command should not fail absolute check: %+v", pathCheck)
+	}
+	if !strings.Contains(pathCheck.Detail, "resolved via PATH") {
+		t.Fatalf("absolute check detail = %q, want PATH resolution", pathCheck.Detail)
+	}
+
+	serviceChecks := doctorRunnerChecks(context.Background(), cfg, "codex", false, time.Second, true)
+	for _, check := range serviceChecks {
+		if check.Name == "runner executable absolute" && check.OK {
+			t.Fatalf("service-mode path command unexpectedly passed absolute check: %+v", check)
 		}
 	}
 }
@@ -385,13 +437,16 @@ func TestFailedCheckSummaryIncludesCheckDetails(t *testing.T) {
 }
 
 func TestCodexSandboxForProfileUsesWindowsDangerOnlyForWriteProfiles(t *testing.T) {
-	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows"); got != "danger-full-access" {
-		t.Fatalf("windows codex sandbox = %q, want danger-full-access", got)
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows", false); got != "workspace-write" {
+		t.Fatalf("windows codex sandbox without opt-in = %q, want workspace-write", got)
 	}
-	if got := codexSandboxForProfile(config.ProfileConfig{}, "linux"); got != "workspace-write" {
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "windows", true); got != "danger-full-access" {
+		t.Fatalf("windows codex sandbox with opt-in = %q, want danger-full-access", got)
+	}
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "linux", false); got != "workspace-write" {
 		t.Fatalf("linux codex sandbox = %q, want workspace-write", got)
 	}
-	if got := codexSandboxForProfile(config.ProfileConfig{}, "darwin"); got != "workspace-write" {
+	if got := codexSandboxForProfile(config.ProfileConfig{}, "darwin", false); got != "workspace-write" {
 		t.Fatalf("darwin codex sandbox = %q, want workspace-write", got)
 	}
 }

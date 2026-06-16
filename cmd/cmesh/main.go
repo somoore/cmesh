@@ -409,19 +409,19 @@ func cmdDoctor(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	status := onboard.Detect(ctx, *configPath, false)
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	status := onboard.Detect(statusCtx, *configPath, false)
+	statusCancel()
 	cfg, cfgErr := config.Load(*configPath)
 	var runnerChecks []doctor.Check
 	if cfgErr == nil {
 		if _, err := buildRunners(cfg); err != nil {
 			runnerChecks = append(runnerChecks, doctor.Check{Name: "runners", OK: false, Err: err.Error()})
 		} else {
-			runnerCtx, runnerCancel := context.WithTimeout(context.Background(), time.Duration(*runnerTimeoutSeconds+5)*time.Second)
-			defer runnerCancel()
 			for _, runnerName := range activeRunnerNames(cfg) {
-				runnerChecks = append(runnerChecks, doctorRunnerChecks(runnerCtx, cfg, runnerName, !*skipRunnerSmoke, time.Duration(*runnerTimeoutSeconds)*time.Second)...)
+				runnerCtx, runnerCancel := context.WithTimeout(context.Background(), time.Duration(*runnerTimeoutSeconds+5)*time.Second)
+				runnerChecks = append(runnerChecks, doctorRunnerChecks(runnerCtx, cfg, runnerName, !*skipRunnerSmoke, time.Duration(*runnerTimeoutSeconds)*time.Second, false)...)
+				runnerCancel()
 			}
 		}
 	}
@@ -429,7 +429,9 @@ func cmdDoctor(args []string) error {
 	if cfg != nil {
 		meshPort = cfg.Node.MeshPort
 	}
-	tailscaleReport := doctor.Tailscale(ctx, doctor.TailscaleOptions{MeshPort: meshPort, AcceptExistingMeshService: true})
+	tailscaleCtx, tailscaleCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	tailscaleReport := doctor.Tailscale(tailscaleCtx, doctor.TailscaleOptions{MeshPort: meshPort, AcceptExistingMeshService: true})
+	tailscaleCancel()
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
 			"status":    status,
@@ -488,7 +490,7 @@ func cmdDoctorRunner(args []string) error {
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutSeconds+5)*time.Second)
 		defer cancel()
-		checks = append(checks, doctorRunnerChecks(ctx, cfg, fs.Arg(0), !*skipSmoke, time.Duration(*timeoutSeconds)*time.Second)...)
+		checks = append(checks, doctorRunnerChecks(ctx, cfg, fs.Arg(0), !*skipSmoke, time.Duration(*timeoutSeconds)*time.Second, true)...)
 	}
 	if *jsonOut {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{"checks": checks})
@@ -681,7 +683,7 @@ func failedCheckSummary(checks []doctor.Check) string {
 	return strings.Join(failed, "; ")
 }
 
-func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration) []doctor.Check {
+func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName string, runSmoke bool, timeout time.Duration, requireAbsoluteRunner bool) []doctor.Check {
 	var checks []doctor.Check
 	rcfg, ok := cfg.Runners[runnerName]
 	checks = append(checks, doctor.Check{Name: "runner configured", OK: ok, Detail: runnerName})
@@ -719,12 +721,17 @@ func doctorRunnerChecks(ctx context.Context, cfg *config.Config, runnerName stri
 	} else {
 		checks = append(checks, doctor.Check{Name: "runner executable exists", OK: true, Detail: resolved})
 	}
-	checks = append(checks, doctor.Check{
+	absoluteCheck := doctor.Check{
 		Name:   "runner executable absolute",
 		OK:     filepath.IsAbs(exe),
 		Detail: exe,
-	})
-	if !filepath.IsAbs(exe) {
+	}
+	if !filepath.IsAbs(exe) && !requireAbsoluteRunner {
+		absoluteCheck.OK = true
+		absoluteCheck.Detail = "resolved via PATH: " + firstNonEmpty(resolved, exe)
+	}
+	checks = append(checks, absoluteCheck)
+	if !filepath.IsAbs(exe) && requireAbsoluteRunner {
 		checks[len(checks)-1].Err = "configure an absolute runner path for service use"
 		checks[len(checks)-1].Detail = firstNonEmpty(resolved, exe)
 	}
@@ -771,7 +778,7 @@ func codexTaskScopedDoctorChecks(ctx context.Context, cfg *config.Config, rcfg c
 		if pcfg.Network {
 			network = "enabled_by_profile"
 		}
-		profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS), Approval: "never", Network: network}
+		profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS, rcfg.AllowDangerFullAccess), Approval: "never", Network: network}
 		profileNames = append(profileNames, pname)
 	}
 	if len(profiles) == 0 {
@@ -996,7 +1003,7 @@ func codexDefaultProfileSandbox(cfg *config.Config, rcfg config.RunnerConfig) st
 	if !ok {
 		return ""
 	}
-	return codexSandboxForProfile(profile, runtime.GOOS)
+	return codexSandboxForProfile(profile, runtime.GOOS, rcfg.AllowDangerFullAccess)
 }
 
 func codexRuntimeSandboxCheck(expected string, result runner.Result) doctor.Check {
@@ -2764,7 +2771,7 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				if pcfg.Network {
 					network = "enabled_by_profile"
 				}
-				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS), Approval: "never", Network: network}
+				profiles[pname] = codex.ProfileConfig{Claims: pcfg.Claims, Sandbox: codexSandboxForProfile(pcfg, runtime.GOOS, rcfg.AllowDangerFullAccess), Approval: "never", Network: network}
 			}
 			run := codex.New(codex.Config{Command: rcfg.Command, DefaultProfile: rcfg.DefaultProfile, Profiles: profiles})
 			wrapped, err := applyManifestPath(run, rcfg.ManifestPath)
@@ -2829,15 +2836,15 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 	return reg, nil
 }
 
-func codexSandboxForProfile(profile config.ProfileConfig, goos string) string {
-	if profile.Writes == "deny" {
+func codexSandboxForProfile(profile config.ProfileConfig, goos string, allowDangerFullAccess bool) string {
+	if profile.Writes == profiledefs.WritesDeny {
 		return "read-only"
 	}
-	if goos == "windows" {
+	if goos == "windows" && allowDangerFullAccess {
 		// Codex CLI v0.139.0 on Windows accepts workspace-write flags but still
 		// starts read-only, which blocks repo-dev shell commands before they run.
-		// Use the only observed non-read-only mode explicitly for write-capable
-		// Windows profiles; the profile remains lease-gated and high-risk.
+		// Use the only observed non-read-only mode only after an explicit
+		// operator opt-in; the profile remains lease-gated and high-risk.
 		return "danger-full-access"
 	}
 	return "workspace-write"
