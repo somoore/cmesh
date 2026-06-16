@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -208,6 +209,10 @@ func startService(ctx context.Context, args json.RawMessage) ToolResponse {
 		mcpPort = config.DefaultMCPPort
 	}
 	opts := service.Options{ConfigPath: config.DefaultPath(), ExePath: exe}
+	if runtime.GOOS == "windows" {
+		opts.Windows.UserTask = true
+		opts.Windows.Firewall = true
+	}
 
 	var installErr, startErr error
 	withSuppressedStdout(func() {

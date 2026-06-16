@@ -153,7 +153,16 @@ The ordering matters: the new machine has to configure itself and come up on the
 
 ### A note on Windows workers
 
-If the machine receiving delegated work is Windows, the cmesh service should run under the **same account** that has Tailscale and runner auth, so Claude Code or Codex reuse that user's credentials. A service installed without an explicit user runs as **LocalSystem** and will not inherit the interactive user's runner auth or PATH. Keep runner commands **absolute** in config, for example:
+If the machine receiving delegated work is Windows, the daemon should run under the **same account** that has Tailscale and runner auth, so Claude Code or Codex reuse that user's credentials. The onboarding wizard uses a current-user Scheduled Task for this path: it survives SSH logout, preserves the interactive user's auth, and does not run as LocalSystem. If you are operating manually, use:
+
+```powershell
+cmesh up service install --user-task
+cmesh up service start
+```
+
+The installer also attempts to add a narrow inbound Windows firewall rule for the mesh RPC port (`7778`). If Windows denies that rule, add it from an elevated PowerShell and then restart the daemon.
+
+A traditional Windows service installed without an explicit user runs as **LocalSystem** and will not inherit the interactive user's runner auth or PATH. Keep runner commands **absolute** in config, for example:
 
 ```toml
 [runners.claude-code]
