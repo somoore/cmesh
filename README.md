@@ -70,6 +70,8 @@ From there the cmesh MCP wizard drives everything — detecting Tailscale and pe
 | [Delegation guidance](docs/delegation-guidance.md) | Writing good tasks and reading results |
 | [Runner manifests](docs/runner-manifests.md) | How runners declare capabilities |
 | [Tailscale grants](docs/tailscale-grants.md) | Restricting mesh reachability |
+| [Roadmap](ROADMAP.md) | Planned hardening and intentional non-goals |
+| [Contributing](CONTRIBUTING.md) | Local checks and contribution expectations |
 | [Release](docs/release.md) | Release process |
 | [Development](docs/development.md) | Building and contributing |
 
@@ -90,3 +92,7 @@ cmesh uninstall
 ```
 
 It mirrors the installer — removing the MCP is the core action; anything else is separately consented. Details in [docs/quickstart.md](docs/quickstart.md).
+
+## License
+
+cmesh is licensed under the [Apache License 2.0](LICENSE).

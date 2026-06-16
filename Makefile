@@ -8,11 +8,11 @@ COSIGN_VERSION ?= v2.6.3
 SYFT_VERSION ?= v1.45.1
 LDFLAGS := -s -w -X cmesh/internal/version.Version=$(VERSION) -X cmesh/internal/version.Commit=$(COMMIT) -X cmesh/internal/version.Date=$(DATE)
 
-.PHONY: test precommit unit fmt fmt-check mod-check supply-chain dup vuln build sbom release-notes sign deploy clean install-hooks
+.PHONY: test precommit unit fmt fmt-check mod-check supply-chain dup vuln workflow-lint build-local build sbom release-notes sign deploy clean install-hooks
 
-test: fmt-check mod-check supply-chain dup vuln unit
+test: fmt-check mod-check supply-chain workflow-lint dup vuln unit build-local
 
-precommit: fmt-check mod-check supply-chain dup unit
+precommit: fmt-check mod-check supply-chain workflow-lint dup unit
 
 unit:
 	$(GO) test ./...
@@ -34,6 +34,12 @@ dup:
 
 vuln:
 	@scripts/check-vuln.sh
+
+workflow-lint:
+	@scripts/check-workflows.sh
+
+build-local:
+	$(GO) build -trimpath -o /tmp/$(APP) ./cmd/cmesh
 
 build:
 	@scripts/build-release.sh "$(APP)" "$(VERSION)" "$(COMMIT)" "$(DATE)" "$(DIST_DIR)"

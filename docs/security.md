@@ -198,6 +198,14 @@ When a workflow can use scoped credentials, prefer them over inherited auth: bar
 - Put risky profiles on disposable or snapshot-protected machines.
 - Review git branches produced by workers before merging.
 
+### Dedicated worker account
+
+For always-on workers, prefer a dedicated service account over a daily-driver login. The account should have only the repositories, toolchains, runner credentials, and Tailscale LocalAPI access required by the profiles it exposes.
+
+On Linux, pair that account with a systemd unit that sets a narrow `WorkingDirectory`, a minimal environment, and filesystem protections appropriate for the runner. On macOS, run the daemon from a separate user or launchd domain when runner authentication and LocalAPI access allow it. On Windows, use the service install path for the least-privilege account that can still access the intended Claude Code or Codex login state.
+
+Do not put unrelated API keys or broadly reusable credentials in the daemon environment. A worker profile is only as narrow as the OS account and runner credentials behind it.
+
 ## Known gaps
 
 These are areas that still need hardening before cmesh should be treated as mature security infrastructure:

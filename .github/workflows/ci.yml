@@ -2,8 +2,6 @@ name: ci
 
 on:
   push:
-    branches:
-      - main
   pull_request:
 
 permissions:
@@ -118,6 +116,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Lint workflows
+        if: steps.changes.outputs.markdown_only != 'true'
+        run: make workflow-lint
 
       - name: Test
         if: steps.changes.outputs.markdown_only != 'true'
