@@ -6,7 +6,7 @@ cmesh is experimental software for trusted private networks. This roadmap sets e
 
 - Keep the default setup narrow: `query` first, explicit peers, explicit cwd allowlists, and no public listener.
 - Preserve the least-authority profile ladder: deterministic probes before read-only agents, repo edit profiles, desktop control, or system change profiles.
-- Keep high-risk profiles explicit and lease-gated.
+- Keep built-in high-risk profiles explicit and lease-gated; require custom high-risk profiles to opt into the same `require_lease` guard.
 - Keep CI focused on reproducible Go tests, workflow linting, vulnerability scanning, supply-chain checks, and CodeQL.
 
 ## Next
