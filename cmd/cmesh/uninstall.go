@@ -117,13 +117,28 @@ func maybeRemoveService(report *cleanupReport) {
 	// and kill a foreground `cmesh up` started by hand: matching processes by
 	// name risks killing an unrelated PID, which an uninstaller must never do.
 	// A hand-started daemon is the user's own process to stop.
-	if err := svcpkg.Remove(); err != nil {
+	if err := removeServiceForUninstall(); err != nil {
 		printCheck("service remove", false, err.Error())
 		report.left = append(report.left, "OS service ("+err.Error()+")")
 		return
 	}
 	printCheck("service", true, "stopped and removed")
 	report.removed = append(report.removed, "OS service")
+}
+
+func removeServiceForUninstall() error {
+	err := svcpkg.Remove()
+	if err == nil {
+		return nil
+	}
+	if runtime.GOOS != "windows" || !svcpkg.IsWindowsElevationRequired(err) {
+		return err
+	}
+	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		return err
+	}
+	fmt.Println("Windows will ask for permission to remove the cmesh service.")
+	return runElevated("_remove-service")
 }
 
 func maybeRemoveConfig(configPath string, report *cleanupReport) {
@@ -204,9 +219,8 @@ func maybeRemoveBinary(report *cleanupReport) {
 	}
 
 	// Only offer removal if the binary lives in a known self-install dir; we
-	// never delete a binary cmesh did not place. Deleting the running binary is
-	// also unreliable on Windows, so always print a manual hint there.
-	if runtime.GOOS == "windows" || !selfInstalledBinary(exe) {
+	// never delete a binary cmesh did not place.
+	if !selfInstalledBinary(exe) {
 		fmt.Println()
 		fmt.Printf("The cmesh binary (%s) was not installed via self-install; remove it manually if desired.\n", exe)
 		report.left = append(report.left, "binary "+exe+" (remove manually)")
@@ -214,17 +228,18 @@ func maybeRemoveBinary(report *cleanupReport) {
 	}
 
 	fmt.Println()
-	ok, err := confirmYesNo(fmt.Sprintf("Remove the cmesh binary (%s)?", exe), false)
+	ok, err := confirmYesNo(fmt.Sprintf("Remove the cmesh binary (%s)?", exe), true)
 	if err != nil || !ok {
 		report.left = append(report.left, "binary "+exe)
 		return
 	}
-	if err := os.Remove(exe); err != nil && !errors.Is(err, os.ErrNotExist) {
+	detail, err := removeCurrentExecutable(exe)
+	if err != nil {
 		printCheck("binary remove", false, err.Error())
 		report.left = append(report.left, "binary ("+err.Error()+")")
 		return
 	}
-	printCheck("binary", true, "removed "+exe)
+	printCheck("binary", true, detail)
 	report.removed = append(report.removed, "binary "+exe)
 }
 

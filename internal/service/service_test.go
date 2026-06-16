@@ -135,6 +135,37 @@ func TestWindowsAccessDeniedError(t *testing.T) {
 	}
 }
 
+func TestWindowsServiceNotRunningError(t *testing.T) {
+	err := errors.New("sc.exe stop cmesh: [SC] ControlService FAILED 1062:\n\nThe service has not been started.: exit status 1062")
+	if !isWindowsServiceNotRunningError(err) {
+		t.Fatal("expected service-not-running detection")
+	}
+	if isWindowsServiceNotRunningError(errors.New("exit status 5")) {
+		t.Fatal("access denied must not be treated as service-not-running")
+	}
+	if isWindowsServiceNotRunningError(nil) {
+		t.Fatal("nil error must not be treated as service-not-running")
+	}
+}
+
+func TestWindowsServiceAdminRequiredErrorIsFriendly(t *testing.T) {
+	err := windowsServiceAdminRequiredError("removing")
+	if !IsWindowsElevationRequired(err) {
+		t.Fatalf("admin-required error must wrap ErrWindowsElevationRequired: %v", err)
+	}
+	text := err.Error()
+	for _, want := range []string{"removing the Windows service requires Administrator approval", "elevated PowerShell"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("admin-required error %q missing %q", text, want)
+		}
+	}
+	for _, raw := range []string{"OpenService FAILED", "Access is denied", "exit status"} {
+		if strings.Contains(text, raw) {
+			t.Fatalf("admin-required error leaked raw SCM text %q: %q", raw, text)
+		}
+	}
+}
+
 func TestParseWindowsServiceStartName(t *testing.T) {
 	out := `
 SERVICE_NAME: cmesh

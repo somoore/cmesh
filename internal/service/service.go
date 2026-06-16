@@ -46,6 +46,16 @@ type WindowsOptions struct {
 	PromptPassword bool
 }
 
+// ErrWindowsElevationRequired marks Windows service operations that need
+// Administrator approval.
+var ErrWindowsElevationRequired = errors.New("windows service operation requires elevation")
+
+// IsWindowsElevationRequired reports whether err means Windows blocked a
+// service operation because the process is not elevated.
+func IsWindowsElevationRequired(err error) bool {
+	return errors.Is(err, ErrWindowsElevationRequired)
+}
+
 // Install writes the platform service definition and registers it.
 func Install(opts Options) error {
 	configPath := firstNonEmpty(opts.ConfigPath, config.DefaultPath())
@@ -221,13 +231,38 @@ func Remove() error {
 		}
 		return nil
 	case "windows":
-		if !windowsServiceExists() {
+		exists, err := windowsServiceExistsStatus()
+		if err != nil {
+			if isWindowsAccessDeniedError(err) {
+				return windowsServiceAdminRequiredError("removing")
+			}
+			return err
+		}
+		if !exists {
 			return nil
 		}
-		_ = runServiceCommand("sc.exe", "stop", "cmesh")
-		if err := runServiceCommand("sc.exe", "delete", "cmesh"); err != nil {
+		elevated, err := currentProcessElevated()
+		if err != nil {
+			return fmt.Errorf("checking Windows elevation before service removal: %w", err)
+		}
+		if !elevated {
+			return windowsServiceAdminRequiredError("removing")
+		}
+		if err := runServiceCommandCapture("sc.exe", "stop", "cmesh"); err != nil {
+			if isWindowsAccessDeniedError(err) {
+				return windowsServiceAdminRequiredError("removing")
+			}
+			// The service may already be stopped; removal can still proceed.
+			if !isWindowsServiceNotRunningError(err) && !isWindowsServiceNotInstalledError(err) {
+				return err
+			}
+		}
+		if err := runServiceCommandCapture("sc.exe", "delete", "cmesh"); err != nil {
 			if isWindowsServiceNotInstalledError(err) {
 				return nil
+			}
+			if isWindowsAccessDeniedError(err) {
+				return windowsServiceAdminRequiredError("removing")
 			}
 			return err
 		}
@@ -321,6 +356,14 @@ func isWindowsServiceNotInstalledError(err error) bool {
 	return strings.Contains(text, "FAILED 1060") || strings.Contains(text, "does not exist as an installed service")
 }
 
+func isWindowsServiceNotRunningError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "FAILED 1062") || strings.Contains(strings.ToLower(text), "service has not been started")
+}
+
 // isWindowsAccessDeniedError reports whether err is sc.exe failing with access
 // denied (Windows error 5) — the symptom of running service install without
 // Administrator rights. sc.exe writes "Access is denied." to stdout/stderr,
@@ -339,6 +382,10 @@ func isWindowsAccessDeniedError(err error) bool {
 	return strings.Contains(text, "access is denied") || strings.Contains(text, "exit status 5")
 }
 
+func windowsServiceAdminRequiredError(action string) error {
+	return fmt.Errorf("%s the Windows service requires Administrator approval. Accept the Windows UAC prompt, or run this command from an elevated PowerShell. If you decline, the user-level MCP/config/data cleanup can still be removed separately: %w", action, ErrWindowsElevationRequired)
+}
+
 func parseWindowsServiceStartName(out string) (string, error) {
 	for _, line := range strings.Split(out, "\n") {
 		if before, after, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(before) == "SERVICE_START_NAME" {
@@ -353,7 +400,19 @@ func parseWindowsServiceStartName(out string) (string, error) {
 }
 
 func windowsServiceExists() bool {
-	return exec.Command("sc.exe", "query", "cmesh").Run() == nil
+	exists, _ := windowsServiceExistsStatus()
+	return exists
+}
+
+func windowsServiceExistsStatus() (bool, error) {
+	err := runServiceCommandCapture("sc.exe", "query", "cmesh")
+	if err == nil {
+		return true, nil
+	}
+	if isWindowsServiceNotInstalledError(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func launchdDomain() string {
@@ -369,6 +428,19 @@ func runServiceCommand(name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func runServiceCommandCapture(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	text := strings.TrimSpace(string(out))
+	if text == "" {
+		return err
+	}
+	return fmt.Errorf("%s %s: %s: %w", name, strings.Join(args, " "), text, err)
 }
 
 func xmlPlistString(value string) string {

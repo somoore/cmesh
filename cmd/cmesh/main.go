@@ -80,6 +80,8 @@ func run(args []string) error {
 		return cmdVersion(args[1:])
 	case "_service":
 		return cmdServiceRun(args[1:])
+	case "_remove-service":
+		return svcpkg.Remove()
 
 	// Headless config generation, retained for CI/scripted setup. The
 	// interactive path is now the agent picker (`cmesh install`) plus the
