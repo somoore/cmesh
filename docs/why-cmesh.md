@@ -8,6 +8,21 @@ The bet behind cmesh is narrower: coding agents are becoming operators of real d
 
 SSH lets a human reach those machines. cmesh lets an agent delegate bounded work to them.
 
+If you want the conceptual model, read [concepts.md](concepts.md). If you want the concrete request lifecycle and trust boundaries, read [architecture.md](architecture.md). If you want the threat model and hardening guidance, read [security.md](security.md). If you want to try it, start with [quickstart.md](quickstart.md).
+
+## Who this is for
+
+cmesh is for people and small trusted groups who already have more than one useful machine and want their agents to use those machines without turning every handoff into a new terminal session.
+
+That includes:
+
+- developers with mixed Mac, Linux, and Windows setups;
+- independent researchers and power users with local labs, snapshot VMs, or hardware-specific machines;
+- small teams building internal agent workflows across trusted private infrastructure;
+- anyone tired of copy-pasting prompts, rebuilding context, and trusting a remote agent's summary without captured evidence.
+
+It is not aimed at anonymous fleets, untrusted workers, or broad enterprise remote management. The intended scope is a private mesh of machines you control and are willing to configure deliberately.
+
 ## The SSH plus tmux model
 
 The practical alternative to cmesh is straightforward:
@@ -86,6 +101,8 @@ This is not a claim that cmesh is always better. It is a claim that it is solvin
 
 cmesh is aiming to become a small control plane for trusted personal and small-team agent meshes.
 
+In this document, "control plane" does not mean a fleet-wide management product. It means the narrow coordination layer that names peers, checks policy, records task state, and gives agents a consistent way to hand off work inside a private mesh.
+
 The target shape:
 
 - You keep using the agent session you are already in.
@@ -98,6 +115,20 @@ The target shape:
 - The remote worker summary is treated as an untrusted claim, backed by captured output and artifacts.
 
 The point is not "run commands remotely". The point is "make remote agent work reviewable, bounded, and recoverable".
+
+## A concrete example
+
+Suppose your current agent is working on a Mac, but a failure only reproduces on a Linux build server.
+
+With SSH plus tmux, you would usually SSH to the server, start or attach a session, re-paste the problem, wait for the remote agent or command to finish, copy back the interesting output, and then decide whether you trust the summary.
+
+With cmesh, the local agent can create a task like:
+
+```text
+Ask the Linux build server to run the failing integration test in this repo, use the repo-dev profile, put any fix on a branch, and return the structured result plus diffstat and test output.
+```
+
+The Linux worker evaluates whether that peer, directory, and profile are allowed before running anything. The result is not just prose. It is a task record with state, captured output, artifacts, and a branch or diff you can review from the originating session.
 
 ## Where cmesh should be better than SSH
 
