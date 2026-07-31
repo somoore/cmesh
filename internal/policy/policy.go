@@ -7,25 +7,32 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"cmesh/internal/config"
 	profiledefs "cmesh/internal/profile"
 )
 
 type Decision struct {
-	Allowed          bool     `json:"allowed"`
-	Code             string   `json:"code,omitempty"`
-	Detail           string   `json:"detail,omitempty"`
-	RequestedProfile string   `json:"requested_profile,omitempty"`
-	EffectiveProfile string   `json:"effective_profile,omitempty"`
-	Claims           []string `json:"claims,omitempty"`
-	Capabilities     []string `json:"capabilities,omitempty"`
-	Intents          []string `json:"intents,omitempty"`
-	Writes           string   `json:"writes,omitempty"`
-	Shell            string   `json:"shell,omitempty"`
-	Network          bool     `json:"network"`
-	AuditLevel       string   `json:"audit_level,omitempty"`
-	NormalizedCWD    string   `json:"normalized_cwd,omitempty"`
+	Allowed          bool   `json:"allowed"`
+	Code             string `json:"code,omitempty"`
+	Detail           string `json:"detail,omitempty"`
+	RequestedProfile string `json:"requested_profile,omitempty"`
+	EffectiveProfile string `json:"effective_profile,omitempty"`
+	// EffectiveRunner is the runner belonging to the effective profile. Callers
+	// must prefer it over resolving a runner from the requested profile name: a
+	// profile ceiling can remap the effective profile, and deriving the runner
+	// from the requested name would run a different runner than the one whose
+	// profile policy actually authorized.
+	EffectiveRunner string   `json:"effective_runner,omitempty"`
+	Claims          []string `json:"claims,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	Intents         []string `json:"intents,omitempty"`
+	Writes          string   `json:"writes,omitempty"`
+	Shell           string   `json:"shell,omitempty"`
+	Network         bool     `json:"network"`
+	AuditLevel      string   `json:"audit_level,omitempty"`
+	NormalizedCWD   string   `json:"normalized_cwd,omitempty"`
 }
 
 type TaskIntent struct {
@@ -46,7 +53,13 @@ type TaskIntent struct {
 	ProfileContextID string
 }
 
+// Engine evaluates inbound and outbound policy. Its config may be swapped at
+// runtime via Reload so that a repair which rewrites peer trust takes effect on
+// every surface sharing the engine — the mesh RPC server enforces inbound peer
+// policy, so a reload that only reached the local gateway would report success
+// while the daemon kept rejecting the peer.
 type Engine struct {
+	mu             sync.RWMutex
 	cfg            *config.Config
 	leaseValidator LeaseValidator
 }
@@ -59,21 +72,44 @@ func NewWithLeaseValidator(cfg *config.Config, validator LeaseValidator) *Engine
 	return &Engine{cfg: cfg, leaseValidator: validator}
 }
 
+// Reload swaps the engine's config in place. Callers holding this *Engine —
+// including a mesh RPC server started before the reload — evaluate subsequent
+// requests against the new config.
+func (e *Engine) Reload(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg = cfg
+}
+
+// config returns the current config under a read lock.
+func (e *Engine) config() *config.Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cfg
+}
+
 func (e *Engine) CheckInbound(intent TaskIntent) Decision {
-	if !matchesAny(peerIdentityCandidates(intent), e.cfg.Policy.AllowedPeers) {
+	cfg := e.config()
+	if !matchesAny(peerIdentityCandidates(intent), cfg.Policy.AllowedPeers) {
 		return denied("peer_unauthorized", "origin peer is not allowed by inbound policy", intent.Profile, "")
 	}
-	if intent.HopCount > e.cfg.Policy.HopLimit {
-		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, e.cfg.Policy.HopLimit), intent.Profile, "")
+	if intent.HopCount > cfg.Policy.HopLimit {
+		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	if contains(intent.Chain, e.cfg.Node.ID) || contains(intent.Chain, e.cfg.Node.Name) {
+	// Case-insensitive to match validateDelegationChain's duplicate-hop check on
+	// the mesh RPC path; a differently-cased node name must not slip past one
+	// layer only to be caught by the other.
+	if containsFold(intent.Chain, cfg.Node.ID) || containsFold(intent.Chain, cfg.Node.Name) {
 		return denied("profile_denied", "delegation chain cycles back to this node", intent.Profile, "")
 	}
 	cwd, err := NormalizeCWD(intent.CWD)
 	if err != nil {
 		return denied("cwd_denied", err.Error(), intent.Profile, "")
 	}
-	if !pathAllowed(cwd, e.cfg.Policy.AllowedCWDs) {
+	if !pathAllowed(cwd, cfg.Policy.AllowedCWDs) {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
 	intent.CWD = cwd
@@ -81,7 +117,8 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 }
 
 func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
-	out := e.cfg.Policy.Outbound
+	cfg := e.config()
+	out := cfg.Policy.Outbound
 	if len(out.AllowedPeers) > 0 && !matchesAny(identityCandidates(intent), out.AllowedPeers) {
 		return denied("peer_unauthorized", "peer is not allowed by outbound policy", intent.Profile, "")
 	}
@@ -94,19 +131,20 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 	if intent.Subdelegation && !out.AllowSubdelegation {
 		return denied("profile_denied", "subdelegation is disabled by outbound policy", intent.Profile, "")
 	}
-	if intent.HopCount > e.cfg.Policy.HopLimit {
-		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, e.cfg.Policy.HopLimit), intent.Profile, "")
+	if intent.HopCount > cfg.Policy.HopLimit {
+		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
 	return e.checkProfile(intent, false)
 }
 
 func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
+	cfg := e.config()
 	requested := intent.Profile
 	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
 		if intent.Runner != "" {
-			for name, profile := range e.cfg.Profiles {
-				if profile.Runner == intent.Runner && e.cfg.Runners[profile.Runner].DefaultProfile == name {
+			for name, profile := range cfg.Profiles {
+				if profile.Runner == intent.Runner && cfg.Runners[profile.Runner].DefaultProfile == name {
 					requested = name
 					break
 				}
@@ -116,23 +154,39 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 			requested = "dev"
 		}
 	}
-	profile, ok := e.cfg.Profiles[requested]
+	profile, ok := cfg.Profiles[requested]
 	if !ok {
 		return denied("profile_unavailable", fmt.Sprintf("profile %q is not configured", requested), requested, "")
 	}
 	if intent.Runner != "" && profile.Runner != intent.Runner {
 		return denied("runner_unavailable", fmt.Sprintf("profile %q uses runner %q, not %q", requested, profile.Runner, intent.Runner), requested, "")
 	}
-	if _, ok := e.cfg.Runners[profile.Runner]; !ok {
+	if _, ok := cfg.Runners[profile.Runner]; !ok {
 		return denied("runner_unavailable", fmt.Sprintf("runner %q is not configured", profile.Runner), requested, "")
 	}
 	effective := requested
-	if ceiling, ok := e.cfg.Policy.ProfileCeilings[requested]; ok {
-		if _, ok := e.cfg.Profiles[ceiling]; !ok {
+	if ceiling, ok := cfg.Policy.ProfileCeilings[requested]; ok {
+		ceilingProfile, ok := cfg.Profiles[ceiling]
+		if !ok {
 			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is not configured", ceiling), requested, "")
 		}
+		// A ceiling may only cap authority, never raise it. config.Validate rejects
+		// an escalating mapping at load time; this is the request-time backstop for
+		// a config that changed underneath a running daemon or was built in-process.
+		if profiledefs.RiskRank(effectiveRisk(ceiling, ceilingProfile)) > profiledefs.RiskRank(effectiveRisk(requested, profile)) {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q", ceiling, requested), requested, "")
+		}
+		// The runner checks above ran against the requested profile. Re-run them for
+		// the ceiling so the profile that is actually enforced cannot name a runner
+		// the caller did not ask for or that this node does not configure.
+		if intent.Runner != "" && ceilingProfile.Runner != intent.Runner {
+			return denied("runner_unavailable", fmt.Sprintf("profile ceiling %q uses runner %q, not %q", ceiling, ceilingProfile.Runner, intent.Runner), requested, ceiling)
+		}
+		if _, ok := cfg.Runners[ceilingProfile.Runner]; !ok {
+			return denied("runner_unavailable", fmt.Sprintf("runner %q is not configured", ceilingProfile.Runner), requested, ceiling)
+		}
 		effective = ceiling
-		profile = e.cfg.Profiles[effective]
+		profile = ceilingProfile
 	}
 	// Profile-level allowed_peers is an authorization gate, so it must key on the
 	// authenticated peer identity only. Never include OriginNodeID here: on the
@@ -200,6 +254,7 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 		Allowed:          true,
 		RequestedProfile: requested,
 		EffectiveProfile: effective,
+		EffectiveRunner:  profile.Runner,
 		Claims:           append([]string(nil), capabilities...),
 		Capabilities:     append([]string(nil), capabilities...),
 		Intents:          append([]string(nil), profile.Intents...),
@@ -381,6 +436,15 @@ func identityCandidates(intent TaskIntent) []string {
 	return out
 }
 
+// effectiveRisk returns a profile's declared risk, falling back to the
+// capability-derived value when the config omits it.
+func effectiveRisk(name string, prof config.ProfileConfig) string {
+	if prof.Risk != "" {
+		return prof.Risk
+	}
+	return profiledefs.RiskForConfig(name, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
+}
+
 func matchesAny(values, patterns []string) bool {
 	for _, value := range values {
 		if contains(patterns, value) {
@@ -391,6 +455,20 @@ func matchesAny(values, patterns []string) bool {
 			if err == nil && ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// containsFold reports whether values contains needle, ignoring case. An empty
+// needle never matches, so an unset node id or name cannot report a cycle.
+func containsFold(values []string, needle string) bool {
+	if strings.TrimSpace(needle) == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
 		}
 	}
 	return false

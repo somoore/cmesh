@@ -671,13 +671,16 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	decision := s.Policy.CheckInbound(intent)
 	effectiveCWD := firstNonEmpty(decision.NormalizedCWD, req.CWD)
 	rec := task.Record{
-		ID:               req.TaskID,
-		OriginNodeID:     firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID, identity.NodeID),
-		OriginSessionID:  firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
-		WorkerNodeID:     s.Config.Node.ID,
-		State:            task.StateQueued,
-		CWD:              effectiveCWD,
-		Runner:           firstNonEmpty(req.Runner, runnerFromProfile(s.Config, req.Profile)),
+		ID:              req.TaskID,
+		OriginNodeID:    firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID, identity.NodeID),
+		OriginSessionID: firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
+		WorkerNodeID:    s.Config.Node.ID,
+		State:           task.StateQueued,
+		CWD:             effectiveCWD,
+		// Prefer the runner of the profile policy actually granted. A profile
+		// ceiling can remap the effective profile, so resolving from req.Profile
+		// would run a runner that belongs to a profile the worker did not enforce.
+		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(s.Config, req.Profile)),
 		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
@@ -1704,8 +1707,18 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 			return "", "", nil, "", false, err
 		}
 	}
-	diffstat, _ = repo.DiffStat(ctx, prep.Base, head)
-	files, _ = repo.ChangedFiles(ctx, prep.Base, head)
+	// Diffstat and changed files are the evidence a reviewer reads instead of
+	// trusting the worker's prose, and the changed-file list decides whether a
+	// bundle is produced at all. Swallowing an error here would report a code
+	// change as having produced no diff and no artifact, so surface it.
+	diffstat, err = repo.DiffStat(ctx, prep.Base, head)
+	if err != nil {
+		return "", "", nil, "", false, fmt.Errorf("collect diffstat: %w", err)
+	}
+	files, err = repo.ChangedFiles(ctx, prep.Base, head)
+	if err != nil {
+		return "", "", nil, "", false, fmt.Errorf("collect changed files: %w", err)
+	}
 	if len(files) > 0 {
 		artifactDir := filepath.Join(dataDir, "artifacts")
 		if err := os.MkdirAll(artifactDir, 0o755); err != nil {
@@ -1754,6 +1767,7 @@ func resultAsTask(result runner.Result) *task.ResultEnvelope {
 			StdoutRef: result.CommandOutput.StdoutRef,
 			StderrRef: result.CommandOutput.StderrRef,
 			DurationS: result.CommandOutput.DurationS,
+			Truncated: result.CommandOutput.Truncated,
 		},
 		WorkerSummaryUntrusted:  result.WorkerSummaryUntrusted,
 		Usage:                   task.Usage{Tokens: int64(result.Usage.Tokens), Cost: result.Usage.Cost, DurationS: result.Usage.DurationS},

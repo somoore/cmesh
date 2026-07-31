@@ -36,6 +36,10 @@ type CompletedProcess struct {
 	TranscriptRef string
 	StdoutPath    string
 	StderrPath    string
+	// Truncated reports that captured output hit the configured limit. It stays
+	// set even when the run also failed, so a caller that sees worker_failed can
+	// still tell the transcript is incomplete.
+	Truncated bool
 }
 
 func RunProgram(ctx context.Context, p Program) (CompletedProcess, error) {
@@ -139,11 +143,16 @@ func RunProgram(ctx context.Context, p Program) (CompletedProcess, error) {
 	}
 
 	result := processResult(p, started, stdout, stderr, combined, stdoutPath, stderrPath, exitCode(waitErr))
-	if stdout.truncated || stderr.truncated || combined.truncated {
-		return result, E(ErrResultTooLarge, "capture output", fmt.Errorf("output exceeded %d bytes", limit))
-	}
+	result.Truncated = stdout.truncated || stderr.truncated || combined.truncated
+	// A run that both overflowed the output limit and exited non-zero is a
+	// failure first: reporting result_too_large would mask worker_failed and
+	// send the caller looking for a too-large transcript instead of a failing
+	// command. Truncation stays visible on the result either way.
 	if waitErr != nil {
 		return result, E(ErrWorkerFailed, "run command", waitErr)
+	}
+	if result.Truncated {
+		return result, E(ErrResultTooLarge, "capture output", fmt.Errorf("output exceeded %d bytes", limit))
 	}
 	return result, nil
 }

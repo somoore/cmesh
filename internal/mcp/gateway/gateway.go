@@ -121,6 +121,7 @@ type ProfileValidateRequest struct {
 	Network               bool     `json:"network,omitempty"`
 	GitPush               bool     `json:"git_push,omitempty"`
 	RequireExplicit       bool     `json:"require_explicit,omitempty"`
+	RequireLease          bool     `json:"require_lease,omitempty"`
 	EnforcementConfidence string   `json:"enforcement_confidence,omitempty"`
 }
 
@@ -1013,7 +1014,18 @@ func profileValidateCall(req ProfileValidateRequest) (ToolResponse, error) {
 		name = "custom"
 	}
 	capabilities := profiledefs.NormalizeCapabilities(req.Capabilities, req.Claims)
-	if err := profiledefs.ValidateSemantics(name, strings.TrimSpace(req.Runner), capabilities, req.Writes, req.Shell, req.Network, req.GitPush, req.RequireExplicit, req.EnforcementConfidence); err != nil {
+	if err := profiledefs.ValidateSemantics(profiledefs.Semantics{
+		Name:                  name,
+		Runner:                strings.TrimSpace(req.Runner),
+		Capabilities:          capabilities,
+		Writes:                req.Writes,
+		Shell:                 req.Shell,
+		Network:               req.Network,
+		GitPush:               req.GitPush,
+		RequireExplicit:       req.RequireExplicit,
+		RequireLease:          req.RequireLease,
+		EnforcementConfidence: req.EnforcementConfidence,
+	}); err != nil {
 		return ToolResponse{OK: false, Error: &ToolError{Code: task.ErrorProfileDenied, Detail: err.Error()}}, nil
 	}
 	return ToolResponse{OK: true, Result: map[string]any{"status": "valid", "name": name, "capabilities": capabilities}}, nil
@@ -1357,9 +1369,23 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
-	sessionID := req.OriginSessionID
-	if sessionID == "" {
-		sessionID = firstNonEmpty(prov.OriginSessionID, "gateway-default")
+	// The origin session is the ownership key for task-token reads, so it must
+	// come from the token's stored context and never from the request body: a
+	// worker's runner could otherwise mint children under an arbitrary session
+	// and then read that session's tasks. currentProvenance already ignores
+	// body-supplied provenance when a token is present; this applies the same
+	// rule to the session. Host-token callers have no provenance and keep using
+	// the request value.
+	sessionID := strings.TrimSpace(prov.OriginSessionID)
+	if _, scoped := taskTokenSession(ctx); scoped {
+		// A token whose stored context carries no session cannot be scoped, and
+		// must not fall through to the shared default session — that would put
+		// its children where any other unscoped token could read them.
+		if sessionID == "" {
+			return toolFailure(task.ErrorPeerUnauthorized, "task token context has no origin session")
+		}
+	} else {
+		sessionID = firstNonEmpty(strings.TrimSpace(req.OriginSessionID), sessionID, "gateway-default")
 	}
 	idempotencyKey := req.IdempotencyKey
 	if idempotencyKey == "" {
@@ -1537,7 +1563,7 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 		msg := fmt.Sprintf("Found %d configured peer(s): %d fixable, %d ok.", len(repairs), fixable, onboard.CountRepairs(repairs, onboard.RepairOK))
 		next := "Nothing to fix — all reachable peer entries already match their whois identity."
 		if fixable > 0 {
-			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries. Note: this daemon must be restarted afterward for the change to take effect (it loads config only at startup). Conflicts and unreachable peers are left unchanged."
+			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries. The running daemon reloads the repaired policy immediately; the response reports whether that succeeded. Conflicts and unreachable peers are left unchanged."
 		}
 		return ToolResponse{OK: true, Result: map[string]any{
 			"requires_confirmation": fixable > 0,
@@ -1551,15 +1577,26 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
-	return ToolResponse{OK: true, Result: map[string]any{
+	payload := map[string]any{
 		"repaired": fixedNames,
 		"repairs":  repairs,
 		"message":  fmt.Sprintf("Rewrote %d peer entry(ies) in the config: %s.", len(fixedNames), strings.Join(fixedNames, ", ")),
-		// The live daemon still holds the OLD policy in memory; be explicit so the user
-		// isn't told the mesh is fixed when the running process hasn't reloaded.
-		"requires_daemon_restart": len(fixedNames) > 0,
-		"next_step":               "Restart the cmesh daemon so it loads the repaired config (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm.",
-	}}, nil
+	}
+	// Apply the repaired config to the shared policy engine so the running mesh
+	// server enforces the corrected peer trust immediately. Report the reload
+	// outcome honestly: claiming the mesh is fixed while the daemon still holds
+	// the old policy is exactly the false success this tool must avoid.
+	if err := g.reloadConfig(); err != nil {
+		payload["active_immediately"] = false
+		payload["requires_daemon_restart"] = true
+		payload["reload_error"] = err.Error()
+		payload["next_step"] = "The repaired config could not be reloaded into the running daemon. Restart it (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm."
+		return ToolResponse{OK: true, Result: payload}, nil
+	}
+	payload["active_immediately"] = true
+	payload["requires_daemon_restart"] = false
+	payload["next_step"] = "The running daemon now enforces the repaired peer trust. Run a bidirectional smoke to confirm."
+	return ToolResponse{OK: true, Result: payload}, nil
 }
 
 func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, timeoutSeconds int) (ToolResponse, error) {
@@ -1767,6 +1804,44 @@ func (g *Gateway) cancel(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
+// authorizeTaskAccess gates the task read/cancel surface for a caller holding a
+// per-task token rather than the gateway host token.
+//
+// A host-token caller is the machine's own agent and may read any task this node
+// delegated; peer_tasks is precisely that mirror, and origin-restart recovery
+// depends on those lookups staying unscoped.
+//
+// A task-token caller is a *worker's* runner reaching back in during
+// subdelegation. Its output is untrusted by design, so it must not be able to
+// enumerate or act on tasks outside its own delegation. Both the task context
+// file backing the token and peer_tasks carry origin_session_id, so the token's
+// session is the ownership key: it covers the token's own task and anything that
+// task delegated onward (children inherit the session), and nothing else.
+//
+// Tasks predating this scoping have an empty mirrored session; those stay
+// readable only by a host-token caller, never by a task token.
+func (g *Gateway) authorizeTaskAccess(ctx context.Context, peerTask store.PeerTask) error {
+	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
+	if !ok {
+		return nil
+	}
+	session := strings.TrimSpace(prov.OriginSessionID)
+	if session != "" && session == strings.TrimSpace(peerTask.OriginSessionID) {
+		return nil
+	}
+	return errors.New("task token is not authorized for this task")
+}
+
+// taskTokenSession returns the origin session of a task-token caller, and false
+// for a host-token caller (which is not session-scoped).
+func taskTokenSession(ctx context.Context) (string, bool) {
+	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(prov.OriginSessionID), true
+}
+
 func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, error) {
 	peerTasks, err := g.Store.ListPeerTasks(ctx, limit)
 	if err != nil {
@@ -1776,6 +1851,17 @@ func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, e
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
+	// A task-token caller may only see its own delegation, so filter the mirror
+	// to its session and withhold this node's local task list entirely.
+	if session, scoped := taskTokenSession(ctx); scoped {
+		filtered := peerTasks[:0]
+		for _, peerTask := range peerTasks {
+			if session != "" && strings.TrimSpace(peerTask.OriginSessionID) == session {
+				filtered = append(filtered, peerTask)
+			}
+		}
+		return ToolResponse{OK: true, Result: map[string]any{"delegated": filtered, "local": []task.Record{}}}, nil
+	}
 	return ToolResponse{OK: true, Result: map[string]any{"delegated": peerTasks, "local": localTasks}}, nil
 }
 
@@ -1783,6 +1869,9 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -1796,36 +1885,45 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
-func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, error) {
+// fetchOwnedTask resolves a mirrored task, authorizes the caller against
+// it, and hands the peer client to fetch. Every task-scoped read shares this
+// prologue so the ownership check cannot be omitted from a new one.
+func (g *Gateway) fetchOwnedTask(
+	ctx context.Context,
+	taskID string,
+	unreachableCode task.ErrorCode,
+	fetch func(rpcClient *rpc.Client, remoteTaskID string) (any, error),
+) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
-	resp, err := client.TaskResult(ctx, peerTask.RemoteTaskID)
+	resp, err := fetch(client, peerTask.RemoteTaskID)
 	if err != nil {
-		return rpcFailure(task.ErrorPeerUnreachable, err)
+		return rpcFailure(unreachableCode, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
+func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, error) {
+	return g.fetchOwnedTask(ctx, taskID, task.ErrorPeerUnreachable,
+		func(client *rpc.Client, remoteTaskID string) (any, error) {
+			return client.TaskResult(ctx, remoteTaskID)
+		})
+}
+
 func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolResponse, error) {
-	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
-	if err != nil {
-		return toolFailure(task.ErrorWorkerFailed, err.Error())
-	}
-	client, err := g.clientByNode(peerTask.PeerNodeID)
-	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
-	}
-	resp, err := client.TaskTranscript(ctx, peerTask.RemoteTaskID)
-	if err != nil {
-		return rpcFailure(task.ErrorTranscriptUnavailable, err)
-	}
-	return ToolResponse{OK: true, Result: resp}, nil
+	return g.fetchOwnedTask(ctx, taskID, task.ErrorTranscriptUnavailable,
+		func(client *rpc.Client, remoteTaskID string) (any, error) {
+			return client.TaskTranscript(ctx, remoteTaskID)
+		})
 }
 
 func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolResponse, error) {
@@ -1838,6 +1936,9 @@ func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolRe
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -1862,6 +1963,9 @@ func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolRe
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -2065,13 +2169,25 @@ func (g *Gateway) configPath() string {
 	return firstNonEmpty(g.ConfigPath, config.DefaultPath())
 }
 
+// reloadConfig re-reads config from disk and applies it to this gateway and to
+// the policy engine.
+//
+// The engine is reloaded in place rather than replaced: the daemon builds one
+// engine and shares it with the mesh RPC server, which is what enforces inbound
+// peer policy. Assigning a fresh engine to g.Policy would leave the mesh server
+// evaluating the old config, so a peer repair would report success while the
+// daemon kept rejecting the peer.
 func (g *Gateway) reloadConfig() error {
 	cfg, err := config.Load(g.configPath())
 	if err != nil {
 		return err
 	}
 	g.Config = cfg
-	g.Policy = policy.New(cfg)
+	if g.Policy != nil {
+		g.Policy.Reload(cfg)
+	} else {
+		g.Policy = policy.New(cfg)
+	}
 	return nil
 }
 
@@ -2455,6 +2571,7 @@ func mcpTools() []map[string]any {
 				"network":                map[string]any{"type": "boolean"},
 				"git_push":               map[string]any{"type": "boolean"},
 				"require_explicit":       map[string]any{"type": "boolean"},
+				"require_lease":          map[string]any{"type": "boolean"},
 				"enforcement_confidence": stringSchema("Enforcement confidence, such as high or medium."),
 			}, []string{"runner"}),
 		},

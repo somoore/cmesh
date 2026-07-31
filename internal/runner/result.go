@@ -40,9 +40,10 @@ func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string, 
 			ExitCode:  proc.ExitCode,
 			Stdout:    proc.Stdout,
 			Stderr:    proc.Stderr,
-			StdoutRef: logRef(proc.StdoutPath),
-			StderrRef: logRef(proc.StderrPath),
+			StdoutRef: LogRef(proc.StdoutPath),
+			StderrRef: LogRef(proc.StderrPath),
 			DurationS: int64(proc.Duration / time.Second),
+			Truncated: proc.Truncated,
 		},
 		WorkerSummaryUntrusted: summary,
 		Usage:                  usage,
@@ -56,7 +57,10 @@ func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string, 
 	}
 }
 
-func logRef(path string) string {
+// LogRef formats a captured log path as a result-envelope reference. Every
+// runner must use it so consumers see one "log:<path>" shape rather than a
+// prefixed value from one adapter and a bare path from another.
+func LogRef(path string) string {
 	if path == "" {
 		return ""
 	}

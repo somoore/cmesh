@@ -75,6 +75,8 @@ Task lookup operations are scoped the same way: the original origin can fetch it
 
 Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and registers a task-scoped cmesh MCP gateway for supported agent runners. Claude Code loads a strict task MCP config file; Codex ignores ambient user MCP config for that invocation and injects the local cmesh gateway with `bearer_token_env_var = "CMESH_TASK_TOKEN"`. MCP calls from the worker therefore carry the token structurally even when the gateway requires `host_token`.
 
+On the **local gateway**, a caller holding the gateway `host_token` is this machine's own agent and may read any task this node delegated — `peer_tasks` is precisely that mirror, and origin-restart recovery depends on those lookups. A caller holding only a **per-task token** is a worker's runner reaching back in during subdelegation, and its reads are scoped to the token's origin session: it may read status, results, transcripts, and artifacts for, and cancel, its own task and anything that task delegated onward, and nothing else. `list_tasks` is filtered to that session and withholds this node's local task history. Tasks mirrored before this scoping existed carry no session and are reachable only with the host token.
+
 Legacy provenance fields such as `origin_node_id`, `delegation_chain`, and `hop_count` are treated as compatibility hints only. On the local subdelegation path they are ignored when a task token is present, and they are never authoritative for **authorization**. A local request without a valid task token is treated as a fresh local origin and does not inherit worker provenance. On the direct mesh-RPC path these fields are also non-authoritative for authorization: the inbound peer gate, profile-level `allowed_peers`, and task ownership all key on the `whois`-authenticated peer's **unique** node identity (node id / stable id / DNS label) — never on the request-supplied `origin_node_id`, and never on a shared Tailscale tag. The fields feed only audit display and the advisory hop/cycle backstops described below.
 
 ### A valid peer asking for too much
@@ -102,7 +104,8 @@ cmesh protects the delegation boundary:
 - which runner/profile may be used;
 - whether a replayed request is identical or conflicting;
 - whether every task has a durable state;
-- whether task read/cancel/artifact operations are limited to the origin or direct requester;
+- whether task read/cancel/artifact operations are limited to the origin or direct requester, on the mesh RPC path and on the local gateway alike;
+- whether a profile ceiling can only cap authority and never raise it, and whether the runner that executes belongs to the profile that was actually enforced;
 - whether every dispatch, denial, result, and failure is auditable.
 - whether subdelegation provenance is derived from stored task context instead of worker claims.
 

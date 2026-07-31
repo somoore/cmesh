@@ -2,7 +2,9 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -38,6 +40,40 @@ func TestRunProgramTimeoutTerminatesProcess(t *testing.T) {
 	}
 }
 
+// A run that overflows the output limit AND exits non-zero is a failure first.
+// Reporting result_too_large would mask worker_failed and point the caller at
+// an oversized transcript instead of a failing command. Truncation must stay
+// visible on the result in both cases.
+func TestRunProgramFailureOutranksTruncation(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		wantCode ErrorCode
+		wantExit int
+	}{
+		{"truncated and failed", "flood-fail", ErrWorkerFailed, 9},
+		{"truncated but succeeded", "flood-ok", ErrResultTooLarge, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proc, err := RunProgram(context.Background(), Program{
+				Argv:        []string{os.Args[0], "-test.run=TestHelperProcess", "--", tc.mode},
+				Env:         map[string]string{"CMESH_HELPER_PROCESS": "1"},
+				OutputLimit: 128,
+			})
+			if CodeOf(err) != tc.wantCode {
+				t.Fatalf("error code = %q, want %q (err=%v)", CodeOf(err), tc.wantCode, err)
+			}
+			if proc.ExitCode != tc.wantExit {
+				t.Fatalf("exit code = %d, want %d", proc.ExitCode, tc.wantExit)
+			}
+			if !proc.Truncated {
+				t.Fatal("truncation must stay visible on the result")
+			}
+		})
+	}
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("CMESH_HELPER_PROCESS") != "1" {
 		return
@@ -51,6 +87,12 @@ func TestHelperProcess(t *testing.T) {
 			case "sleep":
 				time.Sleep(30 * time.Second)
 				os.Exit(0)
+			case "flood-ok":
+				fmt.Print(strings.Repeat("x", 4096))
+				os.Exit(0)
+			case "flood-fail":
+				fmt.Print(strings.Repeat("x", 4096))
+				os.Exit(9)
 			}
 		}
 	}
