@@ -1779,6 +1779,44 @@ func (g *Gateway) cancel(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, resp)
 }
 
+// authorizeTaskAccess gates the task read/cancel surface for a caller holding a
+// per-task token rather than the gateway host token.
+//
+// A host-token caller is the machine's own agent and may read any task this node
+// delegated; peer_tasks is precisely that mirror, and origin-restart recovery
+// depends on those lookups staying unscoped.
+//
+// A task-token caller is a *worker's* runner reaching back in during
+// subdelegation. Its output is untrusted by design, so it must not be able to
+// enumerate or act on tasks outside its own delegation. Both the task context
+// file backing the token and peer_tasks carry origin_session_id, so the token's
+// session is the ownership key: it covers the token's own task and anything that
+// task delegated onward (children inherit the session), and nothing else.
+//
+// Tasks predating this scoping have an empty mirrored session; those stay
+// readable only by a host-token caller, never by a task token.
+func (g *Gateway) authorizeTaskAccess(ctx context.Context, peerTask store.PeerTask) error {
+	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
+	if !ok {
+		return nil
+	}
+	session := strings.TrimSpace(prov.OriginSessionID)
+	if session != "" && session == strings.TrimSpace(peerTask.OriginSessionID) {
+		return nil
+	}
+	return errors.New("task token is not authorized for this task")
+}
+
+// taskTokenSession returns the origin session of a task-token caller, and false
+// for a host-token caller (which is not session-scoped).
+func taskTokenSession(ctx context.Context) (string, bool) {
+	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(prov.OriginSessionID), true
+}
+
 func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, error) {
 	peerTasks, err := g.Store.ListPeerTasks(ctx, limit)
 	if err != nil {
@@ -1788,6 +1826,17 @@ func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, e
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
+	// A task-token caller may only see its own delegation, so filter the mirror
+	// to its session and withhold this node's local task list entirely.
+	if session, scoped := taskTokenSession(ctx); scoped {
+		filtered := peerTasks[:0]
+		for _, peerTask := range peerTasks {
+			if session != "" && strings.TrimSpace(peerTask.OriginSessionID) == session {
+				filtered = append(filtered, peerTask)
+			}
+		}
+		return ToolResponse{OK: true, Result: map[string]any{"delegated": filtered, "local": []task.Record{}}}, nil
+	}
 	return ToolResponse{OK: true, Result: map[string]any{"delegated": peerTasks, "local": localTasks}}, nil
 }
 
@@ -1795,6 +1844,9 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -1813,6 +1865,9 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
+	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
@@ -1828,6 +1883,9 @@ func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolRespon
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -1850,6 +1908,9 @@ func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolRe
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {
@@ -1874,6 +1935,9 @@ func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolRe
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
 	client, err := g.clientByNode(peerTask.PeerNodeID)
 	if err != nil {

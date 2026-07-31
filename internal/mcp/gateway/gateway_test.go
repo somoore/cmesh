@@ -186,6 +186,111 @@ func TestDelegatedTaskLookupSurvivesOriginRestart(t *testing.T) {
 	}
 }
 
+// A per-task token authenticates a worker's runner reaching back in during
+// subdelegation. Its output is untrusted by design, so it must not be able to
+// read or cancel tasks outside its own delegation — only the host token, which
+// belongs to this machine's own agent, may reach every delegated task.
+func TestTaskTokenCannotReachAnotherSessionsTask(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	for _, seed := range []store.PeerTask{
+		{TaskID: "mine", PeerNodeID: "missing-peer", RemoteTaskID: "remote-mine", OriginSessionID: "session-a", State: task.StateRunning},
+		{TaskID: "theirs", PeerNodeID: "missing-peer", RemoteTaskID: "remote-theirs", OriginSessionID: "session-b", State: task.StateRunning},
+		{TaskID: "legacy", PeerNodeID: "missing-peer", RemoteTaskID: "remote-legacy", State: task.StateRunning},
+	} {
+		if err := g.Store.UpsertPeerTask(ctx, seed); err != nil {
+			t.Fatalf("UpsertPeerTask %s: %v", seed.TaskID, err)
+		}
+	}
+
+	// A task token minted for session-a.
+	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{
+		OriginNodeID:    "worker-node",
+		OriginSessionID: "session-a",
+	})
+
+	cases := []struct {
+		name   string
+		call   func(context.Context, string) (ToolResponse, error)
+		denied bool
+	}{
+		{"result", func(c context.Context, id string) (ToolResponse, error) { return g.resultCall(c, id) }, true},
+		{"transcript", func(c context.Context, id string) (ToolResponse, error) { return g.transcriptCall(c, id) }, true},
+		{"artifact", func(c context.Context, id string) (ToolResponse, error) { return g.artifactCall(c, id, "git-bundle") }, true},
+		{"cancel", func(c context.Context, id string) (ToolResponse, error) { return g.cancelCall(c, id, "stop") }, true},
+		{"status", func(c context.Context, id string) (ToolResponse, error) { return g.statusCall(c, id, false, 0) }, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Another session's task is refused outright. toolFailure returns the
+			// denial as both a response and an error, so only the response is
+			// asserted here.
+			resp, _ := tc.call(scoped, "theirs")
+			if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
+				t.Fatalf("cross-session %s should be peer_unauthorized, got %+v", tc.name, resp)
+			}
+
+			// A task predating session scoping has no mirrored session and must
+			// not be reachable by a task token either.
+			resp, _ = tc.call(scoped, "legacy")
+			if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
+				t.Fatalf("unscoped-legacy %s should be peer_unauthorized, got %+v", tc.name, resp)
+			}
+
+			// Its own session gets past authorization; the peer is unreachable in
+			// this fixture, so anything other than peer_unauthorized proves the
+			// authorization gate allowed it through.
+			resp, _ = tc.call(scoped, "mine")
+			if resp.Error != nil && resp.Error.Code == task.ErrorPeerUnauthorized {
+				t.Fatalf("own-session %s must not be denied: %+v", tc.name, resp)
+			}
+
+			// A host-token caller (no provenance in context) reaches every task.
+			resp, _ = tc.call(ctx, "theirs")
+			if resp.Error != nil && resp.Error.Code == task.ErrorPeerUnauthorized {
+				t.Fatalf("host-token %s must not be denied: %+v", tc.name, resp)
+			}
+		})
+	}
+}
+
+// list_tasks must not let a task token enumerate other sessions' delegations or
+// this node's own local task history.
+func TestListTasksScopedForTaskToken(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	for _, seed := range []store.PeerTask{
+		{TaskID: "mine", PeerNodeID: "peer", RemoteTaskID: "remote-mine", OriginSessionID: "session-a", State: task.StateRunning},
+		{TaskID: "theirs", PeerNodeID: "peer", RemoteTaskID: "remote-theirs", OriginSessionID: "session-b", State: task.StateRunning},
+	} {
+		if err := g.Store.UpsertPeerTask(ctx, seed); err != nil {
+			t.Fatalf("UpsertPeerTask %s: %v", seed.TaskID, err)
+		}
+	}
+
+	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{OriginSessionID: "session-a"})
+	resp, err := g.listTasksCall(scoped, 20)
+	if err != nil || !resp.OK {
+		t.Fatalf("listTasksCall resp=%+v err=%v", resp, err)
+	}
+	result := resp.Result.(map[string]any)
+	delegated := result["delegated"].([]store.PeerTask)
+	if len(delegated) != 1 || delegated[0].TaskID != "mine" {
+		t.Fatalf("task token should see only its own session, got %+v", delegated)
+	}
+	if local := result["local"].([]task.Record); len(local) != 0 {
+		t.Fatalf("task token must not see local tasks, got %+v", local)
+	}
+
+	hostResp, err := g.listTasksCall(ctx, 20)
+	if err != nil || !hostResp.OK {
+		t.Fatalf("host listTasksCall resp=%+v err=%v", hostResp, err)
+	}
+	if got := len(hostResp.Result.(map[string]any)["delegated"].([]store.PeerTask)); got != 2 {
+		t.Fatalf("host token should see all delegated tasks, got %d", got)
+	}
+}
+
 func TestResultTranscriptAndCancelReportUnreachablePeer(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
