@@ -46,6 +46,58 @@ func TestProfileLeaseStoreScopesListAndRevokeToOwningPeer(t *testing.T) {
 	}
 }
 
+// The lease file was append-only: nothing ever removed an expired or revoked
+// entry, so a long-lived worker grew it without bound. Issue prunes entries
+// that stopped being usable longer ago than the retention window, while keeping
+// recent ones readable for audit.
+func TestIssuePrunesLongExpiredLeases(t *testing.T) {
+	store := NewProfileLeaseStore(t.TempDir())
+	now := time.Now().UTC()
+	peer := LeaseValidation{PeerName: "peer-a", PeerNodeID: "node-a", Profile: "repo-dev", CWD: t.TempDir()}
+
+	// Expired well beyond retention: issued long ago with a short TTL.
+	stale, err := store.Issue(peer, time.Hour, now.Add(-leaseRetention-48*time.Hour))
+	if err != nil {
+		t.Fatalf("issue stale: %v", err)
+	}
+	// Expired, but still inside the retention window.
+	recent, err := store.Issue(peer, time.Hour, now.Add(-2*time.Hour))
+	if err != nil {
+		t.Fatalf("issue recent: %v", err)
+	}
+	// Issuing now triggers the prune.
+	live, err := store.Issue(peer, time.Hour, now)
+	if err != nil {
+		t.Fatalf("issue live: %v", err)
+	}
+
+	all, err := store.ListAllForLocalOperator(true, now)
+	if err != nil {
+		t.Fatalf("list all: %v", err)
+	}
+	kept := map[string]bool{}
+	for _, lease := range all {
+		kept[lease.LeaseID] = true
+	}
+	if kept[stale.LeaseID] {
+		t.Fatal("lease expired beyond retention should be pruned")
+	}
+	if !kept[recent.LeaseID] {
+		t.Fatal("recently expired lease should be retained for audit")
+	}
+	if !kept[live.LeaseID] {
+		t.Fatal("live lease must never be pruned")
+	}
+
+	// Pruning must never turn a denial into an acceptance.
+	if _, err := store.ValidateProfileLease(LeaseValidation{
+		LeaseID: recent.LeaseID, PeerName: peer.PeerName, PeerNodeID: peer.PeerNodeID,
+		Profile: peer.Profile, CWD: peer.CWD,
+	}); err == nil {
+		t.Fatal("expired lease must still be refused after pruning")
+	}
+}
+
 func TestProfileLeaseCWDScopes(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")

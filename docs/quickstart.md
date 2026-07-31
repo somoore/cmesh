@@ -262,7 +262,7 @@ If a peer stops authenticating (`peer_unauthorized`), or a `[peers.*]` entry loo
 A cmesh peer entry looks wrong. Diagnose and fix my peers.
 ```
 
-The agent calls cmesh's `repair_peers` tool. It checks every configured peer against its authoritative Tailscale `whois` identity, returns a per-peer diff (which entries are `ok`, `fixable`, in `conflict`, or `unreachable`), and on your confirmation rewrites the mismatched entries to the correct identity, removes stale duplicate entries, and reconciles the allowlists. It preserves your existing trust posture (it never grants a peer more access than it already had) and leaves conflicts and unreachable peers untouched for you to review. When the agent is on the local gateway, the repaired config takes effect after the daemon restarts; the tool says so.
+The agent calls cmesh's `repair_peers` tool. It checks every configured peer against its authoritative Tailscale `whois` identity, returns a per-peer diff (which entries are `ok`, `fixable`, in `conflict`, or `unreachable`), and on your confirmation rewrites the mismatched entries to the correct identity, removes stale duplicate entries, and reconciles the allowlists. It preserves your existing trust posture (it never grants a peer more access than it already had) and leaves conflicts and unreachable peers untouched for you to review. When the agent is on the local gateway, the running daemon reloads the repaired policy immediately, so the fix takes effect without a restart; the tool reports whether that reload succeeded and asks for a restart only if it did not.
 
 The daemon normally runs as the service the wizard installed. To run it in the foreground for debugging:
 

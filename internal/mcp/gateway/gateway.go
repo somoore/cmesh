@@ -1871,7 +1871,15 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
-func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, error) {
+// fetchOwnedTask resolves a mirrored task, authorizes the caller against
+// it, and hands the peer client to fetch. Every task-scoped read shares this
+// prologue so the ownership check cannot be omitted from a new one.
+func (g *Gateway) fetchOwnedTask(
+	ctx context.Context,
+	taskID string,
+	unreachableCode task.ErrorCode,
+	fetch func(rpcClient *rpc.Client, remoteTaskID string) (any, error),
+) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
@@ -1883,30 +1891,25 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnreachable, err.Error())
 	}
-	resp, err := client.TaskResult(ctx, peerTask.RemoteTaskID)
+	resp, err := fetch(client, peerTask.RemoteTaskID)
 	if err != nil {
-		return rpcFailure(task.ErrorPeerUnreachable, err)
+		return rpcFailure(unreachableCode, err)
 	}
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
+func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, error) {
+	return g.fetchOwnedTask(ctx, taskID, task.ErrorPeerUnreachable,
+		func(client *rpc.Client, remoteTaskID string) (any, error) {
+			return client.TaskResult(ctx, remoteTaskID)
+		})
+}
+
 func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolResponse, error) {
-	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
-	if err != nil {
-		return toolFailure(task.ErrorWorkerFailed, err.Error())
-	}
-	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
-		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
-	}
-	client, err := g.clientByNode(peerTask.PeerNodeID)
-	if err != nil {
-		return toolFailure(task.ErrorPeerUnreachable, err.Error())
-	}
-	resp, err := client.TaskTranscript(ctx, peerTask.RemoteTaskID)
-	if err != nil {
-		return rpcFailure(task.ErrorTranscriptUnavailable, err)
-	}
-	return ToolResponse{OK: true, Result: resp}, nil
+	return g.fetchOwnedTask(ctx, taskID, task.ErrorTranscriptUnavailable,
+		func(client *rpc.Client, remoteTaskID string) (any, error) {
+			return client.TaskTranscript(ctx, remoteTaskID)
+		})
 }
 
 func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolResponse, error) {

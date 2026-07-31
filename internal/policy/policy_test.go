@@ -646,6 +646,23 @@ func TestCeilingRejectsUnconfiguredRunner(t *testing.T) {
 	}
 }
 
+// Cycle detection must ignore case, matching the mesh RPC path's duplicate-hop
+// check, so a differently-cased node name cannot pass one layer and be caught
+// only by the other.
+func TestInboundCycleDetectionIgnoresCase(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "dev",
+		Chain:    []string{"mac-studio", "HOMELAB-VM"}, // this node is "homelab-vm"
+	})
+	if decision.Allowed || decision.Code != "profile_denied" {
+		t.Fatalf("differently-cased self in chain should be a cycle, got %+v", decision)
+	}
+}
+
 // The daemon builds one policy engine and shares it with both the mesh RPC
 // server and the local gateway. A config reload must therefore apply to the
 // engine in place: replacing only the gateway's pointer would leave the mesh

@@ -75,12 +75,38 @@ func (s *ProfileLeaseStore) Issue(req LeaseValidation, ttl time.Duration, now ti
 		return schema.ProfileLease{}, errors.New("origin identity is required")
 	}
 	if err := s.update(func(file profileLeaseFile) (profileLeaseFile, error) {
-		file.Leases = append(file.Leases, lease)
+		file.Leases = append(pruneLeases(file.Leases, now), lease)
 		return file, nil
 	}); err != nil {
 		return schema.ProfileLease{}, err
 	}
 	return lease, nil
+}
+
+// leaseRetention is how long an expired or revoked lease is kept after it stops
+// being usable. Validation already rejects both, so retention exists only to
+// keep the record readable for audit and for List(includeExpired). Without it
+// the file is append-only and grows without bound.
+const leaseRetention = 30 * 24 * time.Hour
+
+// pruneLeases drops leases that expired — or were revoked — longer ago than
+// leaseRetention. A lease still within its retention window is kept so it
+// continues to appear in listings; ValidateProfileLease refuses it either way,
+// so pruning can never turn a denial into an acceptance.
+func pruneLeases(leases []schema.ProfileLease, now time.Time) []schema.ProfileLease {
+	cutoff := now.UTC().Add(-leaseRetention)
+	out := leases[:0]
+	for _, lease := range leases {
+		retired := lease.ExpiresAt
+		if !lease.RevokedAt.IsZero() && lease.RevokedAt.After(retired) {
+			retired = lease.RevokedAt
+		}
+		if !retired.IsZero() && retired.Before(cutoff) {
+			continue
+		}
+		out = append(out, lease)
+	}
+	return out
 }
 
 func (s *ProfileLeaseStore) ValidateProfileLease(req LeaseValidation) (LeaseValidation, error) {

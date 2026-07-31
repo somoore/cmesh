@@ -57,6 +57,10 @@ claims = ["read_files", "edit_repo", "execute_repo_commands"]
 bare = false
 network = false
 git_push = false
+# edit_repo and execute_repo_commands are high-risk capabilities, so this
+# profile must be requested by name and backed by a worker-issued lease.
+require_explicit = true
+require_lease = true
 
 [runners.claude-code]
 command = ["claude", "-p"]
@@ -95,7 +99,7 @@ The mesh server refuses wildcard bind addresses.
 - `allowed_peers`: node ids or names allowed to delegate to this worker.
 - `allowed_cwds`: cwd globs evaluated after home expansion and realpath normalization.
 - `hop_limit`: maximum delegation hop count.
-- `profile_ceilings`: optional map from a **requested** profile name to a **ceiling** profile name. When a peer requests the keyed profile, the worker silently remaps the effective profile down to the ceiling (e.g. `profile_ceilings = { system-change = "repo-dev" }` caps any `system-change` request to `repo-dev`). The ceiling profile must itself be configured.
+- `profile_ceilings`: optional map from a **requested** profile name to a **ceiling** profile name. When a peer requests the keyed profile, the worker silently remaps the effective profile down to the ceiling (e.g. `profile_ceilings = { system-change = "repo-dev" }` caps any `system-change` request to `repo-dev`). A ceiling may only *cap* authority, never raise it: both profiles must be configured, the ceiling's runner must be configured, and the ceiling's risk must not exceed the profile it caps. Equal-risk mappings are allowed, since capping within a risk tier still narrows capabilities. A mapping that would raise authority is rejected when the config loads, and refused again at request time. The runner that executes is the **ceiling's** runner, not the requested profile's.
 
 `[policy.outbound]` is enforced by the origin daemon before dispatch:
 
@@ -161,6 +165,8 @@ The built-in templates climb from deterministic read-only probes to high-risk ag
 | `system-change` | agent | high | opt-in | yes | yes |
 
 Generated configs expose `query` only; every higher profile is added deliberately and, for high-risk profiles, kept in `[policy.outbound].denied_profiles` on origins that should not request them. See [Security](security.md) for the reasoning behind keeping this ladder narrow.
+
+The `require_explicit` + `require_lease` requirement is **not limited to these built-in names**. Any profile granting a high-risk capability — `edit_repo`, `execute_in_repo`, `execute_repo_commands`, `git_push`, `desktop_control`, `desktop_interaction`, `system_change`, or `launch_processes` — must set both flags, whatever you call it, and the config is rejected if it does not. Capabilities declared through the legacy `claims` field count the same as `capabilities`. This is enforced in `ValidateSemantics`, so `cmesh profile validate`, the `profile_validate` MCP tool, and config load all agree.
 
 ### Shell policy
 

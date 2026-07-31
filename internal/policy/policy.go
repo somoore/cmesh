@@ -99,7 +99,10 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 	if intent.HopCount > cfg.Policy.HopLimit {
 		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	if contains(intent.Chain, cfg.Node.ID) || contains(intent.Chain, cfg.Node.Name) {
+	// Case-insensitive to match validateDelegationChain's duplicate-hop check on
+	// the mesh RPC path; a differently-cased node name must not slip past one
+	// layer only to be caught by the other.
+	if containsFold(intent.Chain, cfg.Node.ID) || containsFold(intent.Chain, cfg.Node.Name) {
 		return denied("profile_denied", "delegation chain cycles back to this node", intent.Profile, "")
 	}
 	cwd, err := NormalizeCWD(intent.CWD)
@@ -452,6 +455,20 @@ func matchesAny(values, patterns []string) bool {
 			if err == nil && ok {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// containsFold reports whether values contains needle, ignoring case. An empty
+// needle never matches, so an unset node id or name cannot report a cycle.
+func containsFold(values []string, needle string) bool {
+	if strings.TrimSpace(needle) == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), strings.TrimSpace(needle)) {
+			return true
 		}
 	}
 	return false

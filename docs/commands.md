@@ -267,6 +267,7 @@ Validate one profile capability contract and reject unsafe contradictions (such 
 | `--network` | Network access. |
 | `--git-push` | Git push capability is enabled. |
 | `--require-explicit` | Profile requires explicit selection. |
+| `--require-lease` | Profile requires a worker-issued lease. Required, with `--require-explicit`, for any profile granting a high-risk capability. |
 | `--confidence <level>` | Enforcement confidence. |
 | `--cap <capability>` | Capability. Repeatable. |
 

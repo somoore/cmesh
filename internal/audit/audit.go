@@ -56,7 +56,10 @@ func (w *Writer) Append(event Event) (Event, error) {
 	if event.NodeID == "" {
 		event.NodeID = w.nodeID
 	}
-	if err := os.MkdirAll(filepath.Dir(w.path), 0o755); err != nil {
+	// The audit log records peer identities, prompts hashes, profiles, and policy
+	// decisions, so its directory is owner-only like the store's — the log file
+	// itself is already 0600.
+	if err := os.MkdirAll(filepath.Dir(w.path), 0o700); err != nil {
 		return Event{}, err
 	}
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)

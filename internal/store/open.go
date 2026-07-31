@@ -35,6 +35,15 @@ func OpenContext(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite store: %w", err)
 	}
 	store := &Store{db: db}
+	// Tighten the main db before migrations run: migrations are the first writes,
+	// so leaving the default umask mode in place until afterwards leaves a window
+	// where task history is world-readable. The -wal/-shm sidecars do not exist
+	// until that first write, so they are chmodded below (the loop tolerates a
+	// missing file, and repeats the db for the case where it was created here).
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		_ = db.Close()
+		return nil, fmt.Errorf("restrict store file permissions: %w", err)
+	}
 	if err := store.Migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
