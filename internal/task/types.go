@@ -102,6 +102,9 @@ type CommandOutput struct {
 	StdoutRef string `json:"stdout_ref,omitempty"`
 	StderrRef string `json:"stderr_ref,omitempty"`
 	DurationS int64  `json:"duration_s"`
+	// Truncated reports that captured output hit the runner's output limit, so
+	// Stdout/Stderr are incomplete and the log refs should be read instead.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type QueryResult struct {

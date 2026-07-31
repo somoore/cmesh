@@ -1369,9 +1369,23 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if err != nil {
 		return toolFailure(task.ErrorPeerUnauthorized, err.Error())
 	}
-	sessionID := req.OriginSessionID
-	if sessionID == "" {
-		sessionID = firstNonEmpty(prov.OriginSessionID, "gateway-default")
+	// The origin session is the ownership key for task-token reads, so it must
+	// come from the token's stored context and never from the request body: a
+	// worker's runner could otherwise mint children under an arbitrary session
+	// and then read that session's tasks. currentProvenance already ignores
+	// body-supplied provenance when a token is present; this applies the same
+	// rule to the session. Host-token callers have no provenance and keep using
+	// the request value.
+	sessionID := strings.TrimSpace(prov.OriginSessionID)
+	if _, scoped := taskTokenSession(ctx); scoped {
+		// A token whose stored context carries no session cannot be scoped, and
+		// must not fall through to the shared default session — that would put
+		// its children where any other unscoped token could read them.
+		if sessionID == "" {
+			return toolFailure(task.ErrorPeerUnauthorized, "task token context has no origin session")
+		}
+	} else {
+		sessionID = firstNonEmpty(strings.TrimSpace(req.OriginSessionID), sessionID, "gateway-default")
 	}
 	idempotencyKey := req.IdempotencyKey
 	if idempotencyKey == "" {

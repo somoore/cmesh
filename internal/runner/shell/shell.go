@@ -120,6 +120,7 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 			StdoutRef: runner.LogRef(proc.StdoutPath),
 			StderrRef: runner.LogRef(proc.StderrPath),
 			DurationS: int64(proc.Duration / time.Second),
+			Truncated: proc.Truncated,
 		},
 		QueryResult: &runner.QueryResult{
 			Kind: kind,

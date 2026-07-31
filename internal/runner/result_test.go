@@ -6,6 +6,19 @@ import (
 	"time"
 )
 
+// Truncation must reach the result envelope. A run that both failed and
+// overflowed the output limit reports worker_failed, so without this field the
+// origin has no way to know the captured stdout/stderr are incomplete.
+func TestResultFromProcessCarriesTruncation(t *testing.T) {
+	for _, truncated := range []bool{true, false} {
+		proc := CompletedProcess{ExitCode: 1, Stdout: "partial", Truncated: truncated}
+		result := ResultFromProcess("claude-code", proc, []string{"claude", "-p"}, "")
+		if result.CommandOutput.Truncated != truncated {
+			t.Fatalf("CommandOutput.Truncated = %v, want %v", result.CommandOutput.Truncated, truncated)
+		}
+	}
+}
+
 func TestResultFromProcessParsesStructuredOutput(t *testing.T) {
 	proc := CompletedProcess{
 		ExitCode:      0,

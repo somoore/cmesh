@@ -142,6 +142,7 @@ runner = "codex"
 claims = ["read_files", "edit_repo", "execute_repo_commands", "network", "launch_processes", "desktop_interaction"]
 allowed_peers = ["scotts-macbook-pro"]
 require_explicit = true
+require_lease = true
 bare = false
 network = true
 git_push = false

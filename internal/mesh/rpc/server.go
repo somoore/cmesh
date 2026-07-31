@@ -1767,6 +1767,7 @@ func resultAsTask(result runner.Result) *task.ResultEnvelope {
 			StdoutRef: result.CommandOutput.StdoutRef,
 			StderrRef: result.CommandOutput.StderrRef,
 			DurationS: result.CommandOutput.DurationS,
+			Truncated: result.CommandOutput.Truncated,
 		},
 		WorkerSummaryUntrusted:  result.WorkerSummaryUntrusted,
 		Usage:                   task.Usage{Tokens: int64(result.Usage.Tokens), Cost: result.Usage.Cost, DurationS: result.Usage.DurationS},

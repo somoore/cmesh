@@ -243,6 +243,10 @@
         "duration_s": {
           "type": "integer",
           "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "Captured output hit the runner output limit, so stdout and stderr are incomplete; read stdout_ref/stderr_ref instead. Set independently of status: a run can both fail and truncate."
         }
       }
     },
