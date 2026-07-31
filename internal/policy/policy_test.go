@@ -497,6 +497,155 @@ func TestOutboundRejectsUnknownPeer(t *testing.T) {
 	}
 }
 
+// A profile ceiling exists to cap authority. A mapping that points at a
+// stronger profile must be refused rather than silently applied, because the
+// remap is unconditional: applying it would escalate every request naming the
+// keyed profile.
+func TestCeilingCannotRaiseAuthority(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["look"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Capabilities: []string{profile.CapReadFiles},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskMedium,
+	}
+	cfg.Profiles["power"] = config.ProfileConfig{
+		Runner:          "claude-code",
+		Capabilities:    []string{profile.CapReadFiles, profile.CapEditRepo},
+		Writes:          profile.WritesRepoOnly,
+		Shell:           profile.ShellAllow,
+		Risk:            profile.RiskHigh,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	cfg.Policy.ProfileCeilings = map[string]string{"look": "power"}
+
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "look",
+	})
+	if decision.Allowed {
+		t.Fatalf("ceiling must not raise authority: %+v", decision)
+	}
+	if decision.Code != "profile_denied" {
+		t.Fatalf("code = %q, want profile_denied: %+v", decision.Code, decision)
+	}
+	if decision.EffectiveProfile == "power" {
+		t.Fatal("denied decision must not report the escalated profile as effective")
+	}
+}
+
+// Capping to an equal-risk profile is legitimate narrowing (the documented
+// example maps system-change to repo-dev, both high risk), so rank equality
+// must stay allowed.
+func TestCeilingAllowsEqualRiskCap(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["broad"] = config.ProfileConfig{
+		Runner:          "claude-code",
+		Capabilities:    []string{profile.CapReadFiles, profile.CapSystemChange},
+		Writes:          profile.WritesAllow,
+		Shell:           profile.ShellAllow,
+		Risk:            profile.RiskHigh,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	cfg.Profiles["narrow"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Capabilities: []string{profile.CapReadFiles, profile.CapEditRepo},
+		Writes:       profile.WritesRepoOnly,
+		Shell:        profile.ShellAllow,
+		Risk:         profile.RiskHigh,
+	}
+	cfg.Policy.ProfileCeilings = map[string]string{"broad": "narrow"}
+
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "broad",
+	})
+	if !decision.Allowed {
+		t.Fatalf("equal-risk cap should be allowed: %+v", decision)
+	}
+	if decision.EffectiveProfile != "narrow" {
+		t.Fatalf("effective profile = %q, want narrow", decision.EffectiveProfile)
+	}
+}
+
+// The runner that executes must belong to the profile that was enforced. When a
+// ceiling remaps the effective profile, the decision must report the ceiling's
+// runner so callers do not resolve one from the requested profile name.
+func TestCeilingReportsEffectiveRunner(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Runners["probe"] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: "capped"}
+	cfg.Profiles["asked"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Capabilities: []string{profile.CapReadFiles},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskMedium,
+	}
+	cfg.Profiles["capped"] = config.ProfileConfig{
+		Runner:       profile.RunnerProbe,
+		Capabilities: []string{profile.CapDiskInfo},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskLow,
+	}
+	cfg.Policy.ProfileCeilings = map[string]string{"asked": "capped"}
+
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "asked",
+	})
+	if !decision.Allowed {
+		t.Fatalf("expected allowed decision: %+v", decision)
+	}
+	if decision.EffectiveProfile != "capped" {
+		t.Fatalf("effective profile = %q, want capped", decision.EffectiveProfile)
+	}
+	if decision.EffectiveRunner != profile.RunnerProbe {
+		t.Fatalf("effective runner = %q, want %q", decision.EffectiveRunner, profile.RunnerProbe)
+	}
+}
+
+// A ceiling whose runner is not configured on this node must be refused rather
+// than dispatched: the runner checks earlier in checkProfile ran against the
+// requested profile, not the ceiling.
+func TestCeilingRejectsUnconfiguredRunner(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["asked"] = config.ProfileConfig{
+		Runner:       "claude-code",
+		Capabilities: []string{profile.CapReadFiles},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskMedium,
+	}
+	cfg.Profiles["capped"] = config.ProfileConfig{
+		Runner:       "not-configured",
+		Capabilities: []string{profile.CapReadFiles},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskLow,
+	}
+	cfg.Policy.ProfileCeilings = map[string]string{"asked": "capped"}
+
+	decision := New(cfg).CheckInbound(TaskIntent{
+		PeerName: "mac-studio",
+		CWD:      root,
+		Profile:  "asked",
+	})
+	if decision.Allowed || decision.Code != "runner_unavailable" {
+		t.Fatalf("expected runner_unavailable, got %+v", decision)
+	}
+}
+
 func testConfig(root string) *config.Config {
 	return &config.Config{
 		Node:    config.NodeConfig{ID: "homelab-vm", Name: "homelab-vm", MeshPort: 7778, MCPPort: 7777},

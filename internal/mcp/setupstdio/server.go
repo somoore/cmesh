@@ -321,6 +321,7 @@ type profileValidateRequest struct {
 	Network               bool     `json:"network,omitempty"`
 	GitPush               bool     `json:"git_push,omitempty"`
 	RequireExplicit       bool     `json:"require_explicit,omitempty"`
+	RequireLease          bool     `json:"require_lease,omitempty"`
 	EnforcementConfidence string   `json:"enforcement_confidence,omitempty"`
 }
 
@@ -400,7 +401,18 @@ func profileValidate(req profileValidateRequest) ToolResponse {
 		name = "custom"
 	}
 	capabilities := profiledefs.NormalizeCapabilities(req.Capabilities, req.Claims)
-	if err := profiledefs.ValidateSemantics(name, strings.TrimSpace(req.Runner), capabilities, req.Writes, req.Shell, req.Network, req.GitPush, req.RequireExplicit, req.EnforcementConfidence); err != nil {
+	if err := profiledefs.ValidateSemantics(profiledefs.Semantics{
+		Name:                  name,
+		Runner:                strings.TrimSpace(req.Runner),
+		Capabilities:          capabilities,
+		Writes:                req.Writes,
+		Shell:                 req.Shell,
+		Network:               req.Network,
+		GitPush:               req.GitPush,
+		RequireExplicit:       req.RequireExplicit,
+		RequireLease:          req.RequireLease,
+		EnforcementConfidence: req.EnforcementConfidence,
+	}); err != nil {
 		return failure("profile_denied", err.Error())
 	}
 	return ToolResponse{OK: true, Result: map[string]any{"status": "valid", "name": name, "capabilities": capabilities}}
@@ -681,6 +693,7 @@ func tools() []map[string]any {
 				"network":                map[string]any{"type": "boolean"},
 				"git_push":               map[string]any{"type": "boolean"},
 				"require_explicit":       map[string]any{"type": "boolean"},
+				"require_lease":          map[string]any{"type": "boolean"},
 				"enforcement_confidence": stringSchema("Enforcement confidence, such as high or medium."),
 			}, []string{"runner"}),
 		},

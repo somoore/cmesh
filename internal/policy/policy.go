@@ -13,19 +13,25 @@ import (
 )
 
 type Decision struct {
-	Allowed          bool     `json:"allowed"`
-	Code             string   `json:"code,omitempty"`
-	Detail           string   `json:"detail,omitempty"`
-	RequestedProfile string   `json:"requested_profile,omitempty"`
-	EffectiveProfile string   `json:"effective_profile,omitempty"`
-	Claims           []string `json:"claims,omitempty"`
-	Capabilities     []string `json:"capabilities,omitempty"`
-	Intents          []string `json:"intents,omitempty"`
-	Writes           string   `json:"writes,omitempty"`
-	Shell            string   `json:"shell,omitempty"`
-	Network          bool     `json:"network"`
-	AuditLevel       string   `json:"audit_level,omitempty"`
-	NormalizedCWD    string   `json:"normalized_cwd,omitempty"`
+	Allowed          bool   `json:"allowed"`
+	Code             string `json:"code,omitempty"`
+	Detail           string `json:"detail,omitempty"`
+	RequestedProfile string `json:"requested_profile,omitempty"`
+	EffectiveProfile string `json:"effective_profile,omitempty"`
+	// EffectiveRunner is the runner belonging to the effective profile. Callers
+	// must prefer it over resolving a runner from the requested profile name: a
+	// profile ceiling can remap the effective profile, and deriving the runner
+	// from the requested name would run a different runner than the one whose
+	// profile policy actually authorized.
+	EffectiveRunner string   `json:"effective_runner,omitempty"`
+	Claims          []string `json:"claims,omitempty"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	Intents         []string `json:"intents,omitempty"`
+	Writes          string   `json:"writes,omitempty"`
+	Shell           string   `json:"shell,omitempty"`
+	Network         bool     `json:"network"`
+	AuditLevel      string   `json:"audit_level,omitempty"`
+	NormalizedCWD   string   `json:"normalized_cwd,omitempty"`
 }
 
 type TaskIntent struct {
@@ -128,11 +134,27 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 	}
 	effective := requested
 	if ceiling, ok := e.cfg.Policy.ProfileCeilings[requested]; ok {
-		if _, ok := e.cfg.Profiles[ceiling]; !ok {
+		ceilingProfile, ok := e.cfg.Profiles[ceiling]
+		if !ok {
 			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is not configured", ceiling), requested, "")
 		}
+		// A ceiling may only cap authority, never raise it. config.Validate rejects
+		// an escalating mapping at load time; this is the request-time backstop for
+		// a config that changed underneath a running daemon or was built in-process.
+		if profiledefs.RiskRank(effectiveRisk(ceiling, ceilingProfile)) > profiledefs.RiskRank(effectiveRisk(requested, profile)) {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q", ceiling, requested), requested, "")
+		}
+		// The runner checks above ran against the requested profile. Re-run them for
+		// the ceiling so the profile that is actually enforced cannot name a runner
+		// the caller did not ask for or that this node does not configure.
+		if intent.Runner != "" && ceilingProfile.Runner != intent.Runner {
+			return denied("runner_unavailable", fmt.Sprintf("profile ceiling %q uses runner %q, not %q", ceiling, ceilingProfile.Runner, intent.Runner), requested, ceiling)
+		}
+		if _, ok := e.cfg.Runners[ceilingProfile.Runner]; !ok {
+			return denied("runner_unavailable", fmt.Sprintf("runner %q is not configured", ceilingProfile.Runner), requested, ceiling)
+		}
 		effective = ceiling
-		profile = e.cfg.Profiles[effective]
+		profile = ceilingProfile
 	}
 	// Profile-level allowed_peers is an authorization gate, so it must key on the
 	// authenticated peer identity only. Never include OriginNodeID here: on the
@@ -200,6 +222,7 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 		Allowed:          true,
 		RequestedProfile: requested,
 		EffectiveProfile: effective,
+		EffectiveRunner:  profile.Runner,
 		Claims:           append([]string(nil), capabilities...),
 		Capabilities:     append([]string(nil), capabilities...),
 		Intents:          append([]string(nil), profile.Intents...),
@@ -379,6 +402,15 @@ func identityCandidates(intent TaskIntent) []string {
 		}
 	}
 	return out
+}
+
+// effectiveRisk returns a profile's declared risk, falling back to the
+// capability-derived value when the config omits it.
+func effectiveRisk(name string, prof config.ProfileConfig) string {
+	if prof.Risk != "" {
+		return prof.Risk
+	}
+	return profiledefs.RiskForConfig(name, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
 }
 
 func matchesAny(values, patterns []string) bool {

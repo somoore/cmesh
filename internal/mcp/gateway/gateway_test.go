@@ -1125,11 +1125,14 @@ func newTestGatewayWithStore(t *testing.T, storePath string) *Gateway {
 			HopLimit:     2,
 		},
 		Profiles: map[string]config.ProfileConfig{
-			"dev":      {Runner: "fake", Claims: []string{"read_files", "edit_repo"}},
+			"dev":      {Runner: "fake", Claims: []string{"read_files", "edit_repo"}, RequireExplicit: true, RequireLease: true},
 			"readonly": {Runner: "fake", Claims: []string{"read_files"}},
 		},
 		Runners: map[string]config.RunnerConfig{
-			"fake": {Command: []string{"fake"}},
+			// dev grants edit_repo, so it is high-risk and requires an explicit
+			// request plus a lease. Point the implicit default at readonly so
+			// profile-less delegation in these tests exercises the normal path.
+			"fake": {Command: []string{"fake"}, DefaultProfile: "readonly"},
 		},
 		Peers: map[string]config.PeerConfig{},
 	}

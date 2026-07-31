@@ -108,6 +108,93 @@ func TestApplyDefaultsOmittedDefaultProfilePicksDefinedProfile(t *testing.T) {
 	}
 }
 
+// A profile ceiling caps authority, so a mapping pointing at a stronger profile
+// must be rejected at load time rather than silently escalating every request
+// that names the keyed profile.
+func TestValidateRejectsEscalatingProfileCeiling(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested string
+		ceiling   string
+		wantErr   bool
+	}{
+		{"cap high to medium", "power", "look", false},
+		{"cap to equal risk", "power", "power-two", false},
+		{"raise medium to high", "look", "power", true},
+		{"undefined ceiling", "power", "missing", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+				"mesh_port = 7778\nmcp_port = 7777\n\n" +
+				"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n" +
+				"profile_ceilings = { " + tc.requested + " = \"" + tc.ceiling + "\" }\n\n" +
+				"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
+				"writes = \"deny\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+				"[profiles.power]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\", \"edit_repo\"]\n" +
+				"writes = \"repo_only\"\nshell = \"allow\"\nrisk = \"high\"\n" +
+				"require_explicit = true\nrequire_lease = true\n\n" +
+				"[profiles.power-two]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\", \"edit_repo\"]\n" +
+				"writes = \"repo_only\"\nshell = \"allow\"\nrisk = \"high\"\n" +
+				"require_explicit = true\nrequire_lease = true\n\n" +
+				"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"look\"\n"
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if tc.wantErr && err == nil {
+				t.Fatalf("ceiling %q should be rejected", tc.ceiling)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ceiling %q should load: %v", tc.ceiling, err)
+			}
+		})
+	}
+}
+
+// The high-risk require_explicit/require_lease invariant must hold for any
+// profile name, and must also apply when capabilities are declared through the
+// legacy claims field. Keying validation on the raw capabilities slice let a
+// claims-only profile skip the check entirely.
+func TestValidateRequiresLeaseForHighRiskCustomName(t *testing.T) {
+	cases := []struct {
+		name    string
+		field   string // capabilities or claims
+		flags   string
+		wantErr bool
+	}{
+		{"capabilities without flags", "capabilities", "", true},
+		{"claims without flags", "claims", "", true},
+		{"capabilities explicit only", "capabilities", "require_explicit = true\n", true},
+		{"claims explicit only", "claims", "require_explicit = true\n", true},
+		{"capabilities with both flags", "capabilities", "require_explicit = true\nrequire_lease = true\n", false},
+		{"claims with both flags", "claims", "require_explicit = true\nrequire_lease = true\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+				"mesh_port = 7778\nmcp_port = 7777\n\n" +
+				"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+				"[profiles.my-dev]\nrunner = \"claude-code\"\n" +
+				tc.field + " = [\"read_files\", \"edit_repo\"]\n" +
+				"writes = \"repo_only\"\nshell = \"allow\"\n" + tc.flags + "\n" +
+				"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"my-dev\"\n"
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if tc.wantErr && err == nil {
+				t.Fatal("high-risk profile without both flags should be rejected")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("high-risk profile with both flags should load: %v", err)
+			}
+		})
+	}
+}
+
 // writeRoleConfig writes a minimal valid config with the given role (omitted when
 // empty) and returns its path.
 func writeRoleConfig(t *testing.T, role string) string {

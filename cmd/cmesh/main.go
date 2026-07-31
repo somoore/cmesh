@@ -582,7 +582,18 @@ func doctorProfileChecks(cfg *config.Config, profileName string) []doctor.Check 
 			doctor.Check{Name: "risk_high.require_lease", OK: prof.RequireLease, Detail: fmt.Sprint(prof.RequireLease)},
 		)
 	}
-	if err := profiledefs.ValidateSemantics(profileName, prof.Runner, caps, prof.Writes, prof.Shell, prof.Network, prof.GitPush, prof.RequireExplicit, prof.EnforcementConfidence); err != nil {
+	if err := profiledefs.ValidateSemantics(profiledefs.Semantics{
+		Name:                  profileName,
+		Runner:                prof.Runner,
+		Capabilities:          caps,
+		Writes:                prof.Writes,
+		Shell:                 prof.Shell,
+		Network:               prof.Network,
+		GitPush:               prof.GitPush,
+		RequireExplicit:       prof.RequireExplicit,
+		RequireLease:          prof.RequireLease,
+		EnforcementConfidence: prof.EnforcementConfidence,
+	}); err != nil {
 		checks = append(checks, doctor.Check{Name: "profile.semantics", OK: false, Err: err.Error()})
 	} else {
 		checks = append(checks, doctor.Check{Name: "profile.semantics", OK: true, Detail: "valid"})
@@ -2269,6 +2280,7 @@ func cmdProfile(args []string) error {
 		network := fs.Bool("network", false, "network access")
 		gitPush := fs.Bool("git-push", false, "git push capability is enabled")
 		requireExplicit := fs.Bool("require-explicit", false, "profile requires explicit selection")
+		requireLease := fs.Bool("require-lease", false, "profile requires a worker-issued lease")
 		confidence := fs.String("confidence", "", "enforcement confidence")
 		caps := multiFlag{}
 		fs.Var(&caps, "cap", "capability; repeatable")
@@ -2278,7 +2290,18 @@ func cmdProfile(args []string) error {
 		if *runnerName == "" {
 			return fmt.Errorf("--runner is required")
 		}
-		if err := profiledefs.ValidateSemantics(*name, *runnerName, profiledefs.NormalizeCapabilities(caps, nil), *writes, *shellMode, *network, *gitPush, *requireExplicit, *confidence); err != nil {
+		if err := profiledefs.ValidateSemantics(profiledefs.Semantics{
+			Name:                  *name,
+			Runner:                *runnerName,
+			Capabilities:          profiledefs.NormalizeCapabilities(caps, nil),
+			Writes:                *writes,
+			Shell:                 *shellMode,
+			Network:               *network,
+			GitPush:               *gitPush,
+			RequireExplicit:       *requireExplicit,
+			RequireLease:          *requireLease,
+			EnforcementConfidence: *confidence,
+		}); err != nil {
 			return err
 		}
 		fmt.Println("valid")

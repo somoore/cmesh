@@ -37,7 +37,7 @@ func Generate(name string, opts GenerateOptions) (Template, error) {
 		}
 		tmpl.ShellPolicy.AllowedCommands = map[string][]string{osName: append([]string(nil), tmpl.ShellPolicy.AllowedCommands[osName]...)}
 	}
-	if err := ValidateSemantics(tmpl.Name, tmpl.Runner, tmpl.Capabilities, tmpl.Writes, tmpl.Shell, tmpl.Network, tmpl.GitPush, tmpl.RequireExplicit, tmpl.EnforcementConfidence); err != nil {
+	if err := ValidateSemantics(semanticsForTemplate(tmpl, tmpl.Runner)); err != nil {
 		return Template{}, err
 	}
 	return tmpl, nil

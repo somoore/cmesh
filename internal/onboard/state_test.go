@@ -484,7 +484,7 @@ func writeBaseConfig(t *testing.T) string {
 	body := "[node]\nid = \"node-a\"\nname = \"node-a\"\nmesh_port = 7778\nmcp_port = 7777\n\n" +
 		"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
 		"[policy.outbound]\nallowed_peers = []\ndenied_profiles = [\"network\"]\nallow_subdelegation = false\n\n" +
-		"[profiles.dev]\nrunner = \"claude-code\"\nclaims = [\"read_files\", \"edit_repo\", \"execute_repo_commands\"]\nbare = false\nnetwork = false\ngit_push = false\nmax_runtime = \"2h\"\n\n" +
+		"[profiles.dev]\nrunner = \"claude-code\"\nclaims = [\"read_files\", \"edit_repo\", \"execute_repo_commands\"]\nbare = false\nnetwork = false\ngit_push = false\nrequire_explicit = true\nrequire_lease = true\nmax_runtime = \"2h\"\n\n" +
 		"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"dev\"\nconcurrency = 1\n\n" +
 		"[gateway]\nhost_token = \"existing-token\"\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

@@ -671,13 +671,16 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	decision := s.Policy.CheckInbound(intent)
 	effectiveCWD := firstNonEmpty(decision.NormalizedCWD, req.CWD)
 	rec := task.Record{
-		ID:               req.TaskID,
-		OriginNodeID:     firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID, identity.NodeID),
-		OriginSessionID:  firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
-		WorkerNodeID:     s.Config.Node.ID,
-		State:            task.StateQueued,
-		CWD:              effectiveCWD,
-		Runner:           firstNonEmpty(req.Runner, runnerFromProfile(s.Config, req.Profile)),
+		ID:              req.TaskID,
+		OriginNodeID:    firstNonEmpty(req.Provenance.OriginNodeID, req.OriginNodeID, identity.NodeID),
+		OriginSessionID: firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
+		WorkerNodeID:    s.Config.Node.ID,
+		State:           task.StateQueued,
+		CWD:             effectiveCWD,
+		// Prefer the runner of the profile policy actually granted. A profile
+		// ceiling can remap the effective profile, so resolving from req.Profile
+		// would run a runner that belongs to a profile the worker did not enforce.
+		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(s.Config, req.Profile)),
 		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
