@@ -71,6 +71,7 @@ From there the cmesh MCP wizard drives everything — detecting Tailscale and pe
 | [Delegation guidance](docs/delegation-guidance.md) | Writing good tasks and reading results |
 | [Runner manifests](docs/runner-manifests.md) | How runners declare capabilities |
 | [Tailscale grants](docs/tailscale-grants.md) | Restricting mesh reachability |
+| [Teams plan](docs/teams-plan.md) | How cmesh gets to multi-agent teams, and the model behind it |
 | [Roadmap](ROADMAP.md) | Planned hardening and intentional non-goals |
 | [Contributing](CONTRIBUTING.md) | Local checks and contribution expectations |
 | [Release](docs/release.md) | Release process |
