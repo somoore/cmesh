@@ -1965,7 +1965,9 @@ func (g *Gateway) defaultProfile() string {
 			return profile
 		}
 	}
-	return "dev"
+	// Match the policy engine's fallback for an unspecified profile. Naming the
+	// legacy high-risk "dev" here would disagree with what the worker enforces.
+	return profiledefs.Query
 }
 
 func contains(values []string, needle string) bool {
@@ -2371,7 +2373,7 @@ func mcpTools() []map[string]any {
 			"description": "Register the local cmesh MCP gateway with a local harness. Requires confirmed=true before changing anything.",
 			"inputSchema": objectSchema(map[string]any{
 				"confirmed": map[string]any{"type": "boolean"},
-				"harness":   stringSchema("Harness to register, currently claude-code or manual."),
+				"harness":   stringSchema("Harness to register: claude-code (the default when omitted) or codex. Any other value returns manual instructions instead of registering."),
 			}, nil),
 		},
 		{

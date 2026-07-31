@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -681,7 +682,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		// ceiling can remap the effective profile, so resolving from req.Profile
 		// would run a runner that belongs to a profile the worker did not enforce.
 		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(s.Config, req.Profile)),
-		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
+		ProfileRequested: firstNonEmpty(req.Profile, defaultRequestedProfile()),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
 		AllowDirty:       req.AllowDirty,
@@ -1926,20 +1927,31 @@ func runnerFromProfile(cfg *config.Config, profileName string) string {
 			return profile.Runner
 		}
 	}
-	if profile, ok := cfg.Profiles["dev"]; ok {
+	// Fall back to the least-authority profile, matching the policy engine, then
+	// to any configured profile. This is only a last resort: the dispatch path
+	// prefers Decision.EffectiveRunner, which belongs to the profile policy
+	// actually granted.
+	if profile, ok := cfg.Profiles[profiledefs.Query]; ok {
 		return profile.Runner
 	}
-	for _, profile := range cfg.Profiles {
-		return profile.Runner
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		return cfg.Profiles[name].Runner
 	}
 	return ""
 }
 
-func defaultProfileForTask(kind string) string {
-	if kind == "query" {
-		return profiledefs.Query
-	}
-	return "dev"
+// defaultRequestedProfile names the profile a request without one is recorded as
+// having asked for. It must match what policy actually resolves for an
+// unspecified profile (see checkProfile), or the task record would claim the
+// caller requested one profile while the worker enforced another -- and the git
+// branch slug is built from ProfileRequested.
+func defaultRequestedProfile() string {
+	return profiledefs.Query
 }
 
 func queryCapability(req schema.CreateTaskRequest) string {

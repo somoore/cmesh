@@ -159,6 +159,11 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 	}
 	profile, ok := cfg.Profiles[requested]
 	if !ok {
+		// When the caller named no profile, say so rather than reporting a
+		// profile they never asked for as missing.
+		if !explicit {
+			return denied("profile_unavailable", fmt.Sprintf("no profile was requested and the fallback profile %q is not configured on this node; name a profile explicitly or add %[1]q", requested), requested, "")
+		}
 		return denied("profile_unavailable", fmt.Sprintf("profile %q is not configured", requested), requested, "")
 	}
 	if intent.Runner != "" && profile.Runner != intent.Runner {

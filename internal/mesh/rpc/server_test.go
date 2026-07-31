@@ -1374,3 +1374,38 @@ func (f fakeIdentity) WhoIs(context.Context, string) (tsid.Identity, error) {
 func (fakeIdentity) Self(context.Context) (tsid.Identity, error) {
 	return tsid.Identity{NodeID: "node-worker", NodeName: "homelab-vm"}, nil
 }
+
+// The profile a task record says was requested must match what policy resolves
+// for an unspecified request. If they diverge, the record claims the caller
+// asked for one profile while the worker enforced another -- and prepareGit
+// builds the branch slug from ProfileRequested, so the divergence reaches the
+// git history. This previously recorded the legacy high-risk "dev".
+func TestDefaultRequestedProfileMatchesPolicyFallback(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		Node: config.NodeConfig{ID: "homelab-vm", Name: "homelab-vm"},
+		Policy: config.PolicyConfig{
+			AllowedPeers: []string{"mac-studio"},
+			AllowedCWDs:  []string{filepath.Join(root, "**")},
+			HopLimit:     2,
+		},
+		Profiles: map[string]config.ProfileConfig{
+			profiledefs.Query: {
+				Runner:       profiledefs.RunnerProbe,
+				Capabilities: []string{profiledefs.CapDiskInfo},
+				Writes:       profiledefs.WritesDeny,
+				Shell:        profiledefs.ShellDeny,
+			},
+		},
+		Runners: map[string]config.RunnerConfig{
+			profiledefs.RunnerProbe: {Command: []string{"builtin"}, DefaultProfile: profiledefs.Query},
+		},
+	}
+	decision := policy.New(cfg).CheckInbound(policy.TaskIntent{PeerName: "mac-studio", CWD: root})
+	if !decision.Allowed {
+		t.Fatalf("expected allowed decision: %+v", decision)
+	}
+	if got := defaultRequestedProfile(); got != decision.EffectiveProfile {
+		t.Fatalf("defaultRequestedProfile() = %q but policy resolved %q", got, decision.EffectiveProfile)
+	}
+}
