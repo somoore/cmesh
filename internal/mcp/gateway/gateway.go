@@ -533,6 +533,18 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		return g.transcriptCall(ctx, req.TaskID)
+	case "task_events":
+		var req struct {
+			TaskID         string `json:"task_id"`
+			After          int64  `json:"after,omitempty"`
+			Limit          int    `json:"limit,omitempty"`
+			Wait           bool   `json:"wait,omitempty"`
+			TimeoutSeconds int    `json:"timeout_s,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.eventsCall(ctx, req.TaskID, req.After, req.Limit, req.Wait, req.TimeoutSeconds)
 	case "task_artifact":
 		var req struct {
 			TaskID string `json:"task_id"`
@@ -1641,6 +1653,16 @@ func (g *Gateway) resultCall(ctx context.Context, taskID string) (ToolResponse, 
 		})
 }
 
+// eventsCall fetches a delegated task's recorded progress. It goes through
+// fetchOwnedTask like every other task read, so a per-task token sees only its
+// own delegation's events.
+func (g *Gateway) eventsCall(ctx context.Context, taskID string, after int64, limit int, wait bool, timeoutSeconds int) (ToolResponse, error) {
+	return g.fetchOwnedTask(ctx, taskID, task.ErrorPeerUnreachable,
+		func(client *rpc.Client, remoteTaskID string) (any, error) {
+			return client.TaskEvents(ctx, remoteTaskID, after, limit, wait, timeoutSeconds)
+		})
+}
+
 func (g *Gateway) transcriptCall(ctx context.Context, taskID string) (ToolResponse, error) {
 	return g.fetchOwnedTask(ctx, taskID, task.ErrorTranscriptUnavailable,
 		func(client *rpc.Client, remoteTaskID string) (any, error) {
@@ -2474,6 +2496,17 @@ func mcpTools() []map[string]any {
 			"name":        "task_transcript",
 			"description": "Fetch bounded stdout/stderr transcript logs from the worker for a delegated task.",
 			"inputSchema": objectSchema(map[string]any{"task_id": stringSchema("Origin-local task id.")}, []string{"task_id"}),
+		},
+		{
+			"name":        "task_events",
+			"description": "Fetch a delegated task's recorded progress events, oldest first. Poll incrementally: pass the next_seq from the previous response as after to get only what is new. These are events this mesh recorded (state transitions, policy decisions, dispatch), not worker-authored prose. Use it to report what a task is doing while it runs; use task_result for the outcome.",
+			"inputSchema": objectSchema(map[string]any{
+				"task_id":   stringSchema("Origin-local task id."),
+				"after":     map[string]any{"type": "integer", "description": "Return only events with a seq greater than this. Use next_seq from the previous response; omit or 0 to start from the beginning."},
+				"limit":     map[string]any{"type": "integer", "description": "Maximum events to return (default 100, max 500). has_more reports whether the page was truncated."},
+				"wait":      map[string]any{"type": "boolean", "description": "Long-poll until an event newer than after exists, the task reaches a terminal state, or the timeout expires."},
+				"timeout_s": map[string]any{"type": "integer", "description": "Long-poll timeout in seconds when wait is true. Default 30."},
+			}, []string{"task_id"}),
 		},
 		{
 			"name":        "task_artifact",

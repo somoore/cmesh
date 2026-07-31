@@ -87,6 +87,33 @@ var migrations = []migration{
 			`ALTER TABLE peer_tasks ADD COLUMN origin_session_id TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		version: 3,
+		statements: []string{
+			// seq gives task_events a stable, monotonic cursor for incremental
+			// reads. The existing (task_id, timestamp) index cannot serve that:
+			// timestamps are not unique, so a poller resuming from one could
+			// replay or skip events recorded in the same instant.
+			//
+			// SQLite cannot add an AUTOINCREMENT column to an existing table, so
+			// seq is assigned explicitly on insert from a counter table. Existing
+			// rows are backfilled in timestamp then rowid order, which preserves
+			// the order they were written in.
+			`ALTER TABLE task_events ADD COLUMN seq INTEGER NOT NULL DEFAULT 0`,
+			`CREATE TABLE IF NOT EXISTS task_event_seq (
+				id INTEGER PRIMARY KEY CHECK (id = 0),
+				next_seq INTEGER NOT NULL
+			)`,
+			`UPDATE task_events SET seq = (
+				SELECT COUNT(*) FROM task_events AS earlier
+				WHERE earlier.timestamp < task_events.timestamp
+				   OR (earlier.timestamp = task_events.timestamp AND earlier.rowid <= task_events.rowid)
+			)`,
+			`INSERT OR REPLACE INTO task_event_seq(id, next_seq)
+				VALUES (0, (SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events))`,
+			`CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq)`,
+		},
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

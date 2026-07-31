@@ -38,7 +38,7 @@ The security posture is the team feature, not a limitation on it.
 | Primitive | Verb | Status |
 | --- | --- | --- |
 | Delegation | `delegate` | shipped |
-| Progress events | `task_events` | **planned** (Phase 1) |
+| Progress events | `task_events` | shipped (Phase 1) |
 | Task channel | `task_post` / `task_ask` / `task_send` | **planned** (Phase 2) |
 | Cross-peer handoff | `handoff` | **planned** (Phase 3) |
 | Workstreams | `workstream` / `workstream_status` | **planned** (Phase 4) |
@@ -69,7 +69,7 @@ the next `task_ask` checkpoint, which is genuinely useful on its own.
 
 Each phase ships something usable and depends only on earlier phases.
 
-### Phase 0 — Coherence cleanup
+### Phase 0 — Coherence cleanup *(shipped)*
 
 Shrink the surface before adding to it.
 
@@ -91,17 +91,24 @@ Shrink the surface before adding to it.
   rungs on the ladder. `dev` / `readonly` / `interactive` are compatibility
   aliases, documented as such in exactly one place.
 
-### Phase 1 — Progress events
+### Phase 1 — Progress events *(shipped)*
 
 Foundation for the channel. No new trust surface: this exposes a table that is
 already written on every task transition.
 
-- Store: `ListTaskEvents(taskID, afterSeq, limit)` with stable ordering (a `seq`
-  column, migration v3).
-- Mesh RPC: `GET /v1/tasks/{id}/events?after=&wait=`, long-polling through the
-  existing wait machinery, ownership-scoped exactly like status.
+- Store: `ListTaskEvents(taskID, afterSeq, limit)` and `LatestTaskEventSeq`,
+  ordered by a monotonic `seq` column (migration v3). `seq` is allocated from a
+  counter table inside the same transaction as the insert, so concurrent
+  recorders cannot share a cursor value; existing rows are backfilled in write
+  order. Timestamps could not serve as the cursor — several events can share one
+  instant, so a resuming poller would replay or skip.
+- Mesh RPC: `GET /v1/tasks/{id}/events?after=&limit=&wait=`, long-polling
+  through the existing wait machinery, and gated by `requireSchema` plus the
+  shared ownership check in its own right rather than relying on the caller.
+  Waiting stops early once the task is terminal, since nothing further will be
+  recorded.
 - Gateway: `task_events` tool routed through `fetchOwnedTask`, so per-task token
-  scoping applies automatically.
+  scoping applies automatically (32 tools).
 
 A conductor can then narrate real progress — "Linux tests running, Windows build
 queued, review done" — instead of polling terminal state.

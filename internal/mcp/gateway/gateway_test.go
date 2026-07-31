@@ -219,6 +219,7 @@ func TestTaskTokenCannotReachAnotherSessionsTask(t *testing.T) {
 		{"artifact", func(c context.Context, id string) (ToolResponse, error) { return g.artifactCall(c, id, "git-bundle") }, true},
 		{"cancel", func(c context.Context, id string) (ToolResponse, error) { return g.cancelCall(c, id, "stop") }, true},
 		{"status", func(c context.Context, id string) (ToolResponse, error) { return g.statusCall(c, id, false, 0) }, true},
+		{"events", func(c context.Context, id string) (ToolResponse, error) { return g.eventsCall(c, id, 0, 0, false, 0) }, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

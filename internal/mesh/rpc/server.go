@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{task_id}", s.handleTaskStatus)
+	mux.HandleFunc("GET /v1/tasks/{task_id}/events", s.handleTaskEvents)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/result", s.handleTaskResult)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/transcript", s.handleTaskTranscript)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/artifacts/{kind}", s.handleTaskArtifact)
@@ -1034,6 +1035,122 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		LastActivity:      string(rec.State),
 		TerminalErrorCode: rec.TerminalErrorCode,
 	})
+}
+
+// handleTaskEvents serves a task's recorded progress incrementally. A caller
+// passes the highest seq it has seen as `after` and receives only later events,
+// optionally long-polling until there is something new.
+//
+// This is evidence the daemon recorded, not worker-authored prose, but it is
+// still task-scoped: it is gated by the same schema check and ownership rule as
+// every other task read, in its own right rather than relying on any caller.
+func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	after := int64(0)
+	if value := strings.TrimSpace(r.URL.Query().Get("after")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || parsed < 0 {
+			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "after must be a non-negative integer")
+			return
+		}
+		after = parsed
+	}
+	limit := 0
+	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	if r.URL.Query().Get("wait") == "true" {
+		timeout := 30 * time.Second
+		if value := r.URL.Query().Get("timeout_s"); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				timeout = time.Duration(parsed) * time.Second
+			}
+		}
+		if !s.waitForTaskEvents(r, taskID, after, timeout) {
+			return
+		}
+	}
+	s.writeTaskEvents(w, r, taskID, after, limit)
+}
+
+// waitForTaskEvents blocks until the task has an event newer than after, the
+// task reaches a terminal state, or the timeout expires. It reports false only
+// when the client disconnected, in which case no response is owed.
+func (s *Server) waitForTaskEvents(r *http.Request, taskID string, after int64, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+			latest, err := s.Store.LatestTaskEventSeq(r.Context(), taskID)
+			if err != nil {
+				return true
+			}
+			if latest > after {
+				return true
+			}
+			// A terminal task records nothing further, so waiting past it would
+			// burn the full timeout for no possible new event.
+			if rec, err := s.Store.GetTask(r.Context(), taskID); err == nil && rec.State.Terminal() {
+				return true
+			}
+		case <-r.Context().Done():
+			return false
+		}
+	}
+}
+
+func (s *Server) writeTaskEvents(w http.ResponseWriter, r *http.Request, taskID string, after int64, limit int) {
+	effectiveLimit := limit
+	if effectiveLimit <= 0 {
+		effectiveLimit = store.DefaultTaskEventLimit
+	}
+	if effectiveLimit > store.MaxTaskEventLimit {
+		effectiveLimit = store.MaxTaskEventLimit
+	}
+	events, err := s.Store.ListTaskEvents(r.Context(), taskID, after, effectiveLimit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	out := schema.TaskEventsResponse{TaskID: taskID, Events: make([]schema.TaskEvent, 0, len(events)), NextSeq: after}
+	for _, event := range events {
+		out.Events = append(out.Events, schema.TaskEvent{
+			Seq:       event.Seq,
+			EventID:   event.EventID,
+			EventType: event.EventType,
+			TaskID:    event.TaskID,
+			NodeID:    event.NodeID,
+			Timestamp: event.Timestamp,
+			Payload:   event.Payload,
+		})
+		out.NextSeq = event.Seq
+	}
+	out.HasMore = len(events) == effectiveLimit
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleTaskTranscript(w http.ResponseWriter, r *http.Request) {

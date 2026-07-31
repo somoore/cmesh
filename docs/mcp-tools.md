@@ -67,6 +67,7 @@ Task operations are owner-scoped: the origin may read its tasks, and an intermed
 | `list_tasks` | List recent local and delegated tasks so a fresh session can rediscover task ids. Param: `limit` (optional). |
 | `task_status` | Poll delegated task state, optionally long-polling until terminal or timeout. Params: `task_id` (required), `wait`, `timeout_s`. |
 | `task_result` | Fetch the bounded result envelope for a terminal task. Param: `task_id` (required). |
+| `task_events` | Fetch a task's recorded progress events, oldest first, so you can report what a running task is doing instead of waiting for the outcome. Params: `task_id` (required), `after`, `limit`, `wait`, `timeout_s`. Poll incrementally: pass the previous response's `next_seq` as `after` to get only what is new; `has_more` reports a truncated page. These are events **this mesh recorded** — state transitions, policy decisions, dispatch — not worker-authored prose, so unlike `worker_summary_untrusted` they are evidence. |
 | `task_transcript` | Fetch bounded stdout/stderr transcript logs from the worker. Param: `task_id` (required). |
 | `task_artifact` | Fetch a worker artifact (currently `git-bundle`) and save it under the local cmesh data directory. Params: `task_id` (required), `kind`. |
 | `cancel` | Cancel a delegated task. Params: `task_id` (required), `reason`. |

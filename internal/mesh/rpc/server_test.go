@@ -807,6 +807,14 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("artifact code = %d, body = %s", artifactRes.Code, artifactRes.Body.String())
 	}
 
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/events", nil)
+	eventsReq.RemoteAddr = "100.64.0.3:12345"
+	eventsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(eventsRes, eventsReq)
+	if eventsRes.Code != http.StatusForbidden {
+		t.Fatalf("events code = %d, body = %s", eventsRes.Code, eventsRes.Body.String())
+	}
+
 	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/cancel", nil)
 	cancelReq.RemoteAddr = "100.64.0.3:12345"
 	cancelRes := httptest.NewRecorder()
@@ -1407,5 +1415,86 @@ func TestDefaultRequestedProfileMatchesPolicyFallback(t *testing.T) {
 	}
 	if got := defaultRequestedProfile(); got != decision.EffectiveProfile {
 		t.Fatalf("defaultRequestedProfile() = %q but policy resolved %q", got, decision.EffectiveProfile)
+	}
+}
+
+// The events endpoint serves recorded progress incrementally to the task's
+// owner, and enforces the schema-version header in its own right rather than
+// relying on any caller having checked it.
+func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+
+	createBody := `{
+		"task_id":"tsk_events",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	waitForTerminalTask(t, server, "tsk_events")
+
+	get := func(path string, schemaVersion string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "100.64.0.1:12345"
+		if schemaVersion != "" {
+			req.Header.Set("Cmesh-Schema-Version", schemaVersion)
+		}
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		return res
+	}
+
+	res := get("/v1/tasks/tsk_events/events", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("events code = %d, body = %s", res.Code, res.Body.String())
+	}
+	var first schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(first.Events) == 0 {
+		t.Fatal("expected the dispatch event to be recorded")
+	}
+	if first.NextSeq != first.Events[len(first.Events)-1].Seq {
+		t.Fatalf("next_seq = %d, want the last event's seq %d", first.NextSeq, first.Events[len(first.Events)-1].Seq)
+	}
+	for _, event := range first.Events {
+		if event.TaskID != "tsk_events" {
+			t.Fatalf("event from another task leaked: %+v", event)
+		}
+	}
+
+	// Resuming from the cursor returns nothing further for a terminal task.
+	res = get("/v1/tasks/tsk_events/events?after="+strconv.FormatInt(first.NextSeq, 10), "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("resumed events code = %d, body = %s", res.Code, res.Body.String())
+	}
+	var resumed schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resumed events: %v", err)
+	}
+	if len(resumed.Events) != 0 {
+		t.Fatalf("resuming from the latest cursor returned %d events, want 0", len(resumed.Events))
+	}
+
+	// A mismatched schema version is rejected here, not merely upstream.
+	if res := get("/v1/tasks/tsk_events/events", "v999"); res.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched schema code = %d, want 400: %s", res.Code, res.Body.String())
+	}
+
+	// A malformed cursor is a clear error rather than a silent reset to zero.
+	if res := get("/v1/tasks/tsk_events/events?after=abc", ""); res.Code != http.StatusBadRequest {
+		t.Fatalf("bad cursor code = %d, want 400: %s", res.Code, res.Body.String())
 	}
 }

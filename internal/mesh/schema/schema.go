@@ -94,6 +94,29 @@ type CreateTaskResponse struct {
 	Error            *Error     `json:"error,omitempty"`
 }
 
+// TaskEvent is one recorded step in a task's life. Payload carries the audit
+// event as recorded; it is evidence written by this daemon, not worker prose.
+type TaskEvent struct {
+	Seq       int64     `json:"seq"`
+	EventID   string    `json:"event_id"`
+	EventType string    `json:"event_type"`
+	TaskID    string    `json:"task_id,omitempty"`
+	NodeID    string    `json:"node_id,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	Payload   any       `json:"payload,omitempty"`
+}
+
+// TaskEventsResponse is an incremental page of task events. NextSeq is the
+// cursor to pass back as `after`; HasMore reports that the page was truncated
+// by the limit and another read will return more immediately.
+type TaskEventsResponse struct {
+	TaskID  string      `json:"task_id"`
+	Events  []TaskEvent `json:"events"`
+	NextSeq int64       `json:"next_seq"`
+	HasMore bool        `json:"has_more"`
+	Error   *Error      `json:"error,omitempty"`
+}
+
 type TaskStatusResponse struct {
 	TaskID            string         `json:"task_id"`
 	State             task.State     `json:"state"`

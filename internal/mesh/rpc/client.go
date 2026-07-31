@@ -80,6 +80,33 @@ func (c *Client) TaskStatus(ctx context.Context, taskID string, wait bool, timeo
 	return out, c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
+// TaskEvents fetches a task's recorded progress after the given cursor. Pass
+// wait to long-poll until there is something newer than after.
+func (c *Client) TaskEvents(ctx context.Context, taskID string, after int64, limit int, wait bool, timeoutSeconds int) (schema.TaskEventsResponse, error) {
+	var out schema.TaskEventsResponse
+	q := url.Values{}
+	if after > 0 {
+		q.Set("after", strconv.FormatInt(after, 10))
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if wait {
+		q.Set("wait", "true")
+		if timeoutSeconds > 0 {
+			q.Set("timeout_s", strconv.Itoa(timeoutSeconds))
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds+10)*time.Second)
+			defer cancel()
+		}
+	}
+	path := "/v1/tasks/" + url.PathEscape(taskID) + "/events"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return out, c.do(ctx, http.MethodGet, path, nil, &out)
+}
+
 func (c *Client) TaskResult(ctx context.Context, taskID string) (schema.TaskResultResponse, error) {
 	var out schema.TaskResultResponse
 	return out, c.do(ctx, http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/result", nil, &out)

@@ -100,7 +100,7 @@ Once `cmesh up` is running:
     - commit with cmesh metadata footers after runner execution.
 12. The runner adapter launches the local worker process with captured logs. The task prompt is supplied on stdin by default; argv prompt delivery is not the runner contract.
 13. The worker stores a bounded canonical result envelope. `command_output` contains the redacted command, raw stdout, raw stderr, exit code, duration, and log refs. `worker_summary_untrusted` is presentation-only text.
-14. The origin agent polls `task_status` and fetches `task_result`.
+14. The origin agent polls `task_status` and fetches `task_result`. While the task runs it can also poll `task_events` for recorded progress — state transitions, policy decisions, dispatch — reading incrementally with a `seq` cursor rather than refetching history. Those events are written by the daemon, so unlike the worker's summary they are evidence rather than claims.
 
 Task status, result, transcript, artifact, cancel, and list operations are task-owner scoped. The original origin may read its tasks, and an intermediate worker may read the downstream task it directly created during subdelegation; unrelated peers cannot enumerate or operate on those tasks.
 
