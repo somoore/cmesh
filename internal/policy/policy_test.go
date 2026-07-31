@@ -646,6 +646,33 @@ func TestCeilingRejectsUnconfiguredRunner(t *testing.T) {
 	}
 }
 
+// The daemon builds one policy engine and shares it with both the mesh RPC
+// server and the local gateway. A config reload must therefore apply to the
+// engine in place: replacing only the gateway's pointer would leave the mesh
+// server — which enforces inbound peer policy — evaluating the old config, so a
+// peer repair would report success while the daemon kept rejecting the peer.
+func TestReloadAppliesToSharedEngine(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	engine := New(cfg)
+
+	// A second holder of the same engine, standing in for the mesh RPC server.
+	shared := engine
+
+	intent := TaskIntent{PeerName: "new-peer", CWD: root, Profile: "dev"}
+	if decision := shared.CheckInbound(intent); decision.Allowed {
+		t.Fatalf("peer should start unauthorized: %+v", decision)
+	}
+
+	repaired := testConfig(root)
+	repaired.Policy.AllowedPeers = []string{"mac-studio", "new-peer"}
+	engine.Reload(repaired)
+
+	if decision := shared.CheckInbound(intent); !decision.Allowed {
+		t.Fatalf("shared engine should see reloaded policy: %+v", decision)
+	}
+}
+
 func testConfig(root string) *config.Config {
 	return &config.Config{
 		Node:    config.NodeConfig{ID: "homelab-vm", Name: "homelab-vm", MeshPort: 7778, MCPPort: 7777},

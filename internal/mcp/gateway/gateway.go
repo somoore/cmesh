@@ -1549,7 +1549,7 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 		msg := fmt.Sprintf("Found %d configured peer(s): %d fixable, %d ok.", len(repairs), fixable, onboard.CountRepairs(repairs, onboard.RepairOK))
 		next := "Nothing to fix — all reachable peer entries already match their whois identity."
 		if fixable > 0 {
-			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries. Note: this daemon must be restarted afterward for the change to take effect (it loads config only at startup). Conflicts and unreachable peers are left unchanged."
+			next = "Call repair_peers again with confirmed=true to rewrite the fixable entries. The running daemon reloads the repaired policy immediately; the response reports whether that succeeded. Conflicts and unreachable peers are left unchanged."
 		}
 		return ToolResponse{OK: true, Result: map[string]any{
 			"requires_confirmation": fixable > 0,
@@ -1563,15 +1563,26 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
-	return ToolResponse{OK: true, Result: map[string]any{
+	payload := map[string]any{
 		"repaired": fixedNames,
 		"repairs":  repairs,
 		"message":  fmt.Sprintf("Rewrote %d peer entry(ies) in the config: %s.", len(fixedNames), strings.Join(fixedNames, ", ")),
-		// The live daemon still holds the OLD policy in memory; be explicit so the user
-		// isn't told the mesh is fixed when the running process hasn't reloaded.
-		"requires_daemon_restart": len(fixedNames) > 0,
-		"next_step":               "Restart the cmesh daemon so it loads the repaired config (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm.",
-	}}, nil
+	}
+	// Apply the repaired config to the shared policy engine so the running mesh
+	// server enforces the corrected peer trust immediately. Report the reload
+	// outcome honestly: claiming the mesh is fixed while the daemon still holds
+	// the old policy is exactly the false success this tool must avoid.
+	if err := g.reloadConfig(); err != nil {
+		payload["active_immediately"] = false
+		payload["requires_daemon_restart"] = true
+		payload["reload_error"] = err.Error()
+		payload["next_step"] = "The repaired config could not be reloaded into the running daemon. Restart it (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm."
+		return ToolResponse{OK: true, Result: payload}, nil
+	}
+	payload["active_immediately"] = true
+	payload["requires_daemon_restart"] = false
+	payload["next_step"] = "The running daemon now enforces the repaired peer trust. Run a bidirectional smoke to confirm."
+	return ToolResponse{OK: true, Result: payload}, nil
 }
 
 func (g *Gateway) testPeerCall(ctx context.Context, peer, cwd, profile string, timeoutSeconds int) (ToolResponse, error) {
@@ -2141,13 +2152,25 @@ func (g *Gateway) configPath() string {
 	return firstNonEmpty(g.ConfigPath, config.DefaultPath())
 }
 
+// reloadConfig re-reads config from disk and applies it to this gateway and to
+// the policy engine.
+//
+// The engine is reloaded in place rather than replaced: the daemon builds one
+// engine and shares it with the mesh RPC server, which is what enforces inbound
+// peer policy. Assigning a fresh engine to g.Policy would leave the mesh server
+// evaluating the old config, so a peer repair would report success while the
+// daemon kept rejecting the peer.
 func (g *Gateway) reloadConfig() error {
 	cfg, err := config.Load(g.configPath())
 	if err != nil {
 		return err
 	}
 	g.Config = cfg
-	g.Policy = policy.New(cfg)
+	if g.Policy != nil {
+		g.Policy.Reload(cfg)
+	} else {
+		g.Policy = policy.New(cfg)
+	}
 	return nil
 }
 

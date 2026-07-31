@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"cmesh/internal/config"
 	profiledefs "cmesh/internal/profile"
@@ -52,7 +53,13 @@ type TaskIntent struct {
 	ProfileContextID string
 }
 
+// Engine evaluates inbound and outbound policy. Its config may be swapped at
+// runtime via Reload so that a repair which rewrites peer trust takes effect on
+// every surface sharing the engine — the mesh RPC server enforces inbound peer
+// policy, so a reload that only reached the local gateway would report success
+// while the daemon kept rejecting the peer.
 type Engine struct {
+	mu             sync.RWMutex
 	cfg            *config.Config
 	leaseValidator LeaseValidator
 }
@@ -65,21 +72,41 @@ func NewWithLeaseValidator(cfg *config.Config, validator LeaseValidator) *Engine
 	return &Engine{cfg: cfg, leaseValidator: validator}
 }
 
+// Reload swaps the engine's config in place. Callers holding this *Engine —
+// including a mesh RPC server started before the reload — evaluate subsequent
+// requests against the new config.
+func (e *Engine) Reload(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg = cfg
+}
+
+// config returns the current config under a read lock.
+func (e *Engine) config() *config.Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cfg
+}
+
 func (e *Engine) CheckInbound(intent TaskIntent) Decision {
-	if !matchesAny(peerIdentityCandidates(intent), e.cfg.Policy.AllowedPeers) {
+	cfg := e.config()
+	if !matchesAny(peerIdentityCandidates(intent), cfg.Policy.AllowedPeers) {
 		return denied("peer_unauthorized", "origin peer is not allowed by inbound policy", intent.Profile, "")
 	}
-	if intent.HopCount > e.cfg.Policy.HopLimit {
-		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, e.cfg.Policy.HopLimit), intent.Profile, "")
+	if intent.HopCount > cfg.Policy.HopLimit {
+		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	if contains(intent.Chain, e.cfg.Node.ID) || contains(intent.Chain, e.cfg.Node.Name) {
+	if contains(intent.Chain, cfg.Node.ID) || contains(intent.Chain, cfg.Node.Name) {
 		return denied("profile_denied", "delegation chain cycles back to this node", intent.Profile, "")
 	}
 	cwd, err := NormalizeCWD(intent.CWD)
 	if err != nil {
 		return denied("cwd_denied", err.Error(), intent.Profile, "")
 	}
-	if !pathAllowed(cwd, e.cfg.Policy.AllowedCWDs) {
+	if !pathAllowed(cwd, cfg.Policy.AllowedCWDs) {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
 	intent.CWD = cwd
@@ -87,7 +114,8 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 }
 
 func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
-	out := e.cfg.Policy.Outbound
+	cfg := e.config()
+	out := cfg.Policy.Outbound
 	if len(out.AllowedPeers) > 0 && !matchesAny(identityCandidates(intent), out.AllowedPeers) {
 		return denied("peer_unauthorized", "peer is not allowed by outbound policy", intent.Profile, "")
 	}
@@ -100,19 +128,20 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 	if intent.Subdelegation && !out.AllowSubdelegation {
 		return denied("profile_denied", "subdelegation is disabled by outbound policy", intent.Profile, "")
 	}
-	if intent.HopCount > e.cfg.Policy.HopLimit {
-		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, e.cfg.Policy.HopLimit), intent.Profile, "")
+	if intent.HopCount > cfg.Policy.HopLimit {
+		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
 	return e.checkProfile(intent, false)
 }
 
 func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
+	cfg := e.config()
 	requested := intent.Profile
 	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
 		if intent.Runner != "" {
-			for name, profile := range e.cfg.Profiles {
-				if profile.Runner == intent.Runner && e.cfg.Runners[profile.Runner].DefaultProfile == name {
+			for name, profile := range cfg.Profiles {
+				if profile.Runner == intent.Runner && cfg.Runners[profile.Runner].DefaultProfile == name {
 					requested = name
 					break
 				}
@@ -122,19 +151,19 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 			requested = "dev"
 		}
 	}
-	profile, ok := e.cfg.Profiles[requested]
+	profile, ok := cfg.Profiles[requested]
 	if !ok {
 		return denied("profile_unavailable", fmt.Sprintf("profile %q is not configured", requested), requested, "")
 	}
 	if intent.Runner != "" && profile.Runner != intent.Runner {
 		return denied("runner_unavailable", fmt.Sprintf("profile %q uses runner %q, not %q", requested, profile.Runner, intent.Runner), requested, "")
 	}
-	if _, ok := e.cfg.Runners[profile.Runner]; !ok {
+	if _, ok := cfg.Runners[profile.Runner]; !ok {
 		return denied("runner_unavailable", fmt.Sprintf("runner %q is not configured", profile.Runner), requested, "")
 	}
 	effective := requested
-	if ceiling, ok := e.cfg.Policy.ProfileCeilings[requested]; ok {
-		ceilingProfile, ok := e.cfg.Profiles[ceiling]
+	if ceiling, ok := cfg.Policy.ProfileCeilings[requested]; ok {
+		ceilingProfile, ok := cfg.Profiles[ceiling]
 		if !ok {
 			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is not configured", ceiling), requested, "")
 		}
@@ -150,7 +179,7 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 		if intent.Runner != "" && ceilingProfile.Runner != intent.Runner {
 			return denied("runner_unavailable", fmt.Sprintf("profile ceiling %q uses runner %q, not %q", ceiling, ceilingProfile.Runner, intent.Runner), requested, ceiling)
 		}
-		if _, ok := e.cfg.Runners[ceilingProfile.Runner]; !ok {
+		if _, ok := cfg.Runners[ceilingProfile.Runner]; !ok {
 			return denied("runner_unavailable", fmt.Sprintf("runner %q is not configured", ceilingProfile.Runner), requested, ceiling)
 		}
 		effective = ceiling

@@ -1707,8 +1707,18 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 			return "", "", nil, "", false, err
 		}
 	}
-	diffstat, _ = repo.DiffStat(ctx, prep.Base, head)
-	files, _ = repo.ChangedFiles(ctx, prep.Base, head)
+	// Diffstat and changed files are the evidence a reviewer reads instead of
+	// trusting the worker's prose, and the changed-file list decides whether a
+	// bundle is produced at all. Swallowing an error here would report a code
+	// change as having produced no diff and no artifact, so surface it.
+	diffstat, err = repo.DiffStat(ctx, prep.Base, head)
+	if err != nil {
+		return "", "", nil, "", false, fmt.Errorf("collect diffstat: %w", err)
+	}
+	files, err = repo.ChangedFiles(ctx, prep.Base, head)
+	if err != nil {
+		return "", "", nil, "", false, fmt.Errorf("collect changed files: %w", err)
+	}
 	if len(files) > 0 {
 		artifactDir := filepath.Join(dataDir, "artifacts")
 		if err := os.MkdirAll(artifactDir, 0o755); err != nil {
