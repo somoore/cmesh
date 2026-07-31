@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -20,6 +19,7 @@ import (
 
 	"cmesh/internal/audit"
 	"cmesh/internal/config"
+	"cmesh/internal/mcp/harnessreg"
 	"cmesh/internal/mcp/setupinstall"
 	"cmesh/internal/mesh/rpc"
 	"cmesh/internal/mesh/schema"
@@ -174,27 +174,9 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /", g.mcp)
 	mux.HandleFunc("POST /mcp", g.mcp)
 	mux.HandleFunc("GET /health", g.health)
-	mux.HandleFunc("POST /tools/task_catalog", g.taskCatalog)
-	mux.HandleFunc("POST /tools/list_peers", g.listPeers)
-	mux.HandleFunc("POST /tools/peer_info", g.peerInfo)
-	mux.HandleFunc("POST /tools/delegate", g.delegate)
-	mux.HandleFunc("POST /tools/query_peer", g.queryPeer)
-	mux.HandleFunc("POST /tools/inspect_peer", g.inspectPeer)
-	mux.HandleFunc("POST /tools/profile_guide", g.profileGuide)
-	mux.HandleFunc("POST /tools/profile_recommend", g.profileRecommend)
-	mux.HandleFunc("POST /tools/profile_generate", g.profileGenerate)
-	mux.HandleFunc("POST /tools/profile_validate", g.profileValidate)
-	mux.HandleFunc("POST /tools/profile_describe", g.profileDescribe)
-	mux.HandleFunc("POST /tools/profile_current", g.profileCurrent)
-	mux.HandleFunc("POST /tools/profile_configure", g.profileConfigure)
-	mux.HandleFunc("POST /tools/profile_use", g.profileUse)
-	mux.HandleFunc("POST /tools/profile_reset", g.profileReset)
-	mux.HandleFunc("POST /tools/list_tasks", g.listTasks)
-	mux.HandleFunc("POST /tools/task_status", g.taskStatus)
-	mux.HandleFunc("POST /tools/task_result", g.taskResult)
-	mux.HandleFunc("POST /tools/task_transcript", g.taskTranscript)
-	mux.HandleFunc("POST /tools/task_artifact", g.taskArtifact)
-	mux.HandleFunc("POST /tools/cancel", g.cancel)
+	// JSON-RPC on / and /mcp is the only tool path. A parallel REST surface
+	// covering a subset of the same tools was a second thing to keep hardened
+	// with no consumer, so it is deliberately not registered.
 	return g.hardenLocal(mux)
 }
 
@@ -434,28 +416,24 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		if err := json.Unmarshal(args, &req); err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", g.Config.Node.MCPPort)
-		claudeArgs := setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL, g.Config.Gateway.HostToken)
-		if !req.Confirmed {
-			claudeCommand := append([]string{"claude"}, setupinstall.RedactClaudeHTTPAddArgs(claudeArgs)...)
-			return ToolResponse{OK: true, Result: map[string]any{
-				"requires_confirmation": true,
-				"claude_code_command":   setupinstall.ShellCommand(claudeCommand),
-				"claude_code_headers":   g.Config.Gateway.HostToken != "",
-				"codex_instruction":     "add a local HTTP MCP server named cmesh at " + gatewayURL,
-			}}, nil
+		// Shared with the stdio wizard's register_gateway so both surfaces
+		// behave identically; this one defaults to claude-code when no harness
+		// is named, matching its prior behavior. No stdout suppression is
+		// needed here: the gateway speaks HTTP, not stdio JSON-RPC.
+		out := harnessreg.Register(harnessreg.Request{
+			Harness:   req.Harness,
+			Confirmed: req.Confirmed,
+		}, harnessreg.GatewayURL(g.Config.Node.MCPPort), g.Config.Gateway.HostToken)
+		result := map[string]any{}
+		for k, v := range out.Fields {
+			result[k] = v
 		}
-		if req.Harness == "" || req.Harness == "claude-code" {
-			claude, err := exec.LookPath("claude")
-			if err != nil {
-				return toolFailure(task.ErrorRunnerUnavailable, "Claude Code not found on PATH")
-			}
-			if err := exec.Command(claude, claudeArgs...).Run(); err != nil {
-				return toolFailure(task.ErrorWorkerFailed, err.Error())
-			}
-			return ToolResponse{OK: true, Result: map[string]string{"harness": "claude-code", "url": gatewayURL}}, nil
+		if out.RequiresConfirmation {
+			result["requires_confirmation"] = true
+		} else if out.Status != "" {
+			result["status"] = out.Status
 		}
-		return ToolResponse{OK: true, Result: map[string]string{"harness": req.Harness, "manual_url": gatewayURL}}, nil
+		return ToolResponse{OK: true, Result: result}, nil
 	case "list_peers":
 		type peer struct {
 			Name          string `json:"name"`
@@ -600,192 +578,6 @@ func (g *Gateway) ListenAndServe(ctx context.Context) error {
 
 func (g *Gateway) health(w http.ResponseWriter, r *http.Request) {
 	writeTool(w, ToolResponse{OK: true, Result: map[string]string{"status": "ok"}})
-}
-
-func (g *Gateway) taskCatalog(w http.ResponseWriter, r *http.Request) {
-	writeTool(w, ToolResponse{OK: true, Result: map[string]any{"recipes": taskRecipes()}})
-}
-
-func (g *Gateway) listPeers(w http.ResponseWriter, r *http.Request) {
-	type peer struct {
-		Name          string `json:"name"`
-		NodeID        string `json:"node_id,omitempty"`
-		Address       string `json:"address"`
-		Port          int    `json:"port"`
-		ActiveProfile string `json:"active_profile"`
-		ProfileSource string `json:"profile_source"`
-		Elevated      bool   `json:"elevated"`
-		Risk          string `json:"risk"`
-		ExpiresInS    int64  `json:"expires_in_s,omitempty"`
-		CWD           string `json:"cwd_scope,omitempty"`
-		CWDScopeMode  string `json:"cwd_scope_mode,omitempty"`
-	}
-	var peers []peer
-	for name, cfg := range g.Config.Peers {
-		meta := g.activeProfileSummary(name)
-		peers = append(peers, peer{Name: firstNonEmpty(cfg.Name, name), NodeID: cfg.NodeID, Address: cfg.Address, Port: cfg.Port, ActiveProfile: meta.Profile, ProfileSource: meta.Source, Elevated: meta.Elevated, Risk: meta.Risk, ExpiresInS: meta.ExpiresInS, CWD: meta.CWD, CWDScopeMode: meta.CWDScope})
-	}
-	writeTool(w, ToolResponse{OK: true, Result: peers})
-}
-
-func (g *Gateway) peerInfo(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Peer string `json:"peer"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	client, err := g.client(req.Peer)
-	if err != nil {
-		writeToolError(w, task.ErrorPeerUnreachable, err.Error())
-		return
-	}
-	info, err := client.Hello(r.Context())
-	if err != nil {
-		writeToolError(w, task.ErrorPeerUnreachable, err.Error())
-		return
-	}
-	writeTool(w, ToolResponse{OK: true, Result: info})
-}
-
-func (g *Gateway) delegate(w http.ResponseWriter, r *http.Request) {
-	var req DelegateRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.delegateCall(r.Context(), req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) queryPeer(w http.ResponseWriter, r *http.Request) {
-	var req QueryPeerRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.queryPeerCall(r.Context(), req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) inspectPeer(w http.ResponseWriter, r *http.Request) {
-	var req InspectPeerRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.inspectPeerCall(r.Context(), req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileGuide(w http.ResponseWriter, _ *http.Request) {
-	writeTool(w, ToolResponse{OK: true, Result: profiledefs.Guide()})
-}
-
-func (g *Gateway) profileRecommend(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Intent string `json:"intent"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	writeTool(w, ToolResponse{OK: true, Result: profiledefs.Recommend(req.Intent)})
-}
-
-func (g *Gateway) profileGenerate(w http.ResponseWriter, r *http.Request) {
-	var req ProfileGenerateRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := profileGenerateCall(req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileValidate(w http.ResponseWriter, r *http.Request) {
-	var req ProfileValidateRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := profileValidateCall(req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileDescribe(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Profile string `json:"profile"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.profileDescribeCall(req.Profile)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileCurrent(w http.ResponseWriter, r *http.Request) {
-	resp, _ := g.profileCurrentCall(r.Context(), nil)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileUse(w http.ResponseWriter, r *http.Request) {
-	var req ProfileUseRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.profileUseCall(r.Context(), req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileConfigure(w http.ResponseWriter, r *http.Request) {
-	var req ProfileConfigureRequest
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.profileConfigureCall(req)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
-}
-
-func (g *Gateway) profileReset(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Peer string `json:"peer,omitempty"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, err := g.profileResetCall(r.Context(), req.Peer)
-	if err != nil {
-		writeTool(w, resp)
-		return
-	}
-	writeTool(w, resp)
 }
 
 func (g *Gateway) queryPeerCall(ctx context.Context, req QueryPeerRequest) (ToolResponse, error) {
@@ -1734,76 +1526,6 @@ func helloSupportsProfile(hello schema.HelloResponse, profile string) bool {
 	return false
 }
 
-func (g *Gateway) taskStatus(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID         string `json:"task_id"`
-		Wait           bool   `json:"wait,omitempty"`
-		TimeoutSeconds int    `json:"timeout_s,omitempty"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.statusCall(r.Context(), req.TaskID, req.Wait, req.TimeoutSeconds)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) listTasks(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Limit int `json:"limit,omitempty"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.listTasksCall(r.Context(), req.Limit)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) taskResult(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID string `json:"task_id"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.resultCall(r.Context(), req.TaskID)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) taskTranscript(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID string `json:"task_id"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.transcriptCall(r.Context(), req.TaskID)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) taskArtifact(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID string `json:"task_id"`
-		Kind   string `json:"kind,omitempty"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.artifactCall(r.Context(), req.TaskID, req.Kind)
-	writeTool(w, resp)
-}
-
-func (g *Gateway) cancel(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID string `json:"task_id"`
-		Reason string `json:"reason,omitempty"`
-	}
-	if !decodeTool(w, r, &req) {
-		return
-	}
-	resp, _ := g.cancelCall(r.Context(), req.TaskID, req.Reason)
-	writeTool(w, resp)
-}
-
 // authorizeTaskAccess gates the task read/cancel surface for a caller holding a
 // per-task token rather than the gateway host token.
 //
@@ -2371,22 +2093,9 @@ func requestHostToken(r *http.Request) string {
 	return ""
 }
 
-func decodeTool(w http.ResponseWriter, r *http.Request, out any) bool {
-	defer r.Body.Close()
-	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
-		writeToolErrorStatus(w, http.StatusBadRequest, task.ErrorWorkerFailed, "invalid JSON: "+err.Error())
-		return false
-	}
-	return true
-}
-
 func writeTool(w http.ResponseWriter, resp ToolResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-func writeToolError(w http.ResponseWriter, code task.ErrorCode, detail string) {
-	writeToolErrorStatus(w, http.StatusOK, code, detail)
 }
 
 func writeToolErrorStatus(w http.ResponseWriter, status int, code task.ErrorCode, detail string) {

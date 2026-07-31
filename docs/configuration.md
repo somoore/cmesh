@@ -134,7 +134,7 @@ enforcement_confidence = "high"
 
 [Runner manifests](runner-manifests.md) declare what those claims mean for a specific harness.
 
-Defaults expose `query`; agent-backed profiles such as `repo-dev` must be added explicitly and requested by name. High-risk profiles such as `desktop-control`, `system-change`, `network`, `interactive`, and `git_push` must also be explicit. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
+Defaults expose `query`; agent-backed profiles such as `repo-dev` must be added explicitly and requested by name. The high-risk profiles `desktop-control` and `system-change` must also be explicit, as must any custom profile granting a high-risk capability such as `network` access or `git_push`. For profiles that should only be usable by specific peers, set `allowed_peers` on the profile:
 
 ```toml
 [profiles.interactive]
@@ -165,7 +165,23 @@ The built-in templates climb from deterministic read-only probes to high-risk ag
 | `desktop-control` | agent | high | opt-in | yes | yes |
 | `system-change` | agent | high | opt-in | yes | yes |
 
+These seven names are the ladder. A request that names no profile falls back to `query`, the least-authority rung.
+
 Generated configs expose `query` only; every higher profile is added deliberately and, for high-risk profiles, kept in `[policy.outbound].denied_profiles` on origins that should not request them. See [Security](security.md) for the reasoning behind keeping this ladder narrow.
+
+#### Compatibility aliases
+
+Earlier versions used a different vocabulary. These names still resolve, via `CanonicalProfile`, and exist only so older configs keep working — prefer the canonical name in anything you write:
+
+| Legacy name | Canonical profile |
+| --- | --- |
+| `readonly` | `readonly-agent` |
+| `dev` | `repo-dev` |
+| `interactive` | `desktop-control` |
+| `network` | `query-network` |
+| `git_push` | `repo-dev` |
+
+Note that `network` and `git_push` are also the names of *capabilities* a profile may grant (`[profiles.X].network`, `git_push`). The capability and the legacy profile alias are different things; a profile grants capabilities, and the ladder above lists profiles.
 
 The `require_explicit` + `require_lease` requirement is **not limited to these built-in names**. Any profile granting a high-risk capability — `edit_repo`, `execute_in_repo`, `execute_repo_commands`, `git_push`, `desktop_control`, `desktop_interaction`, `system_change`, or `launch_processes` — must set both flags, whatever you call it, and the config is rejected if it does not. Capabilities declared through the legacy `claims` field count the same as `capabilities`. This is enforced in `ValidateSemantics`, so `cmesh profile validate`, the `profile_validate` MCP tool, and config load all agree.
 

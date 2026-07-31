@@ -28,7 +28,7 @@ cmesh does not poll your machines, scrape metrics, or maintain a live dashboard 
 
 ### 2. Profiles are authority levels
 
-Every task runs under a **profile**, and a profile is a declared level of authority on the worker machine — from "look, don't touch" up to "change the system." The menu runs roughly least-to-most authority: `query` (deterministic probes), `query-network` and `query-shell` (bounded read-oriented checks), `readonly` / `readonly-agent` (agent-assisted read-only inspection), `repo-dev` / `dev` (agent edits and tests inside an allowed directory), and the elevated tier — `desktop-control`, `system-change`, `network`, `interactive`, `git_push`. You pick a profile per task by naming it in the request. A peer only offers the profiles you configured for it, so granting `repo-dev` to one trusted machine never grants it to the rest.
+Every task runs under a **profile**, and a profile is a declared level of authority on the worker machine — from "look, don't touch" up to "change the system." The menu runs least-to-most authority: `query` (deterministic probes), `query-network` and `query-shell` (bounded read-oriented checks), `readonly-agent` (agent-assisted read-only inspection), `repo-dev` (agent edits and tests inside an allowed directory), and the elevated tier — `desktop-control` and `system-change`. You pick a profile per task by naming it in the request; a request that names none gets `query`. (`network` and `git_push` are capabilities a profile may grant, not rungs of their own, and `dev`, `readonly`, and `interactive` are older names kept working as aliases.) A peer only offers the profiles you configured for it, so granting `repo-dev` to one trusted machine never grants it to the rest.
 
 ### 3. `query` is the safe default
 

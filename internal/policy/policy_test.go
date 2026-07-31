@@ -646,6 +646,31 @@ func TestCeilingRejectsUnconfiguredRunner(t *testing.T) {
 	}
 }
 
+// A request naming no profile and no runner falls back to the least-authority
+// profile. It previously fell back to the legacy "dev" name, which is high-risk
+// under the current ladder — the opposite of the safe default used everywhere
+// else in the system.
+func TestUnspecifiedProfileFallsBackToQuery(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles[profile.Query] = config.ProfileConfig{
+		Runner:       profile.RunnerProbe,
+		Capabilities: []string{profile.CapDiskInfo},
+		Writes:       profile.WritesDeny,
+		Shell:        profile.ShellDeny,
+		Risk:         profile.RiskLow,
+	}
+	cfg.Runners[profile.RunnerProbe] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: profile.Query}
+
+	decision := New(cfg).CheckInbound(TaskIntent{PeerName: "mac-studio", CWD: root})
+	if !decision.Allowed {
+		t.Fatalf("expected allowed decision: %+v", decision)
+	}
+	if decision.EffectiveProfile != profile.Query {
+		t.Fatalf("effective profile = %q, want %q", decision.EffectiveProfile, profile.Query)
+	}
+}
+
 // Cycle detection must ignore case, matching the mesh RPC path's duplicate-hop
 // check, so a differently-cased node name cannot pass one layer and be caught
 // only by the other.

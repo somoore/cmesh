@@ -223,7 +223,7 @@ it enables.
   primitives, the transitive-injection rule, and one worked end-to-end example.
 - README and `docs/concepts.md` reframe — deliberately **after** Phases 1–3 ship,
   so the headline never outruns the demo.
-- `ycmesh.md` — add the two missing comparisons: versus one agent with many MCP
+- `docs/why-cmesh.md` — add the two missing comparisons: versus one agent with many MCP
   tools, and versus in-process multi-agent frameworks. The differentiator is real
   machines, real credentials, and real policy rather than role-play between
   prompts sharing one process.

@@ -151,7 +151,10 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 			}
 		}
 		if requested == "" {
-			requested = "dev"
+			// Fall back to the least-authority profile. This previously named the
+			// legacy "dev" profile, which is high-risk under the current ladder and
+			// is the opposite of the safe default every other surface uses.
+			requested = profiledefs.Query
 		}
 	}
 	profile, ok := cfg.Profiles[requested]
