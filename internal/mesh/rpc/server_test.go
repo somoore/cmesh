@@ -1488,6 +1488,77 @@ func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
 		t.Fatalf("resuming from the latest cursor returned %d events, want 0", len(resumed.Events))
 	}
 
+	// has_more must mean "the page was truncated", not "the page was full": a
+	// page that exactly drains the tail has nothing more behind it.
+	exact := get("/v1/tasks/tsk_events/events?limit="+strconv.Itoa(len(first.Events)), "")
+	if exact.Code != http.StatusOK {
+		t.Fatalf("exact-page code = %d, body = %s", exact.Code, exact.Body.String())
+	}
+	var drained schema.TaskEventsResponse
+	if err := json.Unmarshal(exact.Body.Bytes(), &drained); err != nil {
+		t.Fatalf("decode exact page: %v", err)
+	}
+	if drained.HasMore {
+		t.Fatalf("page that exactly drained %d events reported has_more", len(drained.Events))
+	}
+	if len(first.Events) > 1 {
+		truncated := get("/v1/tasks/tsk_events/events?limit=1", "")
+		var page schema.TaskEventsResponse
+		if err := json.Unmarshal(truncated.Body.Bytes(), &page); err != nil {
+			t.Fatalf("decode truncated page: %v", err)
+		}
+		if len(page.Events) != 1 {
+			t.Fatalf("limit=1 returned %d events", len(page.Events))
+		}
+		if !page.HasMore {
+			t.Fatal("genuinely truncated page did not report has_more")
+		}
+	}
+
+	// The response projects the audit record rather than passing it through:
+	// error_detail and the free-form extra map stay in this node's own audit
+	// log, which is the artifact for investigating this machine.
+	if err := server.Store.RecordAuditEvent(context.Background(), audit.Event{
+		EventID:     "evt_detail",
+		Type:        "task.failed",
+		TaskID:      "tsk_events",
+		NodeID:      "homelab-vm",
+		Timestamp:   time.Now().UTC(),
+		Runner:      "fake",
+		Profile:     "dev",
+		ErrorCode:   "worker_failed",
+		ErrorDetail: "/Users/secret/path exploded",
+		Extra:       map[string]any{"local_only": "/var/lib/private"},
+	}); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+	res = get("/v1/tasks/tsk_events/events", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("events after detail code = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, leaked := range []string{"/Users/secret/path exploded", "/var/lib/private", "error_detail", "extra"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("worker-local audit detail %q crossed the mesh:\n%s", leaked, body)
+		}
+	}
+	var withDetail schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &withDetail); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	var sawFailure bool
+	for _, event := range withDetail.Events {
+		if event.EventID == "evt_detail" {
+			sawFailure = true
+			if event.ErrorCode != "worker_failed" || event.Runner != "fake" || event.Profile != "dev" {
+				t.Fatalf("projected event dropped fields the origin needs: %+v", event)
+			}
+		}
+	}
+	if !sawFailure {
+		t.Fatal("the failure event should still be reported, minus the local detail")
+	}
+
 	// A mismatched schema version is rejected here, not merely upstream.
 	if res := get("/v1/tasks/tsk_events/events", "v999"); res.Code != http.StatusBadRequest {
 		t.Fatalf("mismatched schema code = %d, want 400: %s", res.Code, res.Body.String())

@@ -34,6 +34,13 @@ func OpenContext(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite store: %w", err)
 	}
+	// SQLite allows one writer at a time. Without a single connection the pool
+	// opens more, and concurrent writers -- the daemon records audit events from
+	// per-task goroutines -- contend for the WAL write lock and wait out
+	// busy_timeout instead of queueing in-process. Serializing here keeps a burst
+	// of writes from surfacing as timeouts, which for audit writes would fail the
+	// task.
+	db.SetMaxOpenConns(1)
 	store := &Store{db: db}
 	// Tighten the main db before migrations run: migrations are the first writes,
 	// so leaving the default umask mode in place until afterwards leaves a window

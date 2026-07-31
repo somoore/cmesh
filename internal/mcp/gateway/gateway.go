@@ -2499,7 +2499,7 @@ func mcpTools() []map[string]any {
 		},
 		{
 			"name":        "task_events",
-			"description": "Fetch a delegated task's recorded progress events, oldest first. Poll incrementally: pass the next_seq from the previous response as after to get only what is new. These are events this mesh recorded (state transitions, policy decisions, dispatch), not worker-authored prose. Use it to report what a task is doing while it runs; use task_result for the outcome.",
+			"description": "Fetch a delegated task's recorded progress events, oldest first. Poll incrementally: pass the next_seq from the previous response as after to get only what is new. These are events this mesh recorded (state transitions, policy decisions, dispatch), not worker-authored prose. Each event reports its type, time, runner, profile, and — for a denial or failure — the stable error code; worker-local detail stays in the worker\u0027s own audit log. Use it to report what a task is doing while it runs; use task_result for the outcome.",
 			"inputSchema": objectSchema(map[string]any{
 				"task_id":   stringSchema("Origin-local task id."),
 				"after":     map[string]any{"type": "integer", "description": "Return only events with a seq greater than this. Use next_seq from the previous response; omit or 0 to start from the beginning."},

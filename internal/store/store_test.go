@@ -3,7 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,8 +185,8 @@ func TestListTaskEventsPagesByStableCursor(t *testing.T) {
 			t.Fatalf("events not strictly increasing: %d then %d", first[i-1].Seq, first[i].Seq)
 		}
 	}
-	if first[0].EventID != "evt_a" {
-		t.Fatalf("first event = %q, want evt_a (oldest first)", first[0].EventID)
+	if first[0].Event.EventID != "evt_a" {
+		t.Fatalf("first event = %q, want evt_a (oldest first)", first[0].Event.EventID)
 	}
 
 	rest, err := s.ListTaskEvents(ctx, "tsk_events", first[len(first)-1].Seq, 10)
@@ -194,7 +197,7 @@ func TestListTaskEventsPagesByStableCursor(t *testing.T) {
 		t.Fatalf("resumed page = %d events, want the remaining 2", len(rest))
 	}
 	for _, event := range rest {
-		if event.EventID == "evt_other" {
+		if event.Event.EventID == "evt_other" {
 			t.Fatal("events from another task leaked into the page")
 		}
 	}
@@ -237,11 +240,21 @@ func TestMigrationBackfillsExistingTaskEventSeq(t *testing.T) {
 			t.Fatalf("seed %s: %v", id, err)
 		}
 	}
-	// Re-run the backfill and counter reset as migration v3 would.
-	for _, stmt := range migrations[2].statements[2:4] {
+	// Re-run v3's backfill and counter reset against the seeded rows, selecting
+	// the statements by content so this does not break when the migration gains
+	// or reorders statements.
+	var replayed int
+	for _, stmt := range migrationByVersion(t, 3).statements {
+		if !strings.Contains(stmt, "UPDATE task_events SET seq") && !strings.Contains(stmt, "task_event_seq(id, next_seq)") {
+			continue
+		}
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("rerun migration statement: %v", err)
 		}
+		replayed++
+	}
+	if replayed != 2 {
+		t.Fatalf("replayed %d migration statements, want the backfill and the counter reset", replayed)
 	}
 
 	if err := s.RecordAuditEvent(ctx, audit.Event{
@@ -265,7 +278,7 @@ func TestMigrationBackfillsExistingTaskEventSeq(t *testing.T) {
 			t.Fatalf("duplicate seq %d after backfill", event.Seq)
 		}
 		seen[event.Seq] = true
-		ids = append(ids, event.EventID)
+		ids = append(ids, event.Event.EventID)
 	}
 	// Backfilled rows keep their written order, and the new event sorts last.
 	if ids[0] != "evt_old_a" || ids[1] != "evt_old_b" || ids[2] != "evt_new" {
@@ -283,4 +296,64 @@ func openStoreAt(t *testing.T, path string) *Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+// migrationByVersion returns the migration with the given version so tests can
+// replay specific statements without depending on slice positions.
+func migrationByVersion(t *testing.T, version int) migration {
+	t.Helper()
+	for _, m := range migrations {
+		if m.version == version {
+			return m
+		}
+	}
+	t.Fatalf("migration version %d not found", version)
+	return migration{}
+}
+
+// RecordAuditEvent allocates a cursor and inserts in one transaction so two
+// concurrent recorders cannot be handed the same seq. The daemon writes audit
+// events from per-task goroutines, so this path is genuinely concurrent.
+func TestRecordAuditEventAllocatesDistinctSeqsConcurrently(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	const writers = 20
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if err := s.RecordAuditEvent(ctx, audit.Event{
+				EventID:   fmt.Sprintf("evt_%02d", i),
+				Type:      "task.progress",
+				TaskID:    "tsk_concurrent",
+				NodeID:    "worker",
+				Timestamp: time.Now().UTC(),
+			}); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent RecordAuditEvent: %v", err)
+	}
+
+	events, err := s.ListTaskEvents(ctx, "tsk_concurrent", 0, writers+10)
+	if err != nil {
+		t.Fatalf("ListTaskEvents: %v", err)
+	}
+	if len(events) != writers {
+		t.Fatalf("recorded %d events, want %d", len(events), writers)
+	}
+	seen := map[int64]string{}
+	for _, event := range events {
+		if other, dup := seen[event.Seq]; dup {
+			t.Fatalf("seq %d handed to both %s and %s", event.Seq, other, event.Event.EventID)
+		}
+		seen[event.Seq] = event.Event.EventID
+	}
 }

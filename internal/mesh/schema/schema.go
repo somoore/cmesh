@@ -94,16 +94,29 @@ type CreateTaskResponse struct {
 	Error            *Error     `json:"error,omitempty"`
 }
 
-// TaskEvent is one recorded step in a task's life. Payload carries the audit
-// event as recorded; it is evidence written by this daemon, not worker prose.
+// TaskEvent is one recorded step in a task's life, as served to the origin.
+//
+// It is a deliberate projection of the worker's local audit record rather than
+// a pass-through of it. The stored audit event also carries error_detail and a
+// free-form extra map, which can hold worker-side filesystem paths and other
+// local detail; those stay in the worker's own audit log, which is the artifact
+// for investigating that machine. What crosses the mesh is the progress the
+// origin needs to narrate a running task: what happened, when, under which
+// profile and runner, and — for a denial or failure — the stable error code.
+//
+// Adding a field here widens what a delegating peer learns about the worker, so
+// prefer a named field over reintroducing a passthrough map.
 type TaskEvent struct {
-	Seq       int64     `json:"seq"`
-	EventID   string    `json:"event_id"`
-	EventType string    `json:"event_type"`
-	TaskID    string    `json:"task_id,omitempty"`
-	NodeID    string    `json:"node_id,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-	Payload   any       `json:"payload,omitempty"`
+	Seq            int64     `json:"seq"`
+	EventID        string    `json:"event_id"`
+	EventType      string    `json:"event_type"`
+	TaskID         string    `json:"task_id,omitempty"`
+	NodeID         string    `json:"node_id,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	Runner         string    `json:"runner,omitempty"`
+	Profile        string    `json:"profile,omitempty"`
+	PolicyDecision string    `json:"policy_decision,omitempty"`
+	ErrorCode      string    `json:"error_code,omitempty"`
 }
 
 // TaskEventsResponse is an incremental page of task events. NextSeq is the

@@ -109,6 +109,13 @@ already written on every task transition.
   recorded.
 - Gateway: `task_events` tool routed through `fetchOwnedTask`, so per-task token
   scoping applies automatically (32 tools).
+- The response **projects** the worker's audit record rather than passing it
+  through. `task_events` was worker-local before this phase; now a delegating
+  peer reads it, and the stored record carries `error_detail` plus a free-form
+  `extra` map that can hold worker-side paths. What crosses the mesh is type,
+  time, runner, profile, and the stable error code. Widening that set is a
+  deliberate act, so `schema.TaskEvent` takes named fields and never a
+  passthrough map.
 
 A conductor can then narrate real progress — "Linux tests running, Windows build
 queued, review done" — instead of polling terminal state.

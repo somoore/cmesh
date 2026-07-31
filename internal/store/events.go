@@ -5,22 +5,22 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"cmesh/internal/audit"
 )
 
 // TaskEvent is one recorded step in a task's life, as read back for incremental
-// polling. Payload is the marshaled audit event; Seq is the cursor a caller
-// passes back as `after` to receive only later events.
+// polling. Seq is the cursor a caller passes back as `after` to receive only
+// later events.
+//
+// Event carries the full stored audit record for local use (the CLI, doctor,
+// this node's own tooling). It is deliberately NOT what crosses the mesh:
+// schema.TaskEvent projects a narrower field set, because the audit record also
+// holds error_detail and a free-form extra map that can contain worker-local
+// paths and other detail a delegating peer has no need for.
 type TaskEvent struct {
-	Seq       int64     `json:"seq"`
-	EventID   string    `json:"event_id"`
-	EventType string    `json:"event_type"`
-	TaskID    string    `json:"task_id,omitempty"`
-	NodeID    string    `json:"node_id,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
-	Payload   any       `json:"payload,omitempty"`
+	Seq   int64
+	Event audit.Event
 }
 
 // DefaultTaskEventLimit bounds a single events read. Callers poll with a cursor
@@ -78,22 +78,38 @@ func (s *Store) ListTaskEvents(ctx context.Context, taskID string, after int64, 
 	defer rows.Close()
 	var out []TaskEvent
 	for rows.Next() {
-		var event TaskEvent
-		var timestamp, payload string
-		if err := rows.Scan(&event.Seq, &event.EventID, &event.EventType, &event.TaskID, &event.NodeID, &timestamp, &payload); err != nil {
+		var item TaskEvent
+		var eventID, eventType, rowTaskID, nodeID, timestamp, payload string
+		if err := rows.Scan(&item.Seq, &eventID, &eventType, &rowTaskID, &nodeID, &timestamp, &payload); err != nil {
 			return nil, fmt.Errorf("scan task event: %w", err)
 		}
-		event.Timestamp, err = parseTime(timestamp)
-		if err != nil {
-			return nil, fmt.Errorf("decode task event timestamp: %w", err)
-		}
+		// The payload is the authoritative record; the columns are the index.
+		// Fall back to them when it cannot be decoded so a malformed row still
+		// reports what happened instead of vanishing from the stream.
 		if payload != "" {
-			var decoded any
-			if err := json.Unmarshal([]byte(payload), &decoded); err == nil {
-				event.Payload = decoded
+			if err := json.Unmarshal([]byte(payload), &item.Event); err != nil {
+				item.Event = audit.Event{}
 			}
 		}
-		out = append(out, event)
+		if item.Event.EventID == "" {
+			item.Event.EventID = eventID
+		}
+		if item.Event.Type == "" {
+			item.Event.Type = eventType
+		}
+		if item.Event.TaskID == "" {
+			item.Event.TaskID = rowTaskID
+		}
+		if item.Event.NodeID == "" {
+			item.Event.NodeID = nodeID
+		}
+		if item.Event.Timestamp.IsZero() {
+			item.Event.Timestamp, err = parseTime(timestamp)
+			if err != nil {
+				return nil, fmt.Errorf("decode task event timestamp: %w", err)
+			}
+		}
+		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate task events: %w", err)

@@ -1131,25 +1131,38 @@ func (s *Server) writeTaskEvents(w http.ResponseWriter, r *http.Request, taskID 
 	if effectiveLimit > store.MaxTaskEventLimit {
 		effectiveLimit = store.MaxTaskEventLimit
 	}
-	events, err := s.Store.ListTaskEvents(r.Context(), taskID, after, effectiveLimit)
+	// Fetch one past the limit so has_more reports actual truncation. Comparing
+	// len(events) to the limit would claim more whenever a page exactly drains
+	// the tail, which contradicts what the tool advertises.
+	events, err := s.Store.ListTaskEvents(r.Context(), taskID, after, effectiveLimit+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 		return
 	}
-	out := schema.TaskEventsResponse{TaskID: taskID, Events: make([]schema.TaskEvent, 0, len(events)), NextSeq: after}
-	for _, event := range events {
-		out.Events = append(out.Events, schema.TaskEvent{
-			Seq:       event.Seq,
-			EventID:   event.EventID,
-			EventType: event.EventType,
-			TaskID:    event.TaskID,
-			NodeID:    event.NodeID,
-			Timestamp: event.Timestamp,
-			Payload:   event.Payload,
-		})
-		out.NextSeq = event.Seq
+	hasMore := len(events) > effectiveLimit
+	if hasMore {
+		events = events[:effectiveLimit]
 	}
-	out.HasMore = len(events) == effectiveLimit
+	out := schema.TaskEventsResponse{TaskID: taskID, Events: make([]schema.TaskEvent, 0, len(events)), NextSeq: after, HasMore: hasMore}
+	for _, item := range events {
+		// Project, do not pass through: the stored audit record also carries
+		// error_detail and a free-form extra map that can hold worker-local
+		// paths. Those stay in this node's audit log; the origin gets the
+		// progress it needs to narrate the task.
+		out.Events = append(out.Events, schema.TaskEvent{
+			Seq:            item.Seq,
+			EventID:        item.Event.EventID,
+			EventType:      item.Event.Type,
+			TaskID:         item.Event.TaskID,
+			NodeID:         item.Event.NodeID,
+			Timestamp:      item.Event.Timestamp,
+			Runner:         item.Event.Runner,
+			Profile:        item.Event.Profile,
+			PolicyDecision: item.Event.PolicyDecision,
+			ErrorCode:      item.Event.ErrorCode,
+		})
+		out.NextSeq = item.Seq
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
