@@ -106,6 +106,10 @@
         "schema_version": {
           "const": "task.v1"
         },
+        "handoff_from": {
+          "type": "string",
+          "description": "Task whose branch seeded this one via cross-peer handoff. Audit and provenance display only; it never grants authority."
+        },
         "task_id": {
           "$ref": "#/$defs/task_id"
         },

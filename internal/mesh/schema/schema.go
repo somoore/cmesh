@@ -74,8 +74,33 @@ type CreateTaskRequest struct {
 	FollowupTaskID     string        `json:"followup_task_id,omitempty"`
 	FollowupBaseCommit string        `json:"followup_base_commit,omitempty"`
 	ResumeSessionID    string        `json:"resume_session_id,omitempty"`
-	Provenance         Provenance    `json:"provenance"`
+	// Handoff carries a source peer's branch so this task can continue it. It
+	// travels in the create request rather than a separate upload so it passes
+	// through every gate a normal dispatch does, and so the seed is present
+	// before the task's runner reaches git preparation.
+	Handoff    *HandoffSeed `json:"handoff,omitempty"`
+	Provenance Provenance   `json:"provenance"`
 }
+
+// HandoffSeed is a source task's branch, packed as a git bundle, plus the refs
+// needed to apply it. BundleBase64 is bounded by MaxHandoffBundleBytes.
+//
+// It carries structured refs only. A worker's prose never seeds another
+// worker's prompt: the receiving agent reads the diff, not the previous
+// agent's narration.
+type HandoffSeed struct {
+	SourceTaskID string   `json:"source_task_id"`
+	SourcePeer   string   `json:"source_peer,omitempty"`
+	Branch       string   `json:"branch"`
+	BaseCommit   string   `json:"base_commit"`
+	HeadCommit   string   `json:"head_commit,omitempty"`
+	FilesChanged []string `json:"files_changed,omitempty"`
+	BundleBase64 string   `json:"bundle_base64"`
+}
+
+// MaxHandoffBundleBytes caps a seed bundle. A handoff carries one task's branch,
+// not a repository; anything larger belongs on a shared remote.
+const MaxHandoffBundleBytes = 32 << 20
 
 type QueryRequest struct {
 	Kind   string         `json:"kind"`

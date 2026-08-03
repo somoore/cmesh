@@ -40,7 +40,7 @@ The security posture is the team feature, not a limitation on it.
 | Delegation | `delegate` | shipped |
 | Progress events | `task_events` | shipped (Phase 1) |
 | Task channel | `task_post` / `task_ask` / `task_send` | shipped worker→origin (Phase 2a); live steering **planned** (Phase 2b) |
-| Cross-peer handoff | `handoff` | **planned** (Phase 3) |
+| Cross-peer handoff | `handoff` | shipped (Phase 3) |
 | Workstreams | `workstream` / `workstream_status` | **planned** (Phase 4) |
 
 ## Design insight: the channel splits in two
@@ -174,7 +174,7 @@ Separable and larger.
   per runner and verified **behaviorally** by `cmesh doctor runner`, in keeping
   with the manifests-are-evidence rule.
 
-### Phase 3 — Cross-peer handoff
+### Phase 3 — Cross-peer handoff *(shipped)*
 
 The core team motion: Claude on the Linux box writes the fix, Codex on the
 Windows box verifies it natively.

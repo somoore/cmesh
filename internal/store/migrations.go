@@ -157,6 +157,14 @@ var migrations = []migration{
 			`ALTER TABLE peer_tasks ADD COLUMN profile_effective TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		version: 5,
+		statements: []string{
+			// Cross-peer handoff lineage: which task's branch seeded this one.
+			// Audit and provenance display only; it never grants authority.
+			`ALTER TABLE tasks ADD COLUMN handoff_from TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

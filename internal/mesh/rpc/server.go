@@ -691,6 +691,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		AllowDirty:       req.AllowDirty,
 		DelegationChain:  append(req.Provenance.DelegationChain, s.Config.Node.ID),
 		HopCount:         req.Provenance.HopCount,
+		HandoffFrom:      handoffSource(req.Handoff),
 	}
 	outcome, err := s.Store.BeginDispatch(r.Context(), rec, body, task.DefaultIdempotencyDays*24*time.Hour)
 	if err != nil {
@@ -810,6 +811,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	gitPrep, err := prepareGit(ctx, rec, s.Config.Node.Name, s.Config.Node.DataDir, decisionClaims(s.Config, rec.ProfileEffective), gitPreparationOptions{
 		BaseCommit:      req.FollowupBaseCommit,
 		WorkDirOverride: workDirOverride,
+		Handoff:         req.Handoff,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -1940,6 +1942,56 @@ var errDirtyWorktree = errors.New("dirty worktree refused")
 type gitPreparationOptions struct {
 	BaseCommit      string
 	WorkDirOverride string
+	// Handoff seeds this task from another peer's branch. It is applied before
+	// the worktree is created, so the branch exists locally by the time the
+	// runner starts.
+	Handoff *schema.HandoffSeed
+}
+
+// errHandoffBaseMissing means the seed bundle needs commits this checkout does
+// not have.
+var errHandoffBaseMissing = errors.New("handoff base commit is missing from this checkout")
+
+// applyHandoffSeed writes the seed bundle to disk and fetches its branch into
+// this repository, so a task handed off from another peer continues that work
+// instead of starting from the local HEAD.
+//
+// Bundles produced by commitGit are thin (Bundle appends ^<base>), so this
+// checkout must already hold the base. `git bundle verify` asks git which
+// prerequisites the bundle actually declares rather than probing a single
+// commit we assume is the only one, and its failure is the one clear denial:
+// handoff_base_missing, whose fix is a shared remote or a push from the source.
+func applyHandoffSeed(ctx context.Context, repo *gitx.Repository, dataDir, taskID string, seed *schema.HandoffSeed) (string, error) {
+	if seed == nil {
+		return "", nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(seed.BundleBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode handoff bundle: %w", err)
+	}
+	if len(raw) == 0 {
+		return "", errors.New("handoff bundle is empty")
+	}
+	if len(raw) > schema.MaxHandoffBundleBytes {
+		return "", fmt.Errorf("handoff bundle exceeds %d bytes", schema.MaxHandoffBundleBytes)
+	}
+	// taskID has passed task.ValidID, so it is safe to build a path from.
+	dir := filepath.Join(dataDir, "handoff")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create handoff dir: %w", err)
+	}
+	bundlePath := filepath.Join(dir, taskID+".bundle")
+	if err := os.WriteFile(bundlePath, raw, 0o600); err != nil {
+		return "", fmt.Errorf("write handoff bundle: %w", err)
+	}
+	if err := repo.VerifyBundle(ctx, bundlePath); err != nil {
+		return "", fmt.Errorf("%w: %v", errHandoffBaseMissing, err)
+	}
+	localRef := "refs/cmesh/handoff/" + taskID
+	if err := repo.FetchBundle(ctx, bundlePath, seed.Branch, localRef); err != nil {
+		return "", fmt.Errorf("apply handoff bundle: %w", err)
+	}
+	return localRef, nil
 }
 
 func prepareGit(ctx context.Context, rec task.Record, nodeName, dataDir string, claims []string, opts gitPreparationOptions) (gitPreparation, error) {
@@ -1963,7 +2015,13 @@ func prepareGit(ctx context.Context, rec task.Record, nodeName, dataDir string, 
 	if status.Dirty && !rec.AllowDirty {
 		return gitPreparation{Available: true}, fmt.Errorf("%w: %s", errDirtyWorktree, status.Porcelain)
 	}
-	base := firstNonEmpty(opts.BaseCommit, status.HeadCommit)
+	// A handoff seeds this task from the source branch, so the base is that
+	// branch's head rather than this checkout's.
+	handoffRef, err := applyHandoffSeed(ctx, repo, dataDir, rec.ID, opts.Handoff)
+	if err != nil {
+		return gitPreparation{Available: true}, err
+	}
+	base := firstNonEmpty(handoffRef, opts.BaseCommit, status.HeadCommit)
 	branch, err := gitx.DeterministicBranch(rec.ID, rec.ProfileRequested)
 	if err != nil {
 		return gitPreparation{Available: true}, err
@@ -2041,6 +2099,7 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 		OriginNode:  rec.OriginNodeID,
 		WorkerNode:  rec.WorkerNodeID,
 		Profile:     rec.ProfileEffective,
+		HandoffFrom: rec.HandoffFrom,
 		AllowEmpty:  false,
 	})
 	if err != nil {
@@ -2084,9 +2143,21 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 	return head, diffstat, files, bundlePath, pushed, nil
 }
 
+// handoffSource names the task a handoff continues, for audit and the commit
+// trailer. It is provenance display only and never grants authority.
+func handoffSource(seed *schema.HandoffSeed) string {
+	if seed == nil {
+		return ""
+	}
+	return strings.TrimSpace(seed.SourceTaskID)
+}
+
 func gitErrorCode(err error) task.ErrorCode {
 	if errors.Is(err, errDirtyWorktree) {
 		return task.ErrorDirtyWorktree
+	}
+	if errors.Is(err, errHandoffBaseMissing) {
+		return task.ErrorHandoffBaseMissing
 	}
 	return task.ErrorWorkerFailed
 }

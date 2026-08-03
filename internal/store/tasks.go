@@ -188,12 +188,12 @@ func insertTask(ctx context.Context, tx *sql.Tx, rec task.Record) error {
 		(task_id, origin_node_id, origin_session_id, worker_node_id, state, cwd, runner,
 		profile_requested, profile_effective, prompt_hash, payload_hash, allow_dirty,
 		delegation_chain_json, hop_count, created_at, updated_at, started_at, completed_at,
-		terminal_error_code, result_ref, result_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		terminal_error_code, result_ref, result_json, handoff_from)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.OriginNodeID, rec.OriginSessionID, rec.WorkerNodeID, rec.State, rec.CWD, rec.Runner,
 		rec.ProfileRequested, rec.ProfileEffective, rec.PromptHash, rec.PayloadHash, boolInt(rec.AllowDirty),
 		string(chainJSON), rec.HopCount, formatTime(rec.CreatedAt), formatTime(rec.UpdatedAt), formatTime(rec.StartedAt),
-		formatTime(rec.CompletedAt), string(rec.TerminalErrorCode), rec.ResultRef, "",
+		formatTime(rec.CompletedAt), string(rec.TerminalErrorCode), rec.ResultRef, "", rec.HandoffFrom,
 	)
 	if err != nil {
 		return fmt.Errorf("insert task: %w", err)

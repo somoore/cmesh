@@ -59,6 +59,9 @@ type DelegateRequest struct {
 	Query            *schema.QueryRequest `json:"query,omitempty"`
 	ProfileSource    string               `json:"profile_source,omitempty"`
 	ProfileContextID string               `json:"profile_context_id,omitempty"`
+	// Handoff seeds this task from another peer's branch. Set by the handoff
+	// tool; a caller never supplies it directly.
+	Handoff *schema.HandoffSeed `json:"-"`
 }
 
 type QueryPeerRequest struct {
@@ -545,6 +548,15 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		return g.eventsCall(ctx, req.TaskID, req.After, req.Limit, req.Wait, req.TimeoutSeconds)
+	case "handoff":
+		var req struct {
+			DelegateRequest
+			FromTaskID string `json:"from_task_id"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.handoffCall(ctx, req.DelegateRequest, req.FromTaskID)
 	case "task_post":
 		var req struct {
 			TaskID          string `json:"task_id,omitempty"`
@@ -1308,6 +1320,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		FollowupTaskID:     req.FollowupTaskID,
 		FollowupBaseCommit: followupBaseCommit,
 		ResumeSessionID:    resumeSessionID,
+		Handoff:            req.Handoff,
 		Provenance: schema.Provenance{
 			OriginNodeID:    originNodeID,
 			OriginSessionID: sessionID,
@@ -2571,6 +2584,20 @@ func mcpTools() []map[string]any {
 				"wait":      map[string]any{"type": "boolean", "description": "Long-poll until an event newer than after exists, the task reaches a terminal state, or the timeout expires."},
 				"timeout_s": map[string]any{"type": "integer", "description": "Long-poll timeout in seconds when wait is true. Default 30."},
 			}, []string{"task_id"}),
+		},
+		{
+			"name":        "handoff",
+			"description": "Continue one peer's work on another peer: seed a new task from a finished task's branch. Use it when the next step belongs on a different machine — implement on Linux, verify natively on Windows. The receiving agent gets the branch, base and head commits, and the changed file list, and reads the diff itself. Write the prompt in your own words: never paste the previous worker's summary or messages into it. Same policy as any delegation; to continue on the SAME peer use delegate with followup_task_id.",
+			"inputSchema": objectSchema(map[string]any{
+				"from_task_id": stringSchema("Origin-local id of the finished task whose branch is handed over."),
+				"peer":         stringSchema("Peer to hand the work to. Must differ from the peer that produced it."),
+				"prompt":       stringSchema("What the receiving agent should do with the branch, in your own words."),
+				"cwd":          stringSchema("Working directory on the receiving peer."),
+				"profile":      stringSchema("Profile to request. The receiving peer still applies its own policy."),
+				"runner":       stringSchema("Runner override."),
+				"timeout_s":    map[string]any{"type": "integer"},
+				"wait":         map[string]any{"type": "boolean"},
+			}, []string{"from_task_id", "peer", "prompt", "cwd"}),
 		},
 		{
 			"name":        "task_messages",

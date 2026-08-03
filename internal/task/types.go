@@ -53,6 +53,11 @@ const (
 	ErrorWorkerFailed          ErrorCode = "worker_failed"
 	ErrorWorkerDaemonRestarted ErrorCode = "worker_daemon_restarted"
 	ErrorCancelled             ErrorCode = "cancelled"
+	// ErrorHandoffBaseMissing means the receiving peer's checkout does not hold
+	// the commits the handed-off branch builds on, so the seed bundle cannot be
+	// applied there. It is a distinct code because the fix is specific: give both
+	// peers a shared remote, or push the branch from the source peer.
+	ErrorHandoffBaseMissing    ErrorCode = "handoff_base_missing"
 	ErrorResultTooLarge        ErrorCode = "result_too_large"
 	ErrorTranscriptUnavailable ErrorCode = "transcript_unavailable"
 )
@@ -79,6 +84,9 @@ type Record struct {
 	TerminalErrorCode ErrorCode       `json:"terminal_error_code,omitempty"`
 	ResultRef         string          `json:"result_ref,omitempty"`
 	Result            *ResultEnvelope `json:"result,omitempty"`
+	// HandoffFrom names the task whose branch seeded this one. Audit and
+	// provenance display only -- it never grants authority.
+	HandoffFrom string `json:"handoff_from,omitempty"`
 }
 
 type ResultEnvelope struct {

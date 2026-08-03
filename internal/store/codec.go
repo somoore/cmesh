@@ -62,6 +62,7 @@ func decodeTask(rows scanner) (task.Record, error) {
 		&terminalCode,
 		&rec.ResultRef,
 		&resultJSON,
+		&rec.HandoffFrom,
 	)
 	if err != nil {
 		return task.Record{}, err
@@ -111,7 +112,7 @@ func taskColumns() string {
 	return `task_id, origin_node_id, origin_session_id, worker_node_id, state, cwd, runner,
 		profile_requested, profile_effective, prompt_hash, payload_hash, allow_dirty,
 		delegation_chain_json, hop_count, created_at, updated_at, started_at, completed_at,
-		terminal_error_code, result_ref, result_json`
+		terminal_error_code, result_ref, result_json, handoff_from`
 }
 
 func notFound(err error) error {
