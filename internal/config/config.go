@@ -67,26 +67,34 @@ type OutboundPolicy struct {
 }
 
 type ProfileConfig struct {
-	Runner                string            `toml:"runner"`
-	Description           string            `toml:"description"`
-	Intents               []string          `toml:"intents"`
-	Capabilities          []string          `toml:"capabilities"`
-	Claims                []string          `toml:"claims"`
-	AllowedPeers          []string          `toml:"allowed_peers"`
-	RequireExplicit       bool              `toml:"require_explicit"`
-	RequireLease          bool              `toml:"require_lease"`
-	Risk                  string            `toml:"risk"`
-	Bare                  bool              `toml:"bare"`
-	Writes                string            `toml:"writes"`
-	Shell                 string            `toml:"shell"`
-	Network               bool              `toml:"network"`
-	GitPush               bool              `toml:"git_push"`
-	MaxRuntime            Duration          `toml:"max_runtime"`
-	MaxOutputBytes        int64             `toml:"max_output_bytes"`
-	AuditLevel            string            `toml:"audit_level"`
-	EnforcementConfidence string            `toml:"enforcement_confidence"`
-	KnownGaps             []string          `toml:"known_gaps"`
-	ShellPolicy           ShellPolicyConfig `toml:"shell_policy"`
+	Runner       string   `toml:"runner"`
+	Description  string   `toml:"description"`
+	Intents      []string `toml:"intents"`
+	Capabilities []string `toml:"capabilities"`
+	Claims       []string `toml:"claims"`
+	AllowedPeers []string `toml:"allowed_peers"`
+	// RunnerArgs are extra argv elements for this profile on a generic runner:
+	// whatever flags that CLI uses to express this profile's authority.
+	RunnerArgs []string `toml:"runner_args"`
+	// RunnerPromptArgs are appended last, for a CLI that needs a trailing
+	// marker such as "-" to read the prompt from stdin.
+	RunnerPromptArgs []string `toml:"runner_prompt_args"`
+	// RunnerStructuredOutput reports that this CLI emits JSON on stdout.
+	RunnerStructuredOutput bool              `toml:"runner_structured_output"`
+	RequireExplicit        bool              `toml:"require_explicit"`
+	RequireLease           bool              `toml:"require_lease"`
+	Risk                   string            `toml:"risk"`
+	Bare                   bool              `toml:"bare"`
+	Writes                 string            `toml:"writes"`
+	Shell                  string            `toml:"shell"`
+	Network                bool              `toml:"network"`
+	GitPush                bool              `toml:"git_push"`
+	MaxRuntime             Duration          `toml:"max_runtime"`
+	MaxOutputBytes         int64             `toml:"max_output_bytes"`
+	AuditLevel             string            `toml:"audit_level"`
+	EnforcementConfidence  string            `toml:"enforcement_confidence"`
+	KnownGaps              []string          `toml:"known_gaps"`
+	ShellPolicy            ShellPolicyConfig `toml:"shell_policy"`
 }
 
 type ShellPolicyConfig struct {
@@ -103,6 +111,11 @@ type ShellOSPolicyConfig struct {
 }
 
 type RunnerConfig struct {
+	// Type selects the adapter. Empty means the runner name is the adapter
+	// (claude-code, codex, probe, shell). Set it to "generic" to run any other
+	// CLI coding agent from configuration; a generic runner must also set
+	// manifest_path.
+	Type                  string   `toml:"type"`
 	Command               []string `toml:"command"`
 	DefaultProfile        string   `toml:"default_profile"`
 	ManifestPath          string   `toml:"manifest_path"`

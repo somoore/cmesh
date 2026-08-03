@@ -211,7 +211,7 @@ authorization key, but it is invisible plumbing. Name it.
   "there is no cross-node session" rule is correct; the portable state is the
   branch, not a harness's hidden memory.
 
-### Phase 5 — Generic runner adapter
+### Phase 5 — Generic runner adapter *(shipped)*
 
 Two hardcoded adapters caps the multi-vendor story at two vendors. The
 invariants the adapters actually enforce are small and portable.

@@ -9,13 +9,18 @@ import (
 	"time"
 )
 
+// MaxSummaryBytes bounds the worker-authored summary carried in a result
+// envelope. task.ValidateResult applies its own, larger cap independently; this
+// is the adapter-side bound so a runaway agent cannot fill the envelope.
+const MaxSummaryBytes = 8000
+
 func ResultFromProcess(runnerName string, proc CompletedProcess, argv []string, prompt string) Result {
 	summary, usage, extra := parseStructuredOutput(proc.Stdout)
 	if summary == "" {
 		summary = strings.TrimSpace(proc.Combined)
 	}
-	if len(summary) > 8000 {
-		summary = summary[:8000]
+	if len(summary) > MaxSummaryBytes {
+		summary = summary[:MaxSummaryBytes]
 	}
 	if usage.DurationS == 0 {
 		usage.DurationS = int64(proc.Duration / time.Second)
