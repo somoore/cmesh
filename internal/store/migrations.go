@@ -132,7 +132,11 @@ var migrations = []migration{
 				metadata_json TEXT NOT NULL DEFAULT '',
 				answered_seq INTEGER NOT NULL DEFAULT 0,
 				client_message_id TEXT NOT NULL DEFAULT '',
-				created_at TEXT NOT NULL
+				created_at TEXT NOT NULL,
+				-- A message only means something attached to a task. The FK keeps
+				-- an orphan out of the store the way idempotency_keys does, and
+				-- drops a task's channel with the task.
+				FOREIGN KEY(task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_task_messages_task_seq ON task_messages(task_id, seq)`,
 			// Idempotency for a retried post: the same client id on the same task

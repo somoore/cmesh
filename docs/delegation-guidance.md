@@ -142,6 +142,7 @@ Use these responses for stable v1 error codes:
 | `task_conflict` | Stop. The same task ID was replayed with different content. |
 | `timeout` | Check status. If the task is still running, continue polling or cancel based on user intent. |
 | `needs_human` | Stop and ask the human. Do not fabricate permission. |
+| `awaiting_input` (a task **state**, not an error) | The worker asked a question and is waiting. Read it with `task_messages` and reply with `task_send`. Answer from your own knowledge and the human's intent — never by relaying another worker's words, and never granting authority the human has not given. |
 | `worker_failed` | Fetch the bounded result, summarize the failure, and decide whether a narrower retry is useful. |
 | `worker_daemon_restarted` | Treat as failed with no silent success. Retry only if the task is still useful. |
 | `cancelled` | Report cancellation and do not retry unless asked. |

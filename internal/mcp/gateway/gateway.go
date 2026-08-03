@@ -1649,6 +1649,9 @@ func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, e
 func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, timeoutSeconds int) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
+		if _, scoped := taskTokenSession(ctx); scoped {
+			return toolFailure(task.ErrorPeerUnauthorized, "this tool operates on tasks this node delegated; a worker task token cannot use it")
+		}
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
@@ -1677,6 +1680,12 @@ func (g *Gateway) fetchOwnedTask(
 ) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
+		// A per-task token belongs to a worker task on this node, which has no
+		// peer_tasks row. Say so plainly instead of reporting the mirror lookup
+		// miss, which reads as a missing task rather than the wrong credential.
+		if _, scoped := taskTokenSession(ctx); scoped {
+			return toolFailure(task.ErrorPeerUnauthorized, "this tool operates on tasks this node delegated; a worker task token cannot use it")
+		}
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
@@ -1753,6 +1762,9 @@ func (g *Gateway) artifactCall(ctx context.Context, taskID, kind string) (ToolRe
 func (g *Gateway) cancelCall(ctx context.Context, taskID, reason string) (ToolResponse, error) {
 	peerTask, err := g.Store.GetPeerTask(ctx, taskID)
 	if err != nil {
+		if _, scoped := taskTokenSession(ctx); scoped {
+			return toolFailure(task.ErrorPeerUnauthorized, "this tool operates on tasks this node delegated; a worker task token cannot use it")
+		}
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {

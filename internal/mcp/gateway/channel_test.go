@@ -298,3 +298,52 @@ func TestChannelEnforcesBodyAndCountLimits(t *testing.T) {
 		t.Fatalf("cap denial should say the channel is full, got %q", resp.Error.Detail)
 	}
 }
+
+// A question that times out unanswered must not leave the task displaying
+// awaiting_input forever: the worker proceeds on its own judgment, and the
+// state an operator sees has to match reality.
+func TestUnansweredAskDoesNotStrandAwaitingInput(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	rec := seedWorkerTask(t, g, "tsk_notstuck")
+
+	if _, err := g.askCall(workerCtx(rec.ID), "", "anyone?", "q1", nil, 1); err != nil {
+		t.Fatalf("askCall: %v", err)
+	}
+	current, err := g.Store.GetTask(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if current.State != task.StateRunning {
+		t.Fatalf("state after an unanswered ask = %q, want running", current.State)
+	}
+}
+
+// A worker token reaching an origin-side task tool gets a clear refusal naming
+// the credential problem, not an incidental "not found" from the peer mirror.
+func TestWorkerTokenGetsClearRefusalOnOriginTools(t *testing.T) {
+	g := newTestGateway(t)
+	rec := seedWorkerTask(t, g, "tsk_wrongend")
+	ctx := workerCtx(rec.ID)
+
+	for _, tc := range []struct {
+		name string
+		call func() (ToolResponse, error)
+	}{
+		{"cancel", func() (ToolResponse, error) { return g.cancelCall(ctx, rec.ID, "stop") }},
+		{"task_result", func() (ToolResponse, error) { return g.resultCall(ctx, rec.ID) }},
+		{"task_status", func() (ToolResponse, error) { return g.statusCall(ctx, rec.ID, false, 0) }},
+		{"task_messages", func() (ToolResponse, error) { return g.messagesCall(ctx, rec.ID, 0, 0, false, 0) }},
+		{"task_send", func() (ToolResponse, error) { return g.sendCall(ctx, rec.ID, "go on", "", 0, "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, _ := tc.call()
+			if resp.OK {
+				t.Fatalf("%s must not succeed for a worker token: %+v", tc.name, resp)
+			}
+			if resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
+				t.Fatalf("%s should refuse with peer_unauthorized, got %+v", tc.name, resp.Error)
+			}
+		})
+	}
+}

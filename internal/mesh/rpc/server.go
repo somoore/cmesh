@@ -1286,6 +1286,15 @@ func (s *Server) handlePostTaskMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, err.Error())
 		return
 	}
+	// An answer unblocks the task immediately, so its state is right even if the
+	// worker's ask already timed out and it has not asked again.
+	if kind == store.MessageKindAnswer && rec.State == task.StateAwaitingInput {
+		if _, err := s.Store.UpdateTaskState(r.Context(), taskID, store.StateUpdate{State: task.StateRunning}); err != nil {
+			// Best effort: the message is recorded either way, and the channel
+			// must never fail a task.
+			_ = err
+		}
+	}
 	s.record(r.Context(), audit.Event{
 		Type:          "task.message." + kind,
 		TaskID:        taskID,
@@ -1720,7 +1729,10 @@ func (s *Server) waitForTaskStatus(w http.ResponseWriter, r *http.Request, taskI
 				writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 				return
 			}
-			if rec.State.Terminal() {
+			// Return early for a task blocked on a question too: it will not
+			// progress until someone answers, so holding the caller for the rest
+			// of the wait budget only delays the reply that unblocks it.
+			if rec.State.Terminal() || rec.State == task.StateAwaitingInput {
 				s.writeTaskStatus(w, r, taskID, http.StatusOK)
 				return
 			}

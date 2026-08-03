@@ -93,12 +93,6 @@ func (s *Store) AppendTaskMessage(ctx context.Context, in AppendMessageInput) (T
 		return TaskMessage{}, ErrMessageTooLarge
 	}
 
-	if existing, found, err := s.taskMessageByClientID(ctx, in.TaskID, in.ClientMessageID); err != nil {
-		return TaskMessage{}, err
-	} else if found {
-		return existing, nil
-	}
-
 	metadata := ""
 	if len(in.Metadata) > 0 {
 		encoded, err := json.Marshal(in.Metadata)
@@ -113,6 +107,19 @@ func (s *Store) AppendTaskMessage(ctx context.Context, in AppendMessageInput) (T
 		return TaskMessage{}, fmt.Errorf("begin append task message: %w", err)
 	}
 	defer rollback(tx)
+
+	// Check idempotency inside the transaction: doing it beforehand let two
+	// concurrent retries both miss and race to the unique index, surfacing a raw
+	// constraint error instead of the replay this is meant to give.
+	if strings.TrimSpace(in.ClientMessageID) != "" {
+		existing, found, err := taskMessageByClientIDTx(ctx, tx, in.TaskID, in.ClientMessageID)
+		if err != nil {
+			return TaskMessage{}, err
+		}
+		if found {
+			return existing, nil
+		}
+	}
 
 	var count int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_messages WHERE task_id = ?`, in.TaskID).Scan(&count); err != nil {
@@ -169,14 +176,17 @@ func (s *Store) AppendTaskMessage(ctx context.Context, in AppendMessageInput) (T
 	}, nil
 }
 
-func (s *Store) taskMessageByClientID(ctx context.Context, taskID, clientMessageID string) (TaskMessage, bool, error) {
-	if strings.TrimSpace(clientMessageID) == "" {
-		return TaskMessage{}, false, nil
-	}
-	messages, err := s.queryTaskMessages(ctx,
+// taskMessageByClientIDTx looks up a prior message by client id within an open
+// transaction, so the check and the insert cannot interleave.
+func taskMessageByClientIDTx(ctx context.Context, tx *sql.Tx, taskID, clientMessageID string) (TaskMessage, bool, error) {
+	rows, err := tx.QueryContext(ctx,
 		`SELECT message_id, task_id, seq, direction, kind, body_untrusted, metadata_json, answered_seq, client_message_id, created_at
 		 FROM task_messages WHERE task_id = ? AND client_message_id = ? LIMIT 1`,
 		taskID, clientMessageID)
+	if err != nil {
+		return TaskMessage{}, false, fmt.Errorf("query task message by client id: %w", err)
+	}
+	messages, err := scanTaskMessages(rows)
 	if err != nil {
 		return TaskMessage{}, false, err
 	}
@@ -233,6 +243,10 @@ func (s *Store) queryTaskMessages(ctx context.Context, query string, args ...any
 	if err != nil {
 		return nil, fmt.Errorf("query task messages: %w", err)
 	}
+	return scanTaskMessages(rows)
+}
+
+func scanTaskMessages(rows *sql.Rows) ([]TaskMessage, error) {
 	defer rows.Close()
 	var out []TaskMessage
 	for rows.Next() {
@@ -248,10 +262,11 @@ func (s *Store) queryTaskMessages(ctx context.Context, query string, args ...any
 				message.Metadata = decoded
 			}
 		}
-		message.CreatedAt, err = parseTime(created)
+		createdAt, err := parseTime(created)
 		if err != nil {
 			return nil, fmt.Errorf("decode task message created_at: %w", err)
 		}
+		message.CreatedAt = createdAt
 		out = append(out, message)
 	}
 	if err := rows.Err(); err != nil {

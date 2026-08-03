@@ -144,6 +144,11 @@ func (g *Gateway) askCall(ctx context.Context, requestedTaskID, body, clientMess
 	}
 
 	answer, answered := g.waitForAnswer(ctx, rec.ID, question.Seq, waitSeconds)
+	// Leave awaiting_input on every return path, answered or not. The state is
+	// operator-visible, and a worker that asks, times out, and proceeds on its
+	// own judgment must not leave the task displaying "blocked on a question"
+	// for the rest of its life.
+	g.setAwaitingInput(ctx, rec, false)
 	if !answered {
 		return ToolResponse{OK: true, Result: map[string]any{
 			"task_id":  rec.ID,
@@ -152,7 +157,6 @@ func (g *Gateway) askCall(ctx context.Context, requestedTaskID, body, clientMess
 			"guidance": "No answer yet. Continue if you can proceed safely, or call task_ask again with the same client_message_id to keep waiting for this question.",
 		}}, nil
 	}
-	g.setAwaitingInput(ctx, rec, false)
 	return ToolResponse{OK: true, Result: map[string]any{
 		"task_id":  rec.ID,
 		"seq":      question.Seq,

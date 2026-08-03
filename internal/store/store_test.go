@@ -363,6 +363,7 @@ func TestRecordAuditEventAllocatesDistinctSeqsConcurrently(t *testing.T) {
 func TestTaskMessagesOrderIdempotencyAndAnswerLinking(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	seedTaskForMessages(t, s, "tsk_chan")
 
 	question, err := s.AppendTaskMessage(ctx, AppendMessageInput{
 		TaskID: "tsk_chan", Direction: MessageDirectionFromWorker, Kind: MessageKindQuestion,
@@ -422,6 +423,8 @@ func TestTaskMessagesOrderIdempotencyAndAnswerLinking(t *testing.T) {
 func TestTaskMessageLimits(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	seedTaskForMessages(t, s, "tsk_limits")
+	seedTaskForMessages(t, s, "tsk_other")
 
 	_, err := s.AppendTaskMessage(ctx, AppendMessageInput{
 		TaskID: "tsk_limits", Direction: MessageDirectionFromWorker, Kind: MessageKindNote,
@@ -455,5 +458,15 @@ func TestTaskMessageLimits(t *testing.T) {
 		TaskID: "tsk_other", Direction: MessageDirectionFromWorker, Kind: "shout", Body: "x",
 	}); err == nil {
 		t.Fatal("invalid kind should be rejected")
+	}
+}
+
+// seedTaskForMessages creates a task row so channel messages satisfy the
+// task_messages foreign key.
+func seedTaskForMessages(t *testing.T, s *Store, taskID string) {
+	t.Helper()
+	rec := newRecord(taskID)
+	if _, err := s.BeginDispatch(context.Background(), rec, []byte(taskID), time.Hour); err != nil {
+		t.Fatalf("seed task %s: %v", taskID, err)
 	}
 }
