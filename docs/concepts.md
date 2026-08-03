@@ -8,6 +8,8 @@ This is the mental-model doc. If you want the wiring, read [architecture.md](arc
 
 A coding agent is powerful but stuck. Claude Code or Codex runs on one machine, sees one filesystem, talks to one set of toolchains and one set of credentials. cmesh lets that agent hand a scoped task to a coding agent on **another** machine you control, and get a structured result back — without you leaving the session you're already in.
 
+Several of those handoffs make a team. A running task can report progress and ask you a question; when the next step belongs on a different machine, one agent hands its branch to another. The shape is **one conductor, many instruments** — your session decides, workers return evidence, and agents never message each other. [teams.md](teams.md) is the full picture.
+
 It is not remote shell, not screen sharing, not a fleet-management console. It is one agent asking another agent, on a machine you own, to do a specific piece of bounded work and report back. The asking happens as a normal tool call. The work happens locally on the far machine, through that machine's own runner and its own credentials. The result comes home as a durable, auditable envelope.
 
 ## Why it exists
@@ -59,6 +61,7 @@ In each case your agent stays where it is, the work happens on the right machine
 
 ## Where to go next
 
+- [teams.md](teams.md) — how several delegations become a team, and the rules that keep that safe.
 - [architecture.md](architecture.md) — the two MCP surfaces, the full request lifecycle, trust boundaries, and the data model.
 - [security.md](security.md) — how cmesh rejects illegitimate nodes, what it protects, what it does not, and how to harden a deployment.
 - [quickstart.md](quickstart.md) — get a two-machine mesh running.

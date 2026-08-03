@@ -79,6 +79,9 @@ func (r *Runner) Manifest() runner.CapabilityManifest {
 			Billing:               "codex account",
 			EnforcementConfidence: confidence,
 			KnownGaps:             append([]string(nil), profile.KnownGaps...),
+			// The agent receives queued messages when it calls task_ask through its
+			// task-scoped MCP gateway. Live stdin streaming is not wired yet.
+			MidTaskInput: "checkpoint",
 		}
 	}
 	return runner.CapabilityManifest{

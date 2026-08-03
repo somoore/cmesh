@@ -16,13 +16,11 @@ detailed plan of record; this page is the summary.
 - Preserve the least-authority profile ladder: deterministic probes before read-only agents, repo edit profiles, desktop control, or system change profiles.
 - Keep built-in high-risk profiles explicit and lease-gated; require custom high-risk profiles to opt into the same `require_lease` guard.
 - Keep CI focused on reproducible Go tests, workflow linting, vulnerability scanning, supply-chain checks, and CodeQL.
-- **Coherence cleanup** (teams plan, Phase 0): retire the unused REST tool path in favor of the JSON-RPC MCP surface, consolidate the two harness-registration tools, and default an unspecified profile to `query` rather than the legacy `dev`.
-- **Progress events** (Phase 1): expose the existing `task_events` record as a pollable tool so a conductor can narrate real progress instead of polling terminal state.
+- The team primitives have shipped: progress events, the worker-to-origin task channel, cross-peer handoff, workstreams, and a generic runner adapter so any CLI agent can join. See [Teams](docs/teams.md).
 
 ## Next
 
-- **Task channel, worker to origin** (Phase 2a): a durable, audited, per-task message log so a worker can post progress and ask a question — including a typed, policy-checked approval request — without the task having to die to do it. Adds an `awaiting_input` state. Needs no harness streaming, so it works for every MCP-capable runner immediately.
-- **Cross-peer handoff** (Phase 3): seed a task on one peer from another peer's branch and bundle, with lineage recorded in the task record, the audit event, and the commit footer. This is the core team motion — implement on one machine, verify natively on another.
+- **Live mid-task steering** (teams plan, Phase 2b): keep stdin open on a running task so the origin can redirect an agent mid-flight, via each harness's streaming mode. Today messages reach an agent at its next `task_ask` checkpoint, which each runner declares as `mid_task_input` in its manifest.
 - Add OS sandbox wrappers where practical:
   - macOS Seatbelt profile support for runner subprocesses.
   - Linux systemd sandboxing examples for service deployments.
@@ -34,9 +32,6 @@ detailed plan of record; this page is the summary.
 
 ## Later
 
-- **Inbound live steering** (Phase 2b): keep stdin open on a running task so the origin can redirect an agent mid-flight, via each harness's streaming mode. Runners that cannot stream degrade to checkpoint delivery rather than losing the feature.
-- **Workstreams** (Phase 4): name the delegation thread that `origin_session_id` already represents, filter tasks by it, and report status across every peer in one call.
-- **Generic runner adapter** (Phase 5): a config-driven runner contract so any CLI coding agent can join the mesh without a bespoke adapter, with honesty enforced by behavioral doctor checks rather than declaration.
 - Add a shared-team authorization layer for per-human approval and role separation.
 - Add richer policy checks for prompt-content risk before a high-risk profile is used.
 - Add more typed probes so common tasks do not need shell or agent-backed profiles.

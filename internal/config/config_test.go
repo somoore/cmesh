@@ -215,3 +215,45 @@ func writeRoleConfig(t *testing.T, role string) string {
 	}
 	return path
 }
+
+// A generic runner must declare what it enforces, and that must be caught at
+// config load like every other config-shape error -- not later at daemon
+// preflight, where validate_config would have already reported success.
+func TestValidateGenericRunnerRequiresManifest(t *testing.T) {
+	cases := []struct {
+		name       string
+		runnerType string
+		manifest   string
+		runnerArgs string
+		wantErr    bool
+	}{
+		{"generic with manifest", `type = "generic"`, `manifest_path = "/tmp/m.json"`, "", false},
+		{"generic without manifest", `type = "generic"`, "", "", true},
+		{"unknown type", `type = "mystery"`, `manifest_path = "/tmp/m.json"`, "", true},
+		{"built-in runner needs no type", "", "", "", false},
+		{"runner_args on a built-in runner", "", "", `runner_args = ["--x"]`, true},
+		{"runner_args on a generic runner", `type = "generic"`, `manifest_path = "/tmp/m.json"`, `runner_args = ["--x"]`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+				"mesh_port = 7778\nmcp_port = 7777\n\n" +
+				"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+				"[profiles.look]\nrunner = \"acme\"\ncapabilities = [\"read_files\"]\n" +
+				"writes = \"deny\"\nshell = \"deny\"\n" + tc.runnerArgs + "\n\n" +
+				"[runners.acme]\n" + tc.runnerType + "\ncommand = [\"/usr/bin/acme\"]\n" +
+				"default_profile = \"look\"\n" + tc.manifest + "\n"
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Load(path)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected a validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("config should load: %v", err)
+			}
+		})
+	}
+}

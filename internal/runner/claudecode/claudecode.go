@@ -82,6 +82,9 @@ func (r *Runner) Manifest() runner.CapabilityManifest {
 			EnforcementConfidence: confidence,
 			KnownGaps:             append([]string(nil), profile.KnownGaps...),
 			Bare:                  profile.Bare,
+			// The agent receives queued messages when it calls task_ask through its
+			// task-scoped MCP gateway. Live stdin streaming is not wired yet.
+			MidTaskInput: "checkpoint",
 		}
 	}
 	return runner.CapabilityManifest{
