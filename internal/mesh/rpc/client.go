@@ -80,6 +80,55 @@ func (c *Client) TaskStatus(ctx context.Context, taskID string, wait bool, timeo
 	return out, c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
+// cursorFetch performs an incremental read against a task sub-resource that
+// supports after/limit/wait. TaskEvents and TaskMessages share it so the cursor
+// and long-poll semantics cannot drift between the two streams.
+func (c *Client) cursorFetch(ctx context.Context, taskID, subPath string, after int64, limit int, wait bool, timeoutSeconds int, out any) error {
+	q := url.Values{}
+	if after > 0 {
+		q.Set("after", strconv.FormatInt(after, 10))
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	if wait {
+		q.Set("wait", "true")
+		if timeoutSeconds > 0 {
+			q.Set("timeout_s", strconv.Itoa(timeoutSeconds))
+			// Outlive the server's own long-poll budget so a timely empty
+			// response is not mistaken for an unreachable peer.
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSeconds+10)*time.Second)
+			defer cancel()
+		}
+	}
+	path := "/v1/tasks/" + url.PathEscape(taskID) + "/" + subPath
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return c.do(ctx, http.MethodGet, path, nil, out)
+}
+
+// TaskEvents fetches a task's recorded progress after the given cursor. Pass
+// wait to long-poll until there is something newer than after.
+func (c *Client) TaskEvents(ctx context.Context, taskID string, after int64, limit int, wait bool, timeoutSeconds int) (schema.TaskEventsResponse, error) {
+	var out schema.TaskEventsResponse
+	return out, c.cursorFetch(ctx, taskID, "events", after, limit, wait, timeoutSeconds, &out)
+}
+
+// TaskMessages fetches a task's channel after the given cursor. Pass wait to
+// long-poll until there is something newer than after.
+func (c *Client) TaskMessages(ctx context.Context, taskID string, after int64, limit int, wait bool, timeoutSeconds int) (schema.TaskMessagesResponse, error) {
+	var out schema.TaskMessagesResponse
+	return out, c.cursorFetch(ctx, taskID, "messages", after, limit, wait, timeoutSeconds, &out)
+}
+
+// PostTaskMessage sends the owner's answer or direction to a running task.
+func (c *Client) PostTaskMessage(ctx context.Context, taskID string, req schema.PostTaskMessageRequest) (schema.PostTaskMessageResponse, error) {
+	var out schema.PostTaskMessageResponse
+	return out, c.do(ctx, http.MethodPost, "/v1/tasks/"+url.PathEscape(taskID)+"/messages", req, &out)
+}
+
 func (c *Client) TaskResult(ctx context.Context, taskID string) (schema.TaskResultResponse, error) {
 	var out schema.TaskResultResponse
 	return out, c.do(ctx, http.MethodGet, "/v1/tasks/"+url.PathEscape(taskID)+"/result", nil, &out)

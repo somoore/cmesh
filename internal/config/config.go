@@ -67,26 +67,34 @@ type OutboundPolicy struct {
 }
 
 type ProfileConfig struct {
-	Runner                string            `toml:"runner"`
-	Description           string            `toml:"description"`
-	Intents               []string          `toml:"intents"`
-	Capabilities          []string          `toml:"capabilities"`
-	Claims                []string          `toml:"claims"`
-	AllowedPeers          []string          `toml:"allowed_peers"`
-	RequireExplicit       bool              `toml:"require_explicit"`
-	RequireLease          bool              `toml:"require_lease"`
-	Risk                  string            `toml:"risk"`
-	Bare                  bool              `toml:"bare"`
-	Writes                string            `toml:"writes"`
-	Shell                 string            `toml:"shell"`
-	Network               bool              `toml:"network"`
-	GitPush               bool              `toml:"git_push"`
-	MaxRuntime            Duration          `toml:"max_runtime"`
-	MaxOutputBytes        int64             `toml:"max_output_bytes"`
-	AuditLevel            string            `toml:"audit_level"`
-	EnforcementConfidence string            `toml:"enforcement_confidence"`
-	KnownGaps             []string          `toml:"known_gaps"`
-	ShellPolicy           ShellPolicyConfig `toml:"shell_policy"`
+	Runner       string   `toml:"runner"`
+	Description  string   `toml:"description"`
+	Intents      []string `toml:"intents"`
+	Capabilities []string `toml:"capabilities"`
+	Claims       []string `toml:"claims"`
+	AllowedPeers []string `toml:"allowed_peers"`
+	// RunnerArgs are extra argv elements for this profile on a generic runner:
+	// whatever flags that CLI uses to express this profile's authority.
+	RunnerArgs []string `toml:"runner_args"`
+	// RunnerPromptArgs are appended last, for a CLI that needs a trailing
+	// marker such as "-" to read the prompt from stdin.
+	RunnerPromptArgs []string `toml:"runner_prompt_args"`
+	// RunnerStructuredOutput reports that this CLI emits JSON on stdout.
+	RunnerStructuredOutput bool              `toml:"runner_structured_output"`
+	RequireExplicit        bool              `toml:"require_explicit"`
+	RequireLease           bool              `toml:"require_lease"`
+	Risk                   string            `toml:"risk"`
+	Bare                   bool              `toml:"bare"`
+	Writes                 string            `toml:"writes"`
+	Shell                  string            `toml:"shell"`
+	Network                bool              `toml:"network"`
+	GitPush                bool              `toml:"git_push"`
+	MaxRuntime             Duration          `toml:"max_runtime"`
+	MaxOutputBytes         int64             `toml:"max_output_bytes"`
+	AuditLevel             string            `toml:"audit_level"`
+	EnforcementConfidence  string            `toml:"enforcement_confidence"`
+	KnownGaps              []string          `toml:"known_gaps"`
+	ShellPolicy            ShellPolicyConfig `toml:"shell_policy"`
 }
 
 type ShellPolicyConfig struct {
@@ -103,6 +111,11 @@ type ShellOSPolicyConfig struct {
 }
 
 type RunnerConfig struct {
+	// Type selects the adapter. Empty means the runner name is the adapter
+	// (claude-code, codex, probe, shell). Set it to "generic" to run any other
+	// CLI coding agent from configuration; a generic runner must also set
+	// manifest_path.
+	Type                  string   `toml:"type"`
 	Command               []string `toml:"command"`
 	DefaultProfile        string   `toml:"default_profile"`
 	ManifestPath          string   `toml:"manifest_path"`
@@ -369,6 +382,14 @@ func (c *Config) Validate() error {
 		// The high-risk require_explicit/require_lease invariant is enforced by
 		// ValidateSemantics above, keyed on capabilities so it holds for custom
 		// profile names too.
+		// runner_args only reach the generic adapter. On a built-in runner they
+		// would be silently dropped, which reads as "I set the flag and nothing
+		// happened" -- so say so instead.
+		if len(prof.RunnerArgs) > 0 || len(prof.RunnerPromptArgs) > 0 {
+			if !strings.EqualFold(c.Runners[prof.Runner].Type, "generic") {
+				return fmt.Errorf("profiles.%s sets runner_args or runner_prompt_args, which only apply to a type=generic runner; runner %q is built-in and would ignore them", name, prof.Runner)
+			}
+		}
 		if prof.Risk == profiledefs.RiskMedium && (name == profiledefs.QueryNetwork || name == profiledefs.QueryShell) && !prof.RequireExplicit {
 			return fmt.Errorf("profiles.%s risk=medium must require explicit selection", name)
 		}
@@ -387,6 +408,16 @@ func (c *Config) Validate() error {
 			if _, ok := c.Profiles[runner.DefaultProfile]; !ok {
 				return fmt.Errorf("runners.%s.default_profile references undefined profile %q", name, runner.DefaultProfile)
 			}
+		}
+		// A generic runner must declare what it enforces. Catch it here so
+		// validate_config and the profile_validate tool report it, rather than
+		// leaving it to fail later at daemon preflight like every other
+		// config-shape error would not.
+		if strings.EqualFold(runner.Type, "generic") && strings.TrimSpace(runner.ManifestPath) == "" {
+			return fmt.Errorf("runners.%s is type=generic and must set manifest_path: a generic runner declares what it enforces, including its known gaps", name)
+		}
+		if runner.Type != "" && !strings.EqualFold(runner.Type, "generic") {
+			return fmt.Errorf("runners.%s.type must be generic when set, got %q", name, runner.Type)
 		}
 	}
 	return nil

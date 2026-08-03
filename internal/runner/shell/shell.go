@@ -55,6 +55,8 @@ func (r *Runner) Manifest() runner.CapabilityManifest {
 			Billing:               "none",
 			EnforcementConfidence: confidence,
 			KnownGaps:             []string{"allowlisted diagnostics still inherit OS account read permissions"},
+			// An allowlisted command runs to completion with no agent to talk to.
+			MidTaskInput: "none",
 		}
 	}
 	return runner.CapabilityManifest{SchemaVersion: "runner_manifest.v1", Runner: Name, Profiles: profiles}

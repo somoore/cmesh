@@ -73,6 +73,24 @@ type Runner interface {
 	Run(req RunRequest) (Result, error)
 }
 
+// Mid-task input modes. See ProfileManifest.MidTaskInput.
+const (
+	MidTaskInputNone       = "none"
+	MidTaskInputCheckpoint = "checkpoint"
+	MidTaskInputStream     = "stream"
+)
+
+// ValidMidTaskInput reports whether value is a recognized mid-task input mode.
+// An empty value is allowed and means undeclared.
+func ValidMidTaskInput(value string) bool {
+	switch value {
+	case "", MidTaskInputNone, MidTaskInputCheckpoint, MidTaskInputStream:
+		return true
+	default:
+		return false
+	}
+}
+
 type CapabilityManifest struct {
 	SchemaVersion string                     `json:"schema_version"`
 	Runner        string                     `json:"runner"`
@@ -88,7 +106,17 @@ type ProfileManifest struct {
 	Billing               string            `json:"billing,omitempty"`
 	EnforcementConfidence string            `json:"enforcement_confidence"`
 	KnownGaps             []string          `json:"known_gaps,omitempty"`
-	Bare                  bool              `json:"bare,omitempty"`
+	// MidTaskInput declares how this runner receives messages sent to a task
+	// while it is running:
+	//
+	//   none       the runner cannot receive mid-task input at all
+	//   checkpoint the agent picks up queued messages when it calls task_ask
+	//   stream     the harness accepts input on an open stdin mid-run
+	//
+	// Declared per runner, like every other manifest claim, and verified
+	// behaviorally by `cmesh doctor runner` rather than taken on trust.
+	MidTaskInput string `json:"mid_task_input,omitempty"`
+	Bare         bool   `json:"bare,omitempty"`
 }
 
 type RunRequest struct {

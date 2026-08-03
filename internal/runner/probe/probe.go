@@ -62,6 +62,8 @@ func (r *Runner) Manifest() runner.CapabilityManifest {
 			Billing:               "none",
 			EnforcementConfidence: confidence,
 			KnownGaps:             []string{"repo_status uses git read-only commands when git is available"},
+			// A deterministic probe runs to completion with no agent to talk to.
+			MidTaskInput: "none",
 		}
 	}
 	return runner.CapabilityManifest{SchemaVersion: "runner_manifest.v1", Runner: Name, Profiles: profiles}

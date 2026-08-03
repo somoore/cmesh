@@ -106,6 +106,10 @@
         "schema_version": {
           "const": "task.v1"
         },
+        "handoff_from": {
+          "type": "string",
+          "description": "Task whose branch seeded this one via cross-peer handoff. Audit and provenance display only; it never grants authority."
+        },
         "task_id": {
           "$ref": "#/$defs/task_id"
         },
@@ -331,7 +335,7 @@
       }
     },
     "task_state": {
-      "enum": ["queued", "running", "done", "failed", "denied", "cancelled"]
+      "enum": ["queued", "running", "awaiting_input", "done", "failed", "denied", "cancelled"]
     },
     "error_code": {
       "enum": [

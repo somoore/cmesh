@@ -22,12 +22,17 @@ const (
 type State string
 
 const (
-	StateQueued    State = "queued"
-	StateRunning   State = "running"
-	StateDone      State = "done"
-	StateFailed    State = "failed"
-	StateDenied    State = "denied"
-	StateCancelled State = "cancelled"
+	StateQueued  State = "queued"
+	StateRunning State = "running"
+	// StateAwaitingInput is a running task blocked on a question it asked its
+	// owner. The runner process is still alive, so this is non-terminal: it must
+	// be swept on daemon restart like running, and the task can still complete
+	// on its own if the agent proceeds without waiting.
+	StateAwaitingInput State = "awaiting_input"
+	StateDone          State = "done"
+	StateFailed        State = "failed"
+	StateDenied        State = "denied"
+	StateCancelled     State = "cancelled"
 )
 
 type ErrorCode string
@@ -48,6 +53,11 @@ const (
 	ErrorWorkerFailed          ErrorCode = "worker_failed"
 	ErrorWorkerDaemonRestarted ErrorCode = "worker_daemon_restarted"
 	ErrorCancelled             ErrorCode = "cancelled"
+	// ErrorHandoffBaseMissing means the receiving peer's checkout does not hold
+	// the commits the handed-off branch builds on, so the seed bundle cannot be
+	// applied there. It is a distinct code because the fix is specific: give both
+	// peers a shared remote, or push the branch from the source peer.
+	ErrorHandoffBaseMissing    ErrorCode = "handoff_base_missing"
 	ErrorResultTooLarge        ErrorCode = "result_too_large"
 	ErrorTranscriptUnavailable ErrorCode = "transcript_unavailable"
 )
@@ -74,6 +84,9 @@ type Record struct {
 	TerminalErrorCode ErrorCode       `json:"terminal_error_code,omitempty"`
 	ResultRef         string          `json:"result_ref,omitempty"`
 	Result            *ResultEnvelope `json:"result,omitempty"`
+	// HandoffFrom names the task whose branch seeded this one. Audit and
+	// provenance display only -- it never grants authority.
+	HandoffFrom string `json:"handoff_from,omitempty"`
 }
 
 type ResultEnvelope struct {
@@ -177,7 +190,7 @@ func IdempotencyKey(originNodeID, originSessionID, taskID string) string {
 
 func (s State) Valid() bool {
 	switch s {
-	case StateQueued, StateRunning, StateDone, StateFailed, StateDenied, StateCancelled:
+	case StateQueued, StateRunning, StateAwaitingInput, StateDone, StateFailed, StateDenied, StateCancelled:
 		return true
 	default:
 		return false
@@ -204,7 +217,13 @@ func ValidTransition(from, to State) bool {
 	case StateQueued:
 		return to == StateRunning || to == StateDenied || to == StateFailed || to == StateCancelled
 	case StateRunning:
-		return to == StateDone || to == StateFailed || to == StateCancelled
+		return to == StateDone || to == StateFailed || to == StateCancelled || to == StateAwaitingInput
+	case StateAwaitingInput:
+		// Back to running when answered, but also straight to a terminal state:
+		// the runner process keeps executing while the task displays
+		// awaiting_input, so an agent that stops waiting and finishes must not
+		// have its result rejected as an invalid transition.
+		return to == StateRunning || to == StateDone || to == StateFailed || to == StateCancelled
 	default:
 		return false
 	}

@@ -2,15 +2,25 @@
 
 cmesh is experimental software for trusted private networks. This roadmap sets expectations for the hardening path without implying that the current release is enterprise remote management.
 
+The destination is a **team**: coding agents from different vendors, on
+different machines in a tailnet, working the same problem under one policy
+boundary with a durable record of who did what. cmesh gets there through the
+conductor model — one orchestrating agent delegates bounded tasks, workers
+return evidence, and work products move as git branches rather than as prose fed
+into another agent's prompt. [docs/teams-plan.md](docs/teams-plan.md) is the
+detailed plan of record; this page is the summary.
+
 ## Now
 
 - Keep the default setup narrow: `query` first, explicit peers, explicit cwd allowlists, and no public listener.
 - Preserve the least-authority profile ladder: deterministic probes before read-only agents, repo edit profiles, desktop control, or system change profiles.
 - Keep built-in high-risk profiles explicit and lease-gated; require custom high-risk profiles to opt into the same `require_lease` guard.
 - Keep CI focused on reproducible Go tests, workflow linting, vulnerability scanning, supply-chain checks, and CodeQL.
+- The team primitives have shipped: progress events, the worker-to-origin task channel, cross-peer handoff, workstreams, and a generic runner adapter so any CLI agent can join. See [Teams](docs/teams.md).
 
 ## Next
 
+- **Live mid-task steering** (teams plan, Phase 2b): keep stdin open on a running task so the origin can redirect an agent mid-flight, via each harness's streaming mode. Today messages reach an agent at its next `task_ask` checkpoint, which each runner declares as `mid_task_input` in its manifest.
 - Add OS sandbox wrappers where practical:
   - macOS Seatbelt profile support for runner subprocesses.
   - Linux systemd sandboxing examples for service deployments.
@@ -23,7 +33,6 @@ cmesh is experimental software for trusted private networks. This roadmap sets e
 ## Later
 
 - Add a shared-team authorization layer for per-human approval and role separation.
-- Add remote interactive approval forwarding for desktop/system-change workflows.
 - Add richer policy checks for prompt-content risk before a high-risk profile is used.
 - Add more typed probes so common tasks do not need shell or agent-backed profiles.
 
@@ -33,3 +42,5 @@ cmesh is experimental software for trusted private networks. This roadmap sets e
 - Treating worker output as trusted truth.
 - Silent privilege escalation from a low-risk profile to a high-risk profile.
 - Replacing Tailscale account security, OS account isolation, filesystem permissions, or human review.
+- **Free-form agent-to-agent chat.** Workers never message each other. Letting one agent's output become another agent's instructions is a prompt-injection amplifier and destroys the audit story; handoff moves branches and refs instead.
+- **Cross-node runner session resumption.** There is no shared session across machines. The portable state is the git branch, not a harness's hidden memory.

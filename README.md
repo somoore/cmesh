@@ -1,9 +1,13 @@
 <p align="center">
   <img src="docs/assets/cmesh-wordmark.png" alt="cmesh" width="480">
 </p>
-<p align="center"><strong>Let your coding agent hand off work to a machine you control — without leaving your session.</strong></p>
+<p align="center"><strong>Your coding agents, working as a team across the machines you control.</strong></p>
 
-cmesh gives the coding agent on your machine (Claude Code, Codex) a tool to delegate a scoped, policy-gated task to a coding agent on **another** machine you control, over a private Tailscale tailnet, and get a structured, auditable result back.
+cmesh gives the coding agent on your machine (Claude Code, Codex, or any CLI agent) a tool to delegate a scoped, policy-gated task to a coding agent on **another** machine you control, over a private Tailscale tailnet, and get a structured, auditable result back.
+
+Those tasks form a team. A running task reports progress and can ask you a question rather than guessing; your answer reaches it at its next checkpoint. When the next step belongs on a different machine, one agent hands its branch to another — implement on Linux, verify natively on Windows — and you follow the whole thread with one call.
+
+The team model is deliberate: **one conductor, many instruments.** Your session delegates and decides; workers return evidence. Agents never message each other, and work moves between machines as git branches rather than as one agent's prose becoming another agent's instructions. That is what lets agents from vendors with no reason to trust each other collaborate safely.
 
 ## What it does
 
@@ -71,6 +75,8 @@ From there the cmesh MCP wizard drives everything — detecting Tailscale and pe
 | [Delegation guidance](docs/delegation-guidance.md) | Writing good tasks and reading results |
 | [Runner manifests](docs/runner-manifests.md) | How runners declare capabilities |
 | [Tailscale grants](docs/tailscale-grants.md) | Restricting mesh reachability |
+| [Teams](docs/teams.md) | How agents work together: the conductor model and the five primitives |
+| [Teams plan](docs/teams-plan.md) | How cmesh gets to multi-agent teams, and the model behind it |
 | [Roadmap](ROADMAP.md) | Planned hardening and intentional non-goals |
 | [Contributing](CONTRIBUTING.md) | Local checks and contribution expectations |
 | [Release](docs/release.md) | Release process |

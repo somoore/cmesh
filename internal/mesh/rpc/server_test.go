@@ -807,6 +807,30 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("artifact code = %d, body = %s", artifactRes.Code, artifactRes.Body.String())
 	}
 
+	messagesReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/messages", nil)
+	messagesReq.RemoteAddr = "100.64.0.3:12345"
+	messagesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(messagesRes, messagesReq)
+	if messagesRes.Code != http.StatusForbidden {
+		t.Fatalf("messages code = %d, body = %s", messagesRes.Code, messagesRes.Body.String())
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/messages", strings.NewReader(`{"body":"do this"}`))
+	postReq.RemoteAddr = "100.64.0.3:12345"
+	postRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(postRes, postReq)
+	if postRes.Code != http.StatusForbidden {
+		t.Fatalf("post message code = %d, body = %s", postRes.Code, postRes.Body.String())
+	}
+
+	eventsReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/events", nil)
+	eventsReq.RemoteAddr = "100.64.0.3:12345"
+	eventsRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(eventsRes, eventsReq)
+	if eventsRes.Code != http.StatusForbidden {
+		t.Fatalf("events code = %d, body = %s", eventsRes.Code, eventsRes.Body.String())
+	}
+
 	cancelReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/cancel", nil)
 	cancelReq.RemoteAddr = "100.64.0.3:12345"
 	cancelRes := httptest.NewRecorder()
@@ -1373,4 +1397,191 @@ func (f fakeIdentity) WhoIs(context.Context, string) (tsid.Identity, error) {
 
 func (fakeIdentity) Self(context.Context) (tsid.Identity, error) {
 	return tsid.Identity{NodeID: "node-worker", NodeName: "homelab-vm"}, nil
+}
+
+// The profile a task record says was requested must match what policy resolves
+// for an unspecified request. If they diverge, the record claims the caller
+// asked for one profile while the worker enforced another -- and prepareGit
+// builds the branch slug from ProfileRequested, so the divergence reaches the
+// git history. This previously recorded the legacy high-risk "dev".
+func TestDefaultRequestedProfileMatchesPolicyFallback(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.Config{
+		Node: config.NodeConfig{ID: "homelab-vm", Name: "homelab-vm"},
+		Policy: config.PolicyConfig{
+			AllowedPeers: []string{"mac-studio"},
+			AllowedCWDs:  []string{filepath.Join(root, "**")},
+			HopLimit:     2,
+		},
+		Profiles: map[string]config.ProfileConfig{
+			profiledefs.Query: {
+				Runner:       profiledefs.RunnerProbe,
+				Capabilities: []string{profiledefs.CapDiskInfo},
+				Writes:       profiledefs.WritesDeny,
+				Shell:        profiledefs.ShellDeny,
+			},
+		},
+		Runners: map[string]config.RunnerConfig{
+			profiledefs.RunnerProbe: {Command: []string{"builtin"}, DefaultProfile: profiledefs.Query},
+		},
+	}
+	decision := policy.New(cfg).CheckInbound(policy.TaskIntent{PeerName: "mac-studio", CWD: root})
+	if !decision.Allowed {
+		t.Fatalf("expected allowed decision: %+v", decision)
+	}
+	if got := defaultRequestedProfile(); got != decision.EffectiveProfile {
+		t.Fatalf("defaultRequestedProfile() = %q but policy resolved %q", got, decision.EffectiveProfile)
+	}
+}
+
+// The events endpoint serves recorded progress incrementally to the task's
+// owner, and enforces the schema-version header in its own right rather than
+// relying on any caller having checked it.
+func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+
+	createBody := `{
+		"task_id":"tsk_events",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	waitForTerminalTask(t, server, "tsk_events")
+
+	get := func(path string, schemaVersion string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.RemoteAddr = "100.64.0.1:12345"
+		if schemaVersion != "" {
+			req.Header.Set("Cmesh-Schema-Version", schemaVersion)
+		}
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		return res
+	}
+
+	res := get("/v1/tasks/tsk_events/events", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("events code = %d, body = %s", res.Code, res.Body.String())
+	}
+	var first schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(first.Events) == 0 {
+		t.Fatal("expected the dispatch event to be recorded")
+	}
+	if first.NextSeq != first.Events[len(first.Events)-1].Seq {
+		t.Fatalf("next_seq = %d, want the last event's seq %d", first.NextSeq, first.Events[len(first.Events)-1].Seq)
+	}
+	for _, event := range first.Events {
+		if event.TaskID != "tsk_events" {
+			t.Fatalf("event from another task leaked: %+v", event)
+		}
+	}
+
+	// Resuming from the cursor returns nothing further for a terminal task.
+	res = get("/v1/tasks/tsk_events/events?after="+strconv.FormatInt(first.NextSeq, 10), "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("resumed events code = %d, body = %s", res.Code, res.Body.String())
+	}
+	var resumed schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resumed events: %v", err)
+	}
+	if len(resumed.Events) != 0 {
+		t.Fatalf("resuming from the latest cursor returned %d events, want 0", len(resumed.Events))
+	}
+
+	// has_more must mean "the page was truncated", not "the page was full": a
+	// page that exactly drains the tail has nothing more behind it.
+	exact := get("/v1/tasks/tsk_events/events?limit="+strconv.Itoa(len(first.Events)), "")
+	if exact.Code != http.StatusOK {
+		t.Fatalf("exact-page code = %d, body = %s", exact.Code, exact.Body.String())
+	}
+	var drained schema.TaskEventsResponse
+	if err := json.Unmarshal(exact.Body.Bytes(), &drained); err != nil {
+		t.Fatalf("decode exact page: %v", err)
+	}
+	if drained.HasMore {
+		t.Fatalf("page that exactly drained %d events reported has_more", len(drained.Events))
+	}
+	if len(first.Events) > 1 {
+		truncated := get("/v1/tasks/tsk_events/events?limit=1", "")
+		var page schema.TaskEventsResponse
+		if err := json.Unmarshal(truncated.Body.Bytes(), &page); err != nil {
+			t.Fatalf("decode truncated page: %v", err)
+		}
+		if len(page.Events) != 1 {
+			t.Fatalf("limit=1 returned %d events", len(page.Events))
+		}
+		if !page.HasMore {
+			t.Fatal("genuinely truncated page did not report has_more")
+		}
+	}
+
+	// The response projects the audit record rather than passing it through:
+	// error_detail and the free-form extra map stay in this node's own audit
+	// log, which is the artifact for investigating this machine.
+	if err := server.Store.RecordAuditEvent(context.Background(), audit.Event{
+		EventID:     "evt_detail",
+		Type:        "task.failed",
+		TaskID:      "tsk_events",
+		NodeID:      "homelab-vm",
+		Timestamp:   time.Now().UTC(),
+		Runner:      "fake",
+		Profile:     "dev",
+		ErrorCode:   "worker_failed",
+		ErrorDetail: "/Users/secret/path exploded",
+		Extra:       map[string]any{"local_only": "/var/lib/private"},
+	}); err != nil {
+		t.Fatalf("RecordAuditEvent: %v", err)
+	}
+	res = get("/v1/tasks/tsk_events/events", "")
+	if res.Code != http.StatusOK {
+		t.Fatalf("events after detail code = %d", res.Code)
+	}
+	body := res.Body.String()
+	for _, leaked := range []string{"/Users/secret/path exploded", "/var/lib/private", "error_detail", "extra"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("worker-local audit detail %q crossed the mesh:\n%s", leaked, body)
+		}
+	}
+	var withDetail schema.TaskEventsResponse
+	if err := json.Unmarshal(res.Body.Bytes(), &withDetail); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	var sawFailure bool
+	for _, event := range withDetail.Events {
+		if event.EventID == "evt_detail" {
+			sawFailure = true
+			if event.ErrorCode != "worker_failed" || event.Runner != "fake" || event.Profile != "dev" {
+				t.Fatalf("projected event dropped fields the origin needs: %+v", event)
+			}
+		}
+	}
+	if !sawFailure {
+		t.Fatal("the failure event should still be reported, minus the local detail")
+	}
+
+	// A mismatched schema version is rejected here, not merely upstream.
+	if res := get("/v1/tasks/tsk_events/events", "v999"); res.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched schema code = %d, want 400: %s", res.Code, res.Body.String())
+	}
+
+	// A malformed cursor is a clear error rather than a silent reset to zero.
+	if res := get("/v1/tasks/tsk_events/events?after=abc", ""); res.Code != http.StatusBadRequest {
+		t.Fatalf("bad cursor code = %d, want 400: %s", res.Code, res.Body.String())
+	}
 }

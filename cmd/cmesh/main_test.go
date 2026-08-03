@@ -648,7 +648,7 @@ func TestFailClosedRestartMarksQueuedAndRunningTasksFailed(t *testing.T) {
 			t.Fatalf("Close store: %v", err)
 		}
 	})
-	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask"} {
+	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask", "tsk_askingtask"} {
 		if _, err := st.BeginDispatch(ctx, task.Record{
 			ID:               id,
 			OriginNodeID:     "origin",
@@ -667,11 +667,19 @@ func TestFailClosedRestartMarksQueuedAndRunningTasksFailed(t *testing.T) {
 	if _, err := st.UpdateTaskState(ctx, "tsk_runningtask", store.StateUpdate{State: task.StateRunning}); err != nil {
 		t.Fatalf("mark running: %v", err)
 	}
+	// A task blocked on a question is still live: its runner is running and
+	// nothing will ever answer it after a restart, so leaving it awaiting_input
+	// would strand it forever -- the silent loss this sweep exists to prevent.
+	for _, state := range []task.State{task.StateRunning, task.StateAwaitingInput} {
+		if _, err := st.UpdateTaskState(ctx, "tsk_askingtask", store.StateUpdate{State: state}); err != nil {
+			t.Fatalf("mark %s: %v", state, err)
+		}
+	}
 	writer := audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), "worker")
 	if err := failClosedRestart(ctx, t.TempDir(), st, writer); err != nil {
 		t.Fatalf("failClosedRestart: %v", err)
 	}
-	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask"} {
+	for _, id := range []string{"tsk_queuedtask", "tsk_runningtask", "tsk_askingtask"} {
 		rec, err := st.GetTask(ctx, id)
 		if err != nil {
 			t.Fatalf("GetTask %s: %v", id, err)

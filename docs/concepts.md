@@ -8,6 +8,8 @@ This is the mental-model doc. If you want the wiring, read [architecture.md](arc
 
 A coding agent is powerful but stuck. Claude Code or Codex runs on one machine, sees one filesystem, talks to one set of toolchains and one set of credentials. cmesh lets that agent hand a scoped task to a coding agent on **another** machine you control, and get a structured result back — without you leaving the session you're already in.
 
+Several of those handoffs make a team. A running task can report progress and ask you a question; when the next step belongs on a different machine, one agent hands its branch to another. The shape is **one conductor, many instruments** — your session decides, workers return evidence, and agents never message each other. [teams.md](teams.md) is the full picture.
+
 It is not remote shell, not screen sharing, not a fleet-management console. It is one agent asking another agent, on a machine you own, to do a specific piece of bounded work and report back. The asking happens as a normal tool call. The work happens locally on the far machine, through that machine's own runner and its own credentials. The result comes home as a durable, auditable envelope.
 
 ## Why it exists
@@ -26,9 +28,11 @@ These five framings explain most of how cmesh behaves. Internalize them and the 
 
 cmesh does not poll your machines, scrape metrics, or maintain a live dashboard of everything everywhere. Nothing happens until a human or an agent asks a **specific** peer to do **specific** work. The peer evaluates that request against policy, runs it locally, and returns a result. There is no ambient surveillance layer — only discrete, named, auditable tasks. This keeps the trust surface small: a machine that is never asked to do anything does nothing.
 
+The task is still the unit — it just has a conversation inside it. A running task can post progress and ask its owner a question, and the owner can answer or steer, but that exchange is scoped to the task, bounded in size and count, and audited like every other task event. It is not a side channel and not a chat room: no message exists outside some task, and workers never message each other.
+
 ### 2. Profiles are authority levels
 
-Every task runs under a **profile**, and a profile is a declared level of authority on the worker machine — from "look, don't touch" up to "change the system." The menu runs roughly least-to-most authority: `query` (deterministic probes), `query-network` and `query-shell` (bounded read-oriented checks), `readonly` / `readonly-agent` (agent-assisted read-only inspection), `repo-dev` / `dev` (agent edits and tests inside an allowed directory), and the elevated tier — `desktop-control`, `system-change`, `network`, `interactive`, `git_push`. You pick a profile per task by naming it in the request. A peer only offers the profiles you configured for it, so granting `repo-dev` to one trusted machine never grants it to the rest.
+Every task runs under a **profile**, and a profile is a declared level of authority on the worker machine — from "look, don't touch" up to "change the system." The menu runs least-to-most authority: `query` (deterministic probes), `query-network` and `query-shell` (bounded read-oriented checks), `readonly-agent` (agent-assisted read-only inspection), `repo-dev` (agent edits and tests inside an allowed directory), and the elevated tier — `desktop-control` and `system-change`. You pick a profile per task by naming it in the request; a request that names none gets `query`. (`network` and `git_push` are capabilities a profile may grant, not rungs of their own, and `dev`, `readonly`, and `interactive` are older names kept working as aliases.) A peer only offers the profiles you configured for it, so granting `repo-dev` to one trusted machine never grants it to the rest.
 
 ### 3. `query` is the safe default
 
@@ -57,6 +61,7 @@ In each case your agent stays where it is, the work happens on the right machine
 
 ## Where to go next
 
+- [teams.md](teams.md) — how several delegations become a team, and the rules that keep that safe.
 - [architecture.md](architecture.md) — the two MCP surfaces, the full request lifecycle, trust boundaries, and the data model.
 - [security.md](security.md) — how cmesh rejects illegitimate nodes, what it protects, what it does not, and how to harden a deployment.
 - [quickstart.md](quickstart.md) — get a two-machine mesh running.

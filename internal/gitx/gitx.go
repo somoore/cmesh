@@ -29,6 +29,9 @@ type CommitOptions struct {
 	WorkerNode  string
 	Profile     string
 	AllowEmpty  bool
+	// HandoffFrom names the task whose branch seeded this one, when this task
+	// began as a cross-peer handoff.
+	HandoffFrom string
 }
 
 type Status struct {
@@ -200,6 +203,66 @@ func (r *Repository) Commit(ctx context.Context, opts CommitOptions) (string, er
 	return r.Head(ctx)
 }
 
+// VerifyBundle checks that this repository holds every prerequisite the bundle
+// declares. cmesh bundles are thin -- Bundle appends ^<base> -- so a receiving
+// checkout that lacks the base cannot apply one. Verify asks git which
+// prerequisites the bundle actually needs rather than probing a single commit we
+// assume is the only one.
+func (r *Repository) VerifyBundle(ctx context.Context, bundlePath string) error {
+	if strings.TrimSpace(bundlePath) == "" {
+		return errors.New("empty bundle path")
+	}
+	// git exits non-zero for a missing prerequisite on the versions tested, and
+	// the output check below is a belt-and-braces guard for versions that report
+	// it only on stderr. Getting this wrong is expensive: a bundle that cannot
+	// apply would pass verification and fail later as an opaque fetch error
+	// instead of the actionable handoff_base_missing.
+	combined, err := r.combinedOutput(ctx, "bundle", "verify", bundlePath)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(combined, "lacks these prerequisite commits") {
+		return fmt.Errorf("repository lacks prerequisite commits:\n%s", strings.TrimSpace(combined))
+	}
+	return nil
+}
+
+// combinedOutput runs git and returns stdout and stderr together. Some git
+// subcommands report a meaningful diagnosis on stderr while still exiting 0.
+func (r *Repository) combinedOutput(ctx context.Context, args ...string) (string, error) {
+	if r == nil || r.Git == "" {
+		return "", ErrGitUnavailable
+	}
+	cmd := exec.CommandContext(ctx, r.Git, args...)
+	cmd.Dir = r.Dir
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(buf.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), msg)
+	}
+	return buf.String(), nil
+}
+
+// FetchBundle fetches a branch out of a bundle into this repository under the
+// given local ref. The bundle is a plain file, so this adds no network access.
+func (r *Repository) FetchBundle(ctx context.Context, bundlePath, branch, localRef string) error {
+	if strings.TrimSpace(bundlePath) == "" {
+		return errors.New("empty bundle path")
+	}
+	if strings.TrimSpace(branch) == "" {
+		return errors.New("empty branch")
+	}
+	if strings.TrimSpace(localRef) == "" {
+		return errors.New("empty local ref")
+	}
+	return r.run(ctx, "fetch", bundlePath, branch+":"+localRef)
+}
+
 func (r *Repository) Head(ctx context.Context) (string, error) {
 	out, err := r.output(ctx, "rev-parse", "HEAD")
 	if err != nil {
@@ -318,6 +381,10 @@ func buildMessage(subject string, opts CommitOptions) string {
 	writeFooter("cmesh-origin", opts.OriginNode)
 	writeFooter("cmesh-worker", opts.WorkerNode)
 	writeFooter("cmesh-profile", opts.Profile)
+	// Handoff lineage lives in the commit object itself, so "where did this work
+	// come from" is answerable from the git history alone, without cmesh's
+	// database.
+	writeFooter("cmesh-handoff-from", opts.HandoffFrom)
 	return b.String()
 }
 

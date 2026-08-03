@@ -35,6 +35,7 @@ import (
 	"cmesh/internal/runner"
 	"cmesh/internal/runner/claudecode"
 	"cmesh/internal/runner/codex"
+	"cmesh/internal/runner/generic"
 	"cmesh/internal/runner/probe"
 	"cmesh/internal/runner/shell"
 	svcpkg "cmesh/internal/service"
@@ -2864,7 +2865,46 @@ func buildRunners(cfg *config.Config) (*runner.Registry, error) {
 				return nil, err
 			}
 		default:
-			return nil, fmt.Errorf("unknown runner %q", name)
+			// A runner name cmesh does not implement natively is only valid when
+			// the operator opted into the generic adapter, which requires a
+			// manifest. Guessing here would let a typo silently become a runner.
+			if !strings.EqualFold(rcfg.Type, generic.Name) {
+				return nil, fmt.Errorf("unknown runner %q: set type = %q under [runners.%s] to run any other CLI agent from config", name, generic.Name, name)
+			}
+			manifest, err := loadRunnerManifest(rcfg.ManifestPath)
+			if err != nil {
+				return nil, err
+			}
+			if manifest == nil {
+				return nil, fmt.Errorf("runners.%s is generic and must set manifest_path: a generic runner declares what it enforces, including its known gaps", name)
+			}
+			manifest.Runner = name
+			profiles := map[string]generic.ProfileConfig{}
+			for pname, pcfg := range cfg.Profiles {
+				if pcfg.Runner != name {
+					continue
+				}
+				profiles[pname] = generic.ProfileConfig{
+					Claims:           profiledefs.NormalizeCapabilities(pcfg.Capabilities, pcfg.Claims),
+					Args:             pcfg.RunnerArgs,
+					PromptArgs:       pcfg.RunnerPromptArgs,
+					StructuredOutput: pcfg.RunnerStructuredOutput,
+					KnownGaps:        pcfg.KnownGaps,
+				}
+			}
+			run, err := generic.New(generic.Config{
+				RunnerName:     name,
+				Command:        rcfg.Command,
+				DefaultProfile: rcfg.DefaultProfile,
+				Profiles:       profiles,
+				Manifest:       manifest,
+			})
+			if err != nil {
+				return nil, err
+			}
+			if err := reg.Register(run); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return reg, nil
@@ -2909,8 +2949,23 @@ func (r manifestOverrideRunner) Manifest() runner.CapabilityManifest {
 }
 
 func applyManifestPath(run runner.Runner, path string) (runner.Runner, error) {
-	if path == "" {
+	manifest, err := loadRunnerManifest(path)
+	if err != nil {
+		return nil, err
+	}
+	if manifest == nil {
 		return run, nil
+	}
+	if manifest.Runner == "" {
+		manifest.Runner = run.Name()
+	}
+	return manifestOverrideRunner{Runner: run, manifest: *manifest}, nil
+}
+
+// loadRunnerManifest reads a manifest file, returning nil when no path is set.
+func loadRunnerManifest(path string) (*runner.CapabilityManifest, error) {
+	if path == "" {
+		return nil, nil
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -2920,14 +2975,14 @@ func applyManifestPath(run runner.Runner, path string) (runner.Runner, error) {
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return nil, fmt.Errorf("parse runner manifest %s: %w", path, err)
 	}
-	if manifest.Runner == "" {
-		manifest.Runner = run.Name()
-	}
-	return manifestOverrideRunner{Runner: run, manifest: manifest}, nil
+	return &manifest, nil
 }
 
 func failClosedRestart(ctx context.Context, dataDir string, st *store.Store, auditWriter *audit.Writer) error {
-	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning)
+	// awaiting_input is a live task blocked on a question, so it is swept
+	// exactly like running: leaving it would strand the task forever after a
+	// restart, which is the silent loss this function exists to prevent.
+	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning, task.StateAwaitingInput)
 	if err != nil {
 		return err
 	}

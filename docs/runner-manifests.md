@@ -143,3 +143,46 @@ What actually happened?
 
 - [Configuration](configuration.md) — how profile claims, `bare`, and `enforcement_confidence` are set in the config file.
 - [Security](security.md) — why manifests are treated as evidence, not enforcement, and where that boundary sits.
+
+## Bring your own runner
+
+cmesh ships adapters for Claude Code and Codex because each has argv quirks worth encoding carefully. Any other CLI coding agent can join the mesh from configuration alone, using the `generic` adapter.
+
+What the built-in adapters actually enforce is small and portable, and the generic adapter takes those four as config: the prompt goes on **stdin, never argv**; profile authority maps to whatever flags that CLI uses; output is parsed when the CLI promises JSON and passed through raw otherwise; and the manifest declares capabilities honestly.
+
+```toml
+[runners.acme-agent]
+type = "generic"
+command = ["/usr/local/bin/acme"]
+default_profile = "repo-dev"
+# Required for a generic runner: it must declare what it enforces.
+manifest_path = "~/.config/cmesh/manifests/acme-agent.runner_manifest.v1.json"
+
+[profiles.repo-dev]
+runner = "acme-agent"
+capabilities = ["read_files", "edit_repo", "execute_in_repo"]
+writes = "repo_only"
+shell = "allow"
+require_explicit = true
+require_lease = true
+# Whatever flags this CLI uses to express this profile's authority.
+runner_args = ["--sandbox", "workspace"]
+# Appended last, for a CLI that needs a trailing marker to read stdin.
+runner_prompt_args = ["-"]
+# Set only if the CLI promises JSON on stdout.
+runner_structured_output = false
+```
+
+Three constraints are deliberate:
+
+- **`manifest_path` is required.** A generic runner cmesh has never seen must say what it enforces, including its `known_gaps`. A runner that will not declare itself does not run.
+- **`enforcement_confidence: high` is impossible.** That level is reserved for the built-in probe runner, whose behavior cmesh implements. A third-party CLI cannot claim it, in config or in a manifest file.
+- **The prompt is always on stdin.** A generic runner cannot opt into argv delivery, because cmesh cannot verify a third-party CLI's argument handling.
+
+Verify the result rather than trusting the declaration:
+
+```bash
+cmesh doctor runner acme-agent
+```
+
+That runs the same behavioral smoke used for the built-in adapters — it resolves the command, checks each profile, feeds a prompt over stdin, and confirms the response came back through the raw `command_output` artifact. A runner that passes has demonstrated the contract, not asserted it.

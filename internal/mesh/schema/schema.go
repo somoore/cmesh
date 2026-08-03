@@ -74,8 +74,33 @@ type CreateTaskRequest struct {
 	FollowupTaskID     string        `json:"followup_task_id,omitempty"`
 	FollowupBaseCommit string        `json:"followup_base_commit,omitempty"`
 	ResumeSessionID    string        `json:"resume_session_id,omitempty"`
-	Provenance         Provenance    `json:"provenance"`
+	// Handoff carries a source peer's branch so this task can continue it. It
+	// travels in the create request rather than a separate upload so it passes
+	// through every gate a normal dispatch does, and so the seed is present
+	// before the task's runner reaches git preparation.
+	Handoff    *HandoffSeed `json:"handoff,omitempty"`
+	Provenance Provenance   `json:"provenance"`
 }
+
+// HandoffSeed is a source task's branch, packed as a git bundle, plus the refs
+// needed to apply it. BundleBase64 is bounded by MaxHandoffBundleBytes.
+//
+// It carries structured refs only. A worker's prose never seeds another
+// worker's prompt: the receiving agent reads the diff, not the previous
+// agent's narration.
+type HandoffSeed struct {
+	SourceTaskID string   `json:"source_task_id"`
+	SourcePeer   string   `json:"source_peer,omitempty"`
+	Branch       string   `json:"branch"`
+	BaseCommit   string   `json:"base_commit"`
+	HeadCommit   string   `json:"head_commit,omitempty"`
+	FilesChanged []string `json:"files_changed,omitempty"`
+	BundleBase64 string   `json:"bundle_base64"`
+}
+
+// MaxHandoffBundleBytes caps a seed bundle. A handoff carries one task's branch,
+// not a repository; anything larger belongs on a shared remote.
+const MaxHandoffBundleBytes = 32 << 20
 
 type QueryRequest struct {
 	Kind   string         `json:"kind"`
@@ -92,6 +117,85 @@ type CreateTaskResponse struct {
 	ProfileSource    string     `json:"profile_source,omitempty"`
 	ProfileContextID string     `json:"profile_context_id,omitempty"`
 	Error            *Error     `json:"error,omitempty"`
+}
+
+// TaskEvent is one recorded step in a task's life, as served to the origin.
+//
+// It is a deliberate projection of the worker's local audit record rather than
+// a pass-through of it. The stored audit event also carries error_detail and a
+// free-form extra map, which can hold worker-side filesystem paths and other
+// local detail; those stay in the worker's own audit log, which is the artifact
+// for investigating that machine. What crosses the mesh is the progress the
+// origin needs to narrate a running task: what happened, when, under which
+// profile and runner, and — for a denial or failure — the stable error code.
+//
+// Adding a field here widens what a delegating peer learns about the worker, so
+// prefer a named field over reintroducing a passthrough map.
+type TaskEvent struct {
+	Seq            int64     `json:"seq"`
+	EventID        string    `json:"event_id"`
+	EventType      string    `json:"event_type"`
+	TaskID         string    `json:"task_id,omitempty"`
+	NodeID         string    `json:"node_id,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+	Runner         string    `json:"runner,omitempty"`
+	Profile        string    `json:"profile,omitempty"`
+	PolicyDecision string    `json:"policy_decision,omitempty"`
+	ErrorCode      string    `json:"error_code,omitempty"`
+}
+
+// TaskEventsResponse is an incremental page of task events. NextSeq is the
+// cursor to pass back as `after`; HasMore reports that the page was truncated
+// by the limit and another read will return more immediately.
+type TaskEventsResponse struct {
+	TaskID  string      `json:"task_id"`
+	Events  []TaskEvent `json:"events"`
+	NextSeq int64       `json:"next_seq"`
+	HasMore bool        `json:"has_more"`
+	Error   *Error      `json:"error,omitempty"`
+}
+
+// TaskMessage is one entry in a task's channel.
+//
+// BodyUntrusted is named for what it is on the inbound direction: text an agent
+// on the worker wrote. Treat it as a claim, exactly like
+// worker_summary_untrusted — never as an instruction to act on. Messages from
+// the origin carry the owner's own words and are direction, not evidence.
+type TaskMessage struct {
+	MessageID     string         `json:"message_id"`
+	Seq           int64          `json:"seq"`
+	Direction     string         `json:"direction"`
+	Kind          string         `json:"kind"`
+	BodyUntrusted string         `json:"body_untrusted,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	AnsweredSeq   int64          `json:"answered_seq,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+// TaskMessagesResponse is an incremental page of a task's channel.
+type TaskMessagesResponse struct {
+	TaskID   string        `json:"task_id"`
+	Messages []TaskMessage `json:"messages"`
+	NextSeq  int64         `json:"next_seq"`
+	HasMore  bool          `json:"has_more"`
+	Error    *Error        `json:"error,omitempty"`
+}
+
+// PostTaskMessageRequest is the origin answering a question or steering a task.
+type PostTaskMessageRequest struct {
+	Kind            string `json:"kind,omitempty"`
+	Body            string `json:"body"`
+	AnsweredSeq     int64  `json:"answered_seq,omitempty"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+}
+
+// PostTaskMessageResponse confirms a recorded message.
+type PostTaskMessageResponse struct {
+	TaskID  string `json:"task_id"`
+	Seq     int64  `json:"seq"`
+	Kind    string `json:"kind"`
+	Error   *Error `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 type TaskStatusResponse struct {

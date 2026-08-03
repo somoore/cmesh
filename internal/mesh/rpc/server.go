@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/tasks", s.handleListTasks)
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{task_id}", s.handleTaskStatus)
+	mux.HandleFunc("GET /v1/tasks/{task_id}/events", s.handleTaskEvents)
+	mux.HandleFunc("GET /v1/tasks/{task_id}/messages", s.handleTaskMessages)
+	mux.HandleFunc("POST /v1/tasks/{task_id}/messages", s.handlePostTaskMessage)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/result", s.handleTaskResult)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/transcript", s.handleTaskTranscript)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/artifacts/{kind}", s.handleTaskArtifact)
@@ -681,12 +685,13 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		// ceiling can remap the effective profile, so resolving from req.Profile
 		// would run a runner that belongs to a profile the worker did not enforce.
 		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(s.Config, req.Profile)),
-		ProfileRequested: firstNonEmpty(req.Profile, defaultProfileForTask(req.TaskKind)),
+		ProfileRequested: firstNonEmpty(req.Profile, defaultRequestedProfile()),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
 		AllowDirty:       req.AllowDirty,
 		DelegationChain:  append(req.Provenance.DelegationChain, s.Config.Node.ID),
 		HopCount:         req.Provenance.HopCount,
+		HandoffFrom:      handoffSource(req.Handoff),
 	}
 	outcome, err := s.Store.BeginDispatch(r.Context(), rec, body, task.DefaultIdempotencyDays*24*time.Hour)
 	if err != nil {
@@ -806,6 +811,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	gitPrep, err := prepareGit(ctx, rec, s.Config.Node.Name, s.Config.Node.DataDir, decisionClaims(s.Config, rec.ProfileEffective), gitPreparationOptions{
 		BaseCommit:      req.FollowupBaseCommit,
 		WorkDirOverride: workDirOverride,
+		Handoff:         req.Handoff,
 	})
 	if err != nil {
 		if ctx.Err() != nil {
@@ -1033,6 +1039,345 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		LastActivity:      string(rec.State),
 		TerminalErrorCode: rec.TerminalErrorCode,
 	})
+}
+
+// handleTaskEvents serves a task's recorded progress incrementally. A caller
+// passes the highest seq it has seen as `after` and receives only later events,
+// optionally long-polling until there is something new.
+//
+// This is evidence the daemon recorded, not worker-authored prose, but it is
+// still task-scoped: it is gated by the same schema check and ownership rule as
+// every other task read, in its own right rather than relying on any caller.
+func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	after, ok := parseCursorParam(w, r, "after")
+	if !ok {
+		return
+	}
+	limit, ok := parseLimitParam(w, r)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("wait") == "true" {
+		timeout := 30 * time.Second
+		if value := r.URL.Query().Get("timeout_s"); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				timeout = time.Duration(parsed) * time.Second
+			}
+		}
+		if !s.waitForTaskEvents(r, taskID, after, timeout) {
+			return
+		}
+	}
+	s.writeTaskEvents(w, r, taskID, after, limit)
+}
+
+// waitForTaskEvents blocks until the task has an event newer than after, the
+// task reaches a terminal state, or the timeout expires. It reports false only
+// when the client disconnected, in which case no response is owed.
+func (s *Server) waitForTaskEvents(r *http.Request, taskID string, after int64, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+			latest, err := s.Store.LatestTaskEventSeq(r.Context(), taskID)
+			if err != nil {
+				return true
+			}
+			if latest > after {
+				return true
+			}
+			// A terminal task records nothing further, so waiting past it would
+			// burn the full timeout for no possible new event.
+			if rec, err := s.Store.GetTask(r.Context(), taskID); err == nil && rec.State.Terminal() {
+				return true
+			}
+		case <-r.Context().Done():
+			return false
+		}
+	}
+}
+
+func (s *Server) writeTaskEvents(w http.ResponseWriter, r *http.Request, taskID string, after int64, limit int) {
+	effectiveLimit := boundedEventLimit(limit)
+	// Fetch one past the limit so has_more reports actual truncation. Comparing
+	// len(events) to the limit would claim more whenever a page exactly drains
+	// the tail, which contradicts what the tool advertises.
+	events, err := s.Store.ListTaskEvents(r.Context(), taskID, after, effectiveLimit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	hasMore := len(events) > effectiveLimit
+	if hasMore {
+		events = events[:effectiveLimit]
+	}
+	out := schema.TaskEventsResponse{TaskID: taskID, Events: make([]schema.TaskEvent, 0, len(events)), NextSeq: after, HasMore: hasMore}
+	for _, item := range events {
+		// Project, do not pass through: the stored audit record also carries
+		// error_detail and a free-form extra map that can hold worker-local
+		// paths. Those stay in this node's audit log; the origin gets the
+		// progress it needs to narrate the task.
+		out.Events = append(out.Events, schema.TaskEvent{
+			Seq:            item.Seq,
+			EventID:        item.Event.EventID,
+			EventType:      item.Event.Type,
+			TaskID:         item.Event.TaskID,
+			NodeID:         item.Event.NodeID,
+			Timestamp:      item.Event.Timestamp,
+			Runner:         item.Event.Runner,
+			Profile:        item.Event.Profile,
+			PolicyDecision: item.Event.PolicyDecision,
+			ErrorCode:      item.Event.ErrorCode,
+		})
+		out.NextSeq = item.Seq
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleTaskMessages serves a task's channel to its owner, incrementally and
+// optionally long-polling, gated by the same schema and ownership rules as
+// every other task read.
+func (s *Server) handleTaskMessages(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	after, ok := parseCursorParam(w, r, "after")
+	if !ok {
+		return
+	}
+	limit, ok := parseLimitParam(w, r)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("wait") == "true" {
+		timeout := 30 * time.Second
+		if value := r.URL.Query().Get("timeout_s"); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				timeout = time.Duration(parsed) * time.Second
+			}
+		}
+		if !s.waitForTaskMessages(r, taskID, after, timeout) {
+			return
+		}
+	}
+	effectiveLimit := boundedEventLimit(limit)
+	messages, err := s.Store.ListTaskMessages(r.Context(), taskID, after, effectiveLimit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	hasMore := len(messages) > effectiveLimit
+	if hasMore {
+		messages = messages[:effectiveLimit]
+	}
+	out := schema.TaskMessagesResponse{TaskID: taskID, Messages: make([]schema.TaskMessage, 0, len(messages)), NextSeq: after, HasMore: hasMore}
+	for _, message := range messages {
+		out.Messages = append(out.Messages, schema.TaskMessage{
+			MessageID:     message.MessageID,
+			Seq:           message.Seq,
+			Direction:     message.Direction,
+			Kind:          message.Kind,
+			BodyUntrusted: message.Body,
+			Metadata:      message.Metadata,
+			AnsweredSeq:   message.AnsweredSeq,
+			CreatedAt:     message.CreatedAt,
+		})
+		out.NextSeq = message.Seq
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handlePostTaskMessage records the owner's answer to a question, or unprompted
+// direction, on a running task.
+//
+// Only the task's owner reaches this: authorizeTaskAccess keys on the
+// whois-authenticated peer, so a third peer cannot answer another peer's task.
+// The worker end of the channel is a different surface entirely (the worker's
+// own local gateway), so nothing here lets a worker answer itself.
+func (s *Server) handlePostTaskMessage(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	var req schema.PostTaskMessageRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(store.MaxMessageBodyBytes)+4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "invalid request body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "body is required")
+		return
+	}
+	kind := strings.TrimSpace(req.Kind)
+	switch kind {
+	case "":
+		// Answering names a question; unprompted direction does not.
+		kind = store.MessageKindSteer
+		if req.AnsweredSeq > 0 {
+			kind = store.MessageKindAnswer
+		}
+	case store.MessageKindAnswer, store.MessageKindSteer:
+	default:
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "kind must be answer or steer")
+		return
+	}
+
+	rec, err := s.Store.GetTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	if rec.State.Terminal() {
+		writeError(w, http.StatusConflict, task.ErrorWorkerFailed, "task is already "+string(rec.State)+"; it can no longer receive messages")
+		return
+	}
+
+	message, err := s.Store.AppendTaskMessage(r.Context(), store.AppendMessageInput{
+		TaskID:          taskID,
+		Direction:       store.MessageDirectionFromOrigin,
+		Kind:            kind,
+		Body:            req.Body,
+		AnsweredSeq:     req.AnsweredSeq,
+		ClientMessageID: req.ClientMessageID,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := task.ErrorWorkerFailed
+		if errors.Is(err, store.ErrMessageTooLarge) {
+			status, code = http.StatusRequestEntityTooLarge, task.ErrorResultTooLarge
+		} else if errors.Is(err, store.ErrMessageLimitReached) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	// An answer unblocks the task immediately, so its state is right even if the
+	// worker's ask already timed out and it has not asked again.
+	if kind == store.MessageKindAnswer && rec.State == task.StateAwaitingInput {
+		if _, err := s.Store.UpdateTaskState(r.Context(), taskID, store.StateUpdate{State: task.StateRunning}); err != nil {
+			// Best effort: the message is recorded either way, and the channel
+			// must never fail a task.
+			_ = err
+		}
+	}
+	s.record(r.Context(), audit.Event{
+		Type:          "task.message." + kind,
+		TaskID:        taskID,
+		OriginSession: rec.OriginSessionID,
+		Runner:        rec.Runner,
+		Profile:       rec.ProfileEffective,
+		Source:        store.MessageDirectionFromOrigin,
+		Extra:         map[string]any{"message_seq": message.Seq, "message_kind": kind},
+	})
+	writeJSON(w, http.StatusOK, schema.PostTaskMessageResponse{TaskID: taskID, Seq: message.Seq, Kind: kind})
+}
+
+// waitForTaskMessages blocks until the task's channel has something newer than
+// after, the task reaches a terminal state, or the timeout expires. It reports
+// false only when the client disconnected.
+func (s *Server) waitForTaskMessages(r *http.Request, taskID string, after int64, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+			latest, err := s.Store.LatestTaskMessageSeq(r.Context(), taskID)
+			if err != nil || latest > after {
+				return true
+			}
+			if rec, err := s.Store.GetTask(r.Context(), taskID); err == nil && rec.State.Terminal() {
+				return true
+			}
+		case <-r.Context().Done():
+			return false
+		}
+	}
+}
+
+// parseCursorParam reads a non-negative incremental-read cursor from the query
+// string. A malformed cursor is an explicit error rather than a silent reset to
+// zero, which would replay a caller's whole history.
+func parseCursorParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0, true
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, name+" must be a non-negative integer")
+		return 0, false
+	}
+	return parsed, true
+}
+
+// parseLimitParam reads an optional positive page size. Zero means "unset"; the
+// caller applies the default.
+func parseLimitParam(w http.ResponseWriter, r *http.Request) (int, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if value == "" {
+		return 0, true
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "limit must be a positive integer")
+		return 0, false
+	}
+	return parsed, true
+}
+
+// boundedEventLimit clamps a requested page size to the store's bounds.
+func boundedEventLimit(limit int) int {
+	if limit <= 0 {
+		return store.DefaultTaskEventLimit
+	}
+	if limit > store.MaxTaskEventLimit {
+		return store.MaxTaskEventLimit
+	}
+	return limit
 }
 
 func (s *Server) handleTaskTranscript(w http.ResponseWriter, r *http.Request) {
@@ -1386,7 +1731,10 @@ func (s *Server) waitForTaskStatus(w http.ResponseWriter, r *http.Request, taskI
 				writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
 				return
 			}
-			if rec.State.Terminal() {
+			// Return early for a task blocked on a question too: it will not
+			// progress until someone answers, so holding the caller for the rest
+			// of the wait budget only delays the reply that unblocks it.
+			if rec.State.Terminal() || rec.State == task.StateAwaitingInput {
 				s.writeTaskStatus(w, r, taskID, http.StatusOK)
 				return
 			}
@@ -1594,6 +1942,56 @@ var errDirtyWorktree = errors.New("dirty worktree refused")
 type gitPreparationOptions struct {
 	BaseCommit      string
 	WorkDirOverride string
+	// Handoff seeds this task from another peer's branch. It is applied before
+	// the worktree is created, so the branch exists locally by the time the
+	// runner starts.
+	Handoff *schema.HandoffSeed
+}
+
+// errHandoffBaseMissing means the seed bundle needs commits this checkout does
+// not have.
+var errHandoffBaseMissing = errors.New("handoff base commit is missing from this checkout")
+
+// applyHandoffSeed writes the seed bundle to disk and fetches its branch into
+// this repository, so a task handed off from another peer continues that work
+// instead of starting from the local HEAD.
+//
+// Bundles produced by commitGit are thin (Bundle appends ^<base>), so this
+// checkout must already hold the base. `git bundle verify` asks git which
+// prerequisites the bundle actually declares rather than probing a single
+// commit we assume is the only one, and its failure is the one clear denial:
+// handoff_base_missing, whose fix is a shared remote or a push from the source.
+func applyHandoffSeed(ctx context.Context, repo *gitx.Repository, dataDir, taskID string, seed *schema.HandoffSeed) (string, error) {
+	if seed == nil {
+		return "", nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(seed.BundleBase64)
+	if err != nil {
+		return "", fmt.Errorf("decode handoff bundle: %w", err)
+	}
+	if len(raw) == 0 {
+		return "", errors.New("handoff bundle is empty")
+	}
+	if len(raw) > schema.MaxHandoffBundleBytes {
+		return "", fmt.Errorf("handoff bundle exceeds %d bytes", schema.MaxHandoffBundleBytes)
+	}
+	// taskID has passed task.ValidID, so it is safe to build a path from.
+	dir := filepath.Join(dataDir, "handoff")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create handoff dir: %w", err)
+	}
+	bundlePath := filepath.Join(dir, taskID+".bundle")
+	if err := os.WriteFile(bundlePath, raw, 0o600); err != nil {
+		return "", fmt.Errorf("write handoff bundle: %w", err)
+	}
+	if err := repo.VerifyBundle(ctx, bundlePath); err != nil {
+		return "", fmt.Errorf("%w: %v", errHandoffBaseMissing, err)
+	}
+	localRef := "refs/cmesh/handoff/" + taskID
+	if err := repo.FetchBundle(ctx, bundlePath, seed.Branch, localRef); err != nil {
+		return "", fmt.Errorf("apply handoff bundle: %w", err)
+	}
+	return localRef, nil
 }
 
 func prepareGit(ctx context.Context, rec task.Record, nodeName, dataDir string, claims []string, opts gitPreparationOptions) (gitPreparation, error) {
@@ -1617,7 +2015,13 @@ func prepareGit(ctx context.Context, rec task.Record, nodeName, dataDir string, 
 	if status.Dirty && !rec.AllowDirty {
 		return gitPreparation{Available: true}, fmt.Errorf("%w: %s", errDirtyWorktree, status.Porcelain)
 	}
-	base := firstNonEmpty(opts.BaseCommit, status.HeadCommit)
+	// A handoff seeds this task from the source branch, so the base is that
+	// branch's head rather than this checkout's.
+	handoffRef, err := applyHandoffSeed(ctx, repo, dataDir, rec.ID, opts.Handoff)
+	if err != nil {
+		return gitPreparation{Available: true}, err
+	}
+	base := firstNonEmpty(handoffRef, opts.BaseCommit, status.HeadCommit)
 	branch, err := gitx.DeterministicBranch(rec.ID, rec.ProfileRequested)
 	if err != nil {
 		return gitPreparation{Available: true}, err
@@ -1695,6 +2099,7 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 		OriginNode:  rec.OriginNodeID,
 		WorkerNode:  rec.WorkerNodeID,
 		Profile:     rec.ProfileEffective,
+		HandoffFrom: rec.HandoffFrom,
 		AllowEmpty:  false,
 	})
 	if err != nil {
@@ -1738,9 +2143,21 @@ func commitGit(ctx context.Context, rec task.Record, prep gitPreparation, nodeNa
 	return head, diffstat, files, bundlePath, pushed, nil
 }
 
+// handoffSource names the task a handoff continues, for audit and the commit
+// trailer. It is provenance display only and never grants authority.
+func handoffSource(seed *schema.HandoffSeed) string {
+	if seed == nil {
+		return ""
+	}
+	return strings.TrimSpace(seed.SourceTaskID)
+}
+
 func gitErrorCode(err error) task.ErrorCode {
 	if errors.Is(err, errDirtyWorktree) {
 		return task.ErrorDirtyWorktree
+	}
+	if errors.Is(err, errHandoffBaseMissing) {
+		return task.ErrorHandoffBaseMissing
 	}
 	return task.ErrorWorkerFailed
 }
@@ -1926,20 +2343,31 @@ func runnerFromProfile(cfg *config.Config, profileName string) string {
 			return profile.Runner
 		}
 	}
-	if profile, ok := cfg.Profiles["dev"]; ok {
+	// Fall back to the least-authority profile, matching the policy engine, then
+	// to any configured profile. This is only a last resort: the dispatch path
+	// prefers Decision.EffectiveRunner, which belongs to the profile policy
+	// actually granted.
+	if profile, ok := cfg.Profiles[profiledefs.Query]; ok {
 		return profile.Runner
 	}
-	for _, profile := range cfg.Profiles {
-		return profile.Runner
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		return cfg.Profiles[name].Runner
 	}
 	return ""
 }
 
-func defaultProfileForTask(kind string) string {
-	if kind == "query" {
-		return profiledefs.Query
-	}
-	return "dev"
+// defaultRequestedProfile names the profile a request without one is recorded as
+// having asked for. It must match what policy actually resolves for an
+// unspecified profile (see checkProfile), or the task record would claim the
+// caller requested one profile while the worker enforced another -- and the git
+// branch slug is built from ProfileRequested.
+func defaultRequestedProfile() string {
+	return profiledefs.Query
 }
 
 func queryCapability(req schema.CreateTaskRequest) string {

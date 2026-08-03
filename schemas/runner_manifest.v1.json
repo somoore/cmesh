@@ -85,6 +85,10 @@
             "maxLength": 1000
           }
         },
+        "mid_task_input": {
+          "enum": ["none", "checkpoint", "stream"],
+          "description": "How this runner receives messages sent to a task while it runs: none (cannot), checkpoint (agent picks up queued messages when it calls task_ask), or stream (harness accepts input on open stdin mid-run)."
+        },
         "bare": {
           "type": "boolean"
         }
