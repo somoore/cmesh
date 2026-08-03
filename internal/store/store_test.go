@@ -357,3 +357,103 @@ func TestRecordAuditEventAllocatesDistinctSeqsConcurrently(t *testing.T) {
 		seen[event.Seq] = event.Event.EventID
 	}
 }
+
+// The channel is ordered, idempotent on retry, and links an answer to the
+// question it replies to so a resumed ask can find its reply.
+func TestTaskMessagesOrderIdempotencyAndAnswerLinking(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	question, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_chan", Direction: MessageDirectionFromWorker, Kind: MessageKindQuestion,
+		Body: "proceed?", ClientMessageID: "q1",
+	})
+	if err != nil {
+		t.Fatalf("append question: %v", err)
+	}
+	// A retry with the same client id must not append a second message.
+	retry, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_chan", Direction: MessageDirectionFromWorker, Kind: MessageKindQuestion,
+		Body: "proceed?", ClientMessageID: "q1",
+	})
+	if err != nil {
+		t.Fatalf("retry question: %v", err)
+	}
+	if retry.Seq != question.Seq {
+		t.Fatalf("retry allocated a new seq: %d then %d", question.Seq, retry.Seq)
+	}
+
+	answer, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_chan", Direction: MessageDirectionFromOrigin, Kind: MessageKindAnswer,
+		Body: "yes", AnsweredSeq: question.Seq,
+	})
+	if err != nil {
+		t.Fatalf("append answer: %v", err)
+	}
+
+	// The question now points at its answer, so a resumed ask finds the reply.
+	linked, err := s.TaskMessageBySeq(ctx, "tsk_chan", question.Seq)
+	if err != nil {
+		t.Fatalf("TaskMessageBySeq: %v", err)
+	}
+	if linked.AnsweredSeq != answer.Seq {
+		t.Fatalf("question answered_seq = %d, want %d", linked.AnsweredSeq, answer.Seq)
+	}
+
+	messages, err := s.ListTaskMessages(ctx, "tsk_chan", 0, 10)
+	if err != nil {
+		t.Fatalf("ListTaskMessages: %v", err)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("got %d messages, want 2 (retry must not duplicate)", len(messages))
+	}
+	if messages[0].Seq >= messages[1].Seq {
+		t.Fatalf("messages not in ascending seq order: %+v", messages)
+	}
+
+	// Another task's channel is separate.
+	if other, err := s.ListTaskMessages(ctx, "tsk_elsewhere", 0, 10); err != nil || len(other) != 0 {
+		t.Fatalf("unrelated task channel = %+v (%v)", other, err)
+	}
+}
+
+// Bodies and per-task counts are bounded, and both refusals are explicit rather
+// than silent truncation or a dropped message.
+func TestTaskMessageLimits(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	_, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_limits", Direction: MessageDirectionFromWorker, Kind: MessageKindNote,
+		Body: strings.Repeat("x", MaxMessageBodyBytes+1),
+	})
+	if !errors.Is(err, ErrMessageTooLarge) {
+		t.Fatalf("oversized body error = %v, want ErrMessageTooLarge", err)
+	}
+
+	for i := 0; i < MaxMessagesPerTask; i++ {
+		if _, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+			TaskID: "tsk_limits", Direction: MessageDirectionFromWorker, Kind: MessageKindNote, Body: "note",
+		}); err != nil {
+			t.Fatalf("append %d: %v", i, err)
+		}
+	}
+	_, err = s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_limits", Direction: MessageDirectionFromWorker, Kind: MessageKindNote, Body: "one too many",
+	})
+	if !errors.Is(err, ErrMessageLimitReached) {
+		t.Fatalf("over-cap error = %v, want ErrMessageLimitReached", err)
+	}
+
+	// An invalid direction or kind is rejected rather than stored.
+	if _, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_other", Direction: "sideways", Kind: MessageKindNote, Body: "x",
+	}); err == nil {
+		t.Fatal("invalid direction should be rejected")
+	}
+	if _, err := s.AppendTaskMessage(ctx, AppendMessageInput{
+		TaskID: "tsk_other", Direction: MessageDirectionFromWorker, Kind: "shout", Body: "x",
+	}); err == nil {
+		t.Fatal("invalid kind should be rejected")
+	}
+}

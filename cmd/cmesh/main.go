@@ -2927,7 +2927,10 @@ func applyManifestPath(run runner.Runner, path string) (runner.Runner, error) {
 }
 
 func failClosedRestart(ctx context.Context, dataDir string, st *store.Store, auditWriter *audit.Writer) error {
-	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning)
+	// awaiting_input is a live task blocked on a question, so it is swept
+	// exactly like running: leaving it would strand the task forever after a
+	// restart, which is the silent loss this function exists to prevent.
+	active, err := st.ListTasksByState(ctx, task.StateQueued, task.StateRunning, task.StateAwaitingInput)
 	if err != nil {
 		return err
 	}

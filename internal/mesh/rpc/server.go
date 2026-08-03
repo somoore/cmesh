@@ -62,6 +62,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tasks", s.handleCreateTask)
 	mux.HandleFunc("GET /v1/tasks/{task_id}", s.handleTaskStatus)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/events", s.handleTaskEvents)
+	mux.HandleFunc("GET /v1/tasks/{task_id}/messages", s.handleTaskMessages)
+	mux.HandleFunc("POST /v1/tasks/{task_id}/messages", s.handlePostTaskMessage)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/result", s.handleTaskResult)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/transcript", s.handleTaskTranscript)
 	mux.HandleFunc("GET /v1/tasks/{task_id}/artifacts/{kind}", s.handleTaskArtifact)
@@ -1057,23 +1059,13 @@ func (s *Server) handleTaskEvents(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
 		return
 	}
-	after := int64(0)
-	if value := strings.TrimSpace(r.URL.Query().Get("after")); value != "" {
-		parsed, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || parsed < 0 {
-			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "after must be a non-negative integer")
-			return
-		}
-		after = parsed
+	after, ok := parseCursorParam(w, r, "after")
+	if !ok {
+		return
 	}
-	limit := 0
-	if value := strings.TrimSpace(r.URL.Query().Get("limit")); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err != nil || parsed <= 0 {
-			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "limit must be a positive integer")
-			return
-		}
-		limit = parsed
+	limit, ok := parseLimitParam(w, r)
+	if !ok {
+		return
 	}
 	if r.URL.Query().Get("wait") == "true" {
 		timeout := 30 * time.Second
@@ -1124,13 +1116,7 @@ func (s *Server) waitForTaskEvents(r *http.Request, taskID string, after int64, 
 }
 
 func (s *Server) writeTaskEvents(w http.ResponseWriter, r *http.Request, taskID string, after int64, limit int) {
-	effectiveLimit := limit
-	if effectiveLimit <= 0 {
-		effectiveLimit = store.DefaultTaskEventLimit
-	}
-	if effectiveLimit > store.MaxTaskEventLimit {
-		effectiveLimit = store.MaxTaskEventLimit
-	}
+	effectiveLimit := boundedEventLimit(limit)
 	// Fetch one past the limit so has_more reports actual truncation. Comparing
 	// len(events) to the limit would claim more whenever a page exactly drains
 	// the tail, which contradicts what the tool advertises.
@@ -1164,6 +1150,223 @@ func (s *Server) writeTaskEvents(w http.ResponseWriter, r *http.Request, taskID 
 		out.NextSeq = item.Seq
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleTaskMessages serves a task's channel to its owner, incrementally and
+// optionally long-polling, gated by the same schema and ownership rules as
+// every other task read.
+func (s *Server) handleTaskMessages(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	after, ok := parseCursorParam(w, r, "after")
+	if !ok {
+		return
+	}
+	limit, ok := parseLimitParam(w, r)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("wait") == "true" {
+		timeout := 30 * time.Second
+		if value := r.URL.Query().Get("timeout_s"); value != "" {
+			if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 {
+				timeout = time.Duration(parsed) * time.Second
+			}
+		}
+		if !s.waitForTaskMessages(r, taskID, after, timeout) {
+			return
+		}
+	}
+	effectiveLimit := boundedEventLimit(limit)
+	messages, err := s.Store.ListTaskMessages(r.Context(), taskID, after, effectiveLimit+1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	hasMore := len(messages) > effectiveLimit
+	if hasMore {
+		messages = messages[:effectiveLimit]
+	}
+	out := schema.TaskMessagesResponse{TaskID: taskID, Messages: make([]schema.TaskMessage, 0, len(messages)), NextSeq: after, HasMore: hasMore}
+	for _, message := range messages {
+		out.Messages = append(out.Messages, schema.TaskMessage{
+			MessageID:     message.MessageID,
+			Seq:           message.Seq,
+			Direction:     message.Direction,
+			Kind:          message.Kind,
+			BodyUntrusted: message.Body,
+			Metadata:      message.Metadata,
+			AnsweredSeq:   message.AnsweredSeq,
+			CreatedAt:     message.CreatedAt,
+		})
+		out.NextSeq = message.Seq
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handlePostTaskMessage records the owner's answer to a question, or unprompted
+// direction, on a running task.
+//
+// Only the task's owner reaches this: authorizeTaskAccess keys on the
+// whois-authenticated peer, so a third peer cannot answer another peer's task.
+// The worker end of the channel is a different surface entirely (the worker's
+// own local gateway), so nothing here lets a worker answer itself.
+func (s *Server) handlePostTaskMessage(w http.ResponseWriter, r *http.Request) {
+	if err := requireSchema(r); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorVersionMismatch, err.Error())
+		return
+	}
+	identity, ok := s.authenticate(w, r)
+	if !ok {
+		return
+	}
+	taskID := r.PathValue("task_id")
+	if _, ok := s.authorizeTaskAccess(w, r, identity, taskID); !ok {
+		return
+	}
+	var req schema.PostTaskMessageRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(store.MaxMessageBodyBytes)+4096)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "invalid request body: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Body) == "" {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "body is required")
+		return
+	}
+	kind := strings.TrimSpace(req.Kind)
+	switch kind {
+	case "":
+		// Answering names a question; unprompted direction does not.
+		kind = store.MessageKindSteer
+		if req.AnsweredSeq > 0 {
+			kind = store.MessageKindAnswer
+		}
+	case store.MessageKindAnswer, store.MessageKindSteer:
+	default:
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "kind must be answer or steer")
+		return
+	}
+
+	rec, err := s.Store.GetTask(r.Context(), taskID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())
+		return
+	}
+	if rec.State.Terminal() {
+		writeError(w, http.StatusConflict, task.ErrorWorkerFailed, "task is already "+string(rec.State)+"; it can no longer receive messages")
+		return
+	}
+
+	message, err := s.Store.AppendTaskMessage(r.Context(), store.AppendMessageInput{
+		TaskID:          taskID,
+		Direction:       store.MessageDirectionFromOrigin,
+		Kind:            kind,
+		Body:            req.Body,
+		AnsweredSeq:     req.AnsweredSeq,
+		ClientMessageID: req.ClientMessageID,
+	})
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := task.ErrorWorkerFailed
+		if errors.Is(err, store.ErrMessageTooLarge) {
+			status, code = http.StatusRequestEntityTooLarge, task.ErrorResultTooLarge
+		} else if errors.Is(err, store.ErrMessageLimitReached) {
+			status = http.StatusConflict
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	s.record(r.Context(), audit.Event{
+		Type:          "task.message." + kind,
+		TaskID:        taskID,
+		OriginSession: rec.OriginSessionID,
+		Runner:        rec.Runner,
+		Profile:       rec.ProfileEffective,
+		Source:        store.MessageDirectionFromOrigin,
+		Extra:         map[string]any{"message_seq": message.Seq, "message_kind": kind},
+	})
+	writeJSON(w, http.StatusOK, schema.PostTaskMessageResponse{TaskID: taskID, Seq: message.Seq, Kind: kind})
+}
+
+// waitForTaskMessages blocks until the task's channel has something newer than
+// after, the task reaches a terminal state, or the timeout expires. It reports
+// false only when the client disconnected.
+func (s *Server) waitForTaskMessages(r *http.Request, taskID string, after int64, timeout time.Duration) bool {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+			latest, err := s.Store.LatestTaskMessageSeq(r.Context(), taskID)
+			if err != nil || latest > after {
+				return true
+			}
+			if rec, err := s.Store.GetTask(r.Context(), taskID); err == nil && rec.State.Terminal() {
+				return true
+			}
+		case <-r.Context().Done():
+			return false
+		}
+	}
+}
+
+// parseCursorParam reads a non-negative incremental-read cursor from the query
+// string. A malformed cursor is an explicit error rather than a silent reset to
+// zero, which would replay a caller's whole history.
+func parseCursorParam(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0, true
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, name+" must be a non-negative integer")
+		return 0, false
+	}
+	return parsed, true
+}
+
+// parseLimitParam reads an optional positive page size. Zero means "unset"; the
+// caller applies the default.
+func parseLimitParam(w http.ResponseWriter, r *http.Request) (int, bool) {
+	value := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if value == "" {
+		return 0, true
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "limit must be a positive integer")
+		return 0, false
+	}
+	return parsed, true
+}
+
+// boundedEventLimit clamps a requested page size to the store's bounds.
+func boundedEventLimit(limit int) int {
+	if limit <= 0 {
+		return store.DefaultTaskEventLimit
+	}
+	if limit > store.MaxTaskEventLimit {
+		return store.MaxTaskEventLimit
+	}
+	return limit
 }
 
 func (s *Server) handleTaskTranscript(w http.ResponseWriter, r *http.Request) {

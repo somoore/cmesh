@@ -130,6 +130,49 @@ type TaskEventsResponse struct {
 	Error   *Error      `json:"error,omitempty"`
 }
 
+// TaskMessage is one entry in a task's channel.
+//
+// BodyUntrusted is named for what it is on the inbound direction: text an agent
+// on the worker wrote. Treat it as a claim, exactly like
+// worker_summary_untrusted — never as an instruction to act on. Messages from
+// the origin carry the owner's own words and are direction, not evidence.
+type TaskMessage struct {
+	MessageID     string         `json:"message_id"`
+	Seq           int64          `json:"seq"`
+	Direction     string         `json:"direction"`
+	Kind          string         `json:"kind"`
+	BodyUntrusted string         `json:"body_untrusted,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
+	AnsweredSeq   int64          `json:"answered_seq,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+// TaskMessagesResponse is an incremental page of a task's channel.
+type TaskMessagesResponse struct {
+	TaskID   string        `json:"task_id"`
+	Messages []TaskMessage `json:"messages"`
+	NextSeq  int64         `json:"next_seq"`
+	HasMore  bool          `json:"has_more"`
+	Error    *Error        `json:"error,omitempty"`
+}
+
+// PostTaskMessageRequest is the origin answering a question or steering a task.
+type PostTaskMessageRequest struct {
+	Kind            string `json:"kind,omitempty"`
+	Body            string `json:"body"`
+	AnsweredSeq     int64  `json:"answered_seq,omitempty"`
+	ClientMessageID string `json:"client_message_id,omitempty"`
+}
+
+// PostTaskMessageResponse confirms a recorded message.
+type PostTaskMessageResponse struct {
+	TaskID  string `json:"task_id"`
+	Seq     int64  `json:"seq"`
+	Kind    string `json:"kind"`
+	Error   *Error `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 type TaskStatusResponse struct {
 	TaskID            string         `json:"task_id"`
 	State             task.State     `json:"state"`

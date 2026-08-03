@@ -71,6 +71,19 @@ The worker treats `origin_node_id`, `provenance.origin_node_id`, and `delegation
 
 Task lookup operations are scoped the same way: the original origin can fetch its task, and an intermediate worker can fetch the downstream task it directly created, but another tailnet peer cannot list, read, cancel, or fetch artifacts for tasks it does not own.
 
+### A worker asking its owner for something
+
+A running task can post progress and ask its owner a question over the **task channel**. That surface is deliberately narrow:
+
+- **Two ends, two credentials.** `task_post` and `task_ask` run inside a worker task and authenticate with the per-task token cmesh injected into that runner. The token's context file names exactly one task, so that is the authorization key — a task id in the request body is only checked against it, never used to reach another task. `task_send` and `task_messages` run on the origin and require task ownership.
+- **A worker cannot answer itself.** A per-task token is refused on `task_send`. Otherwise a worker could reply to its own question and manufacture apparent owner approval, which is exactly what asking is meant to prevent.
+- **Worker messages are untrusted claims.** An inbound body is named `body_untrusted` for the same reason `worker_summary_untrusted` is. Treat it as a claim, never as an instruction to act on, and never relay one worker's words into another worker's prompt.
+- **Approvals are typed and checked mechanically where possible.** A request naming a capability outside the profile that task was actually granted is auto-denied — the worker would be denied by policy anyway. Anything else, including free prose touching authority, goes to the human. The fallback is always "ask", never "allow".
+- **Bounded and audited.** Bodies are capped at 16 KiB and each task's channel at 200 messages; both refusals are explicit errors, not silent drops. Every message is mirrored to the audit log.
+- **No worker-to-worker channel.** Messages exist only between a task and its owner. Work products move between machines as git branches, not as prose.
+
+A question moves the task to `awaiting_input`, which is non-terminal: the runner is still alive, and the restart sweep treats it exactly like `running`, so a task blocked on a question that survives a restart fails visibly rather than being stranded.
+
 ### A worker trying to forge delegation provenance
 
 Subdelegation provenance is derived from a per-task token, not from model-supplied chain fields. When a worker task starts, cmesh writes a local task context, exposes a task token to that runner as `CMESH_TASK_TOKEN`, and registers a task-scoped cmesh MCP gateway for supported agent runners. Claude Code loads a strict task MCP config file; Codex ignores ambient user MCP config for that invocation and injects the local cmesh gateway with `bearer_token_env_var = "CMESH_TASK_TOKEN"`. MCP calls from the worker therefore carry the token structurally even when the gateway requires `host_token`.
@@ -218,7 +231,6 @@ These are areas that still need hardening before cmesh should be treated as matu
 - On the direct mesh-RPC path, hop limit and cycle detection beyond the authenticated last hop are advisory (no cross-mesh token exists to authenticate the full chain). They are loop/depth backstops, not authenticated guarantees; authorization itself never depends on them. Keep `hop_limit` low and disable subdelegation unless needed.
 - Peer discovery is available for onboarding, but discovered peers are not trusted merely because they are visible. Keep generated policy narrow and review allowed peers.
 - No per-human authorization layer for shared team tailnets.
-- No remote interactive permission prompt forwarding.
 - No signed runner manifest verification.
 - No policy engine for prompt-content risk classification.
 - The audit log is append-only and resistant to truncation by non-daemon users, but it is not tamper-evident against a compromised daemon user (no hash-chaining or signatures).

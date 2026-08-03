@@ -39,7 +39,7 @@ The security posture is the team feature, not a limitation on it.
 | --- | --- | --- |
 | Delegation | `delegate` | shipped |
 | Progress events | `task_events` | shipped (Phase 1) |
-| Task channel | `task_post` / `task_ask` / `task_send` | **planned** (Phase 2) |
+| Task channel | `task_post` / `task_ask` / `task_send` | shipped worker→origin (Phase 2a); live steering **planned** (Phase 2b) |
 | Cross-peer handoff | `handoff` | **planned** (Phase 3) |
 | Workstreams | `workstream` / `workstream_status` | **planned** (Phase 4) |
 
@@ -120,7 +120,7 @@ already written on every task transition.
 A conductor can then narrate real progress — "Linux tests running, Windows build
 queued, review done" — instead of polling terminal state.
 
-### Phase 2a — Task channel, worker → origin
+### Phase 2a — Task channel, worker → origin *(shipped)*
 
 The high-leverage phase.
 
@@ -140,7 +140,21 @@ The high-leverage phase.
   `POST /v1/tasks/{id}/messages` for the origin to answer or steer. Queued
   messages are delivered at the next `task_ask` checkpoint. Ownership-scoped and
   schema-versioned like every other endpoint.
-- Origin gateway tools: `task_send`, `task_messages`.
+- Origin gateway tools: `task_send`, `task_messages` (36 tools).
+- Two ends, two credentials, enforced and tested in both directions: a task
+  token is refused on `task_send` (a worker answering itself would manufacture
+  owner approval), and a host-token caller is refused on `task_post`/`task_ask`
+  with an explanation. The worker end resolves its task from the token's context
+  file; a request-supplied task id is only ever checked against it.
+- `awaiting_input` is non-terminal and swept on restart exactly like `running`,
+  so a task blocked on a question fails visibly instead of being stranded. It
+  may also transition straight to a terminal state: the runner keeps executing
+  while the task displays `awaiting_input`, so an agent that stops waiting and
+  finishes must not have its result rejected.
+- The origin mirror records the profile the worker was granted, so a typed
+  approval request can be refused mechanically when it names a capability
+  outside that profile. Everything else goes to the human — the fallback is
+  always "ask", never "allow".
 
 **Known risk:** harness MCP per-call timeouts versus a blocking `task_ask`.
 Mitigated two ways — the adapter sets the tool-timeout environment variable at

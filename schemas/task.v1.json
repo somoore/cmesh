@@ -331,7 +331,7 @@
       }
     },
     "task_state": {
-      "enum": ["queued", "running", "done", "failed", "denied", "cancelled"]
+      "enum": ["queued", "running", "awaiting_input", "done", "failed", "denied", "cancelled"]
     },
     "error_code": {
       "enum": [

@@ -116,6 +116,43 @@ var migrations = []migration{
 			`CREATE INDEX IF NOT EXISTS idx_task_events_task_seq ON task_events(task_id, seq)`,
 		},
 	},
+	{
+		version: 4,
+		statements: []string{
+			// The task channel: a durable, ordered conversation scoped to one task.
+			// body_untrusted is named for what it is -- worker-authored text on the
+			// inbound direction -- so no reader mistakes it for evidence.
+			`CREATE TABLE IF NOT EXISTS task_messages (
+				message_id TEXT PRIMARY KEY,
+				task_id TEXT NOT NULL,
+				seq INTEGER NOT NULL,
+				direction TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				body_untrusted TEXT NOT NULL DEFAULT '',
+				metadata_json TEXT NOT NULL DEFAULT '',
+				answered_seq INTEGER NOT NULL DEFAULT 0,
+				client_message_id TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_task_messages_task_seq ON task_messages(task_id, seq)`,
+			// Idempotency for a retried post: the same client id on the same task
+			// must not append a second message.
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_messages_client_id
+				ON task_messages(task_id, client_message_id) WHERE client_message_id <> ''`,
+			// Same counter shape as task_event_seq rather than generalizing that
+			// table: its CHECK (id = 0) makes a retrofit a migration risk for no
+			// gain, and two tables with one obvious pattern beats one clever one.
+			`CREATE TABLE IF NOT EXISTS task_message_seq (
+				id INTEGER PRIMARY KEY CHECK (id = 0),
+				next_seq INTEGER NOT NULL
+			)`,
+			`INSERT OR REPLACE INTO task_message_seq(id, next_seq) VALUES (0, 1)`,
+			// The origin-side mirror records the profile the worker actually got,
+			// so an approval request can be checked mechanically against what that
+			// task was granted instead of always falling back to asking the human.
+			`ALTER TABLE peer_tasks ADD COLUMN profile_effective TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

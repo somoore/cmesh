@@ -807,6 +807,22 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 		t.Fatalf("artifact code = %d, body = %s", artifactRes.Code, artifactRes.Body.String())
 	}
 
+	messagesReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/messages", nil)
+	messagesReq.RemoteAddr = "100.64.0.3:12345"
+	messagesRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(messagesRes, messagesReq)
+	if messagesRes.Code != http.StatusForbidden {
+		t.Fatalf("messages code = %d, body = %s", messagesRes.Code, messagesRes.Body.String())
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/v1/tasks/tsk_taskone/messages", strings.NewReader(`{"body":"do this"}`))
+	postReq.RemoteAddr = "100.64.0.3:12345"
+	postRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(postRes, postReq)
+	if postRes.Code != http.StatusForbidden {
+		t.Fatalf("post message code = %d, body = %s", postRes.Code, postRes.Body.String())
+	}
+
 	eventsReq := httptest.NewRequest(http.MethodGet, "/v1/tasks/tsk_taskone/events", nil)
 	eventsReq.RemoteAddr = "100.64.0.3:12345"
 	eventsRes := httptest.NewRecorder()

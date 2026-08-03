@@ -22,12 +22,17 @@ const (
 type State string
 
 const (
-	StateQueued    State = "queued"
-	StateRunning   State = "running"
-	StateDone      State = "done"
-	StateFailed    State = "failed"
-	StateDenied    State = "denied"
-	StateCancelled State = "cancelled"
+	StateQueued  State = "queued"
+	StateRunning State = "running"
+	// StateAwaitingInput is a running task blocked on a question it asked its
+	// owner. The runner process is still alive, so this is non-terminal: it must
+	// be swept on daemon restart like running, and the task can still complete
+	// on its own if the agent proceeds without waiting.
+	StateAwaitingInput State = "awaiting_input"
+	StateDone          State = "done"
+	StateFailed        State = "failed"
+	StateDenied        State = "denied"
+	StateCancelled     State = "cancelled"
 )
 
 type ErrorCode string
@@ -177,7 +182,7 @@ func IdempotencyKey(originNodeID, originSessionID, taskID string) string {
 
 func (s State) Valid() bool {
 	switch s {
-	case StateQueued, StateRunning, StateDone, StateFailed, StateDenied, StateCancelled:
+	case StateQueued, StateRunning, StateAwaitingInput, StateDone, StateFailed, StateDenied, StateCancelled:
 		return true
 	default:
 		return false
@@ -204,7 +209,13 @@ func ValidTransition(from, to State) bool {
 	case StateQueued:
 		return to == StateRunning || to == StateDenied || to == StateFailed || to == StateCancelled
 	case StateRunning:
-		return to == StateDone || to == StateFailed || to == StateCancelled
+		return to == StateDone || to == StateFailed || to == StateCancelled || to == StateAwaitingInput
+	case StateAwaitingInput:
+		// Back to running when answered, but also straight to a terminal state:
+		// the runner process keeps executing while the task displays
+		// awaiting_input, so an agent that stops waiting and finishes must not
+		// have its result rejected as an invalid transition.
+		return to == StateRunning || to == StateDone || to == StateFailed || to == StateCancelled
 	default:
 		return false
 	}
