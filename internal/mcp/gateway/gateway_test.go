@@ -270,7 +270,7 @@ func TestListTasksScopedForTaskToken(t *testing.T) {
 	}
 
 	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{OriginSessionID: "session-a"})
-	resp, err := g.listTasksCall(scoped, 20)
+	resp, err := g.listTasksCall(scoped, 20, "")
 	if err != nil || !resp.OK {
 		t.Fatalf("listTasksCall resp=%+v err=%v", resp, err)
 	}
@@ -283,7 +283,7 @@ func TestListTasksScopedForTaskToken(t *testing.T) {
 		t.Fatalf("task token must not see local tasks, got %+v", local)
 	}
 
-	hostResp, err := g.listTasksCall(ctx, 20)
+	hostResp, err := g.listTasksCall(ctx, 20, "")
 	if err != nil || !hostResp.OK {
 		t.Fatalf("host listTasksCall resp=%+v err=%v", hostResp, err)
 	}
@@ -331,7 +331,7 @@ func TestListTasksIncludesDelegatedMirror(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpsertPeerTask: %v", err)
 	}
-	resp, err := g.listTasksCall(ctx, 10)
+	resp, err := g.listTasksCall(ctx, 10, "")
 	if err != nil {
 		t.Fatalf("listTasksCall returned error: %v", err)
 	}

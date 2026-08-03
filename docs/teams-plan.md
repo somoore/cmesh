@@ -41,7 +41,7 @@ The security posture is the team feature, not a limitation on it.
 | Progress events | `task_events` | shipped (Phase 1) |
 | Task channel | `task_post` / `task_ask` / `task_send` | shipped worker→origin (Phase 2a); live steering **planned** (Phase 2b) |
 | Cross-peer handoff | `handoff` | shipped (Phase 3) |
-| Workstreams | `workstream` / `workstream_status` | **planned** (Phase 4) |
+| Workstreams | `workstream` / `workstream_status` | shipped (Phase 4) |
 
 ## Design insight: the channel splits in two
 
@@ -195,7 +195,7 @@ fetch a bundle and re-seed by hand.
 - No new authority: outbound policy at the origin plus inbound policy at the
   receiving peer, identical to any other delegation.
 
-### Phase 4 — Workstreams
+### Phase 4 — Workstreams *(shipped)*
 
 `origin_session_id` already groups a delegation thread and is now an
 authorization key, but it is invisible plumbing. Name it.

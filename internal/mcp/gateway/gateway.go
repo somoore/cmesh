@@ -62,6 +62,9 @@ type DelegateRequest struct {
 	// Handoff seeds this task from another peer's branch. Set by the handoff
 	// tool; a caller never supplies it directly.
 	Handoff *schema.HandoffSeed `json:"-"`
+	// Workstream names the delegation thread this task belongs to. Only a
+	// host-token caller may set it; see workstream.go.
+	Workstream string `json:"workstream,omitempty"`
 }
 
 type QueryPeerRequest struct {
@@ -504,12 +507,22 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		return g.inspectPeerCall(ctx, req)
 	case "list_tasks":
 		var req struct {
-			Limit int `json:"limit,omitempty"`
+			Limit      int    `json:"limit,omitempty"`
+			Workstream string `json:"workstream,omitempty"`
 		}
 		if err := json.Unmarshal(args, &req); err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		return g.listTasksCall(ctx, req.Limit)
+		return g.listTasksCall(ctx, req.Limit, req.Workstream)
+	case "workstream_status":
+		var req struct {
+			Workstream string `json:"workstream"`
+			Limit      int    `json:"limit,omitempty"`
+		}
+		if err := json.Unmarshal(args, &req); err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		return g.workstreamStatusCall(ctx, req.Workstream, req.Limit)
 	case "task_status":
 		var req struct {
 			TaskID         string `json:"task_id"`
@@ -1247,7 +1260,15 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 			return toolFailure(task.ErrorPeerUnauthorized, "task token context has no origin session")
 		}
 	} else {
-		sessionID = firstNonEmpty(strings.TrimSpace(req.OriginSessionID), sessionID, "gateway-default")
+		// A named workstream selects the session that groups this task with its
+		// siblings. Only reachable here, on the host-token branch: a task token's
+		// session comes from its stored context, so a worker cannot name its way
+		// into another workstream's tasks.
+		workstreamID, err := workstreamSession(req.Workstream)
+		if err != nil {
+			return toolFailure(task.ErrorWorkerFailed, err.Error())
+		}
+		sessionID = firstNonEmpty(workstreamID, strings.TrimSpace(req.OriginSessionID), sessionID, "gateway-default")
 	}
 	idempotencyKey := req.IdempotencyKey
 	if idempotencyKey == "" {
@@ -1636,9 +1657,12 @@ func taskTokenSession(ctx context.Context) (string, bool) {
 	return strings.TrimSpace(prov.OriginSessionID), true
 }
 
-func (g *Gateway) listTasksCall(ctx context.Context, limit int) (ToolResponse, error) {
+func (g *Gateway) listTasksCall(ctx context.Context, limit int, workstream string) (ToolResponse, error) {
 	peerTasks, err := g.Store.ListPeerTasks(ctx, limit)
 	if err != nil {
+		return toolFailure(task.ErrorWorkerFailed, err.Error())
+	}
+	if peerTasks, err = workstreamFilter(peerTasks, workstream); err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	localTasks, err := g.Store.RecentTasks(ctx, limit)
@@ -2514,6 +2538,7 @@ func mcpTools() []map[string]any {
 				"origin_session_id": stringSchema("Optional stable origin session id for idempotency."),
 				"delegation_chain":  arraySchema(stringSchema("Legacy delegation path entry. Ignored when task_token is present.")),
 				"hop_count":         map[string]any{"type": "integer", "minimum": 0},
+				"workstream":        stringSchema("Name the delegation thread this task belongs to, so related tasks across peers report together under workstream_status. Tasks in one workstream share an origin session, so a worker in it can see its siblings' tasks."),
 				"idempotency_key":   stringSchema("Optional stable key for retry-safe delegation."),
 				"followup_task_id":  stringSchema("Optional previous task id to continue on the same peer/session."),
 				"task_token":        stringSchema("Optional CMESH_TASK_TOKEN for worker subdelegation. When present, gateway derives provenance server-side."),
@@ -2584,6 +2609,14 @@ func mcpTools() []map[string]any {
 				"wait":      map[string]any{"type": "boolean", "description": "Long-poll until an event newer than after exists, the task reaches a terminal state, or the timeout expires."},
 				"timeout_s": map[string]any{"type": "integer", "description": "Long-poll timeout in seconds when wait is true. Default 30."},
 			}, []string{"task_id"}),
+		},
+		{
+			"name":        "workstream_status",
+			"description": "Report every task in a named workstream across all peers in one call, so you can answer \"where does this work stand\" without polling each task. Params: workstream (required), limit. States come from this node's mirror of what it dispatched; use task_status for an authoritative single task.",
+			"inputSchema": objectSchema(map[string]any{
+				"workstream": stringSchema("Workstream name."),
+				"limit":      map[string]any{"type": "integer", "description": "Maximum tasks to scan (default 100)."},
+			}, []string{"workstream"}),
 		},
 		{
 			"name":        "handoff",
