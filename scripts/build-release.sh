@@ -6,7 +6,9 @@ version=$2
 commit=$3
 date=$4
 dist=$5
-ldflags="-s -w -X cmesh/internal/version.Version=$version -X cmesh/internal/version.Commit=$commit -X cmesh/internal/version.Date=$date"
+# No -s -w: keep the symbol table so `govulncheck -mode binary` checks
+# reachability per symbol instead of flagging every required module.
+ldflags="-X cmesh/internal/version.Version=$version -X cmesh/internal/version.Commit=$commit -X cmesh/internal/version.Date=$date"
 
 platforms=${CMESH_PLATFORMS:-"darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64"}
 

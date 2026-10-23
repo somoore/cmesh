@@ -6,7 +6,7 @@ COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 COSIGN_VERSION ?= v2.6.3
 SYFT_VERSION ?= v1.45.1
-LDFLAGS := -s -w -X cmesh/internal/version.Version=$(VERSION) -X cmesh/internal/version.Commit=$(COMMIT) -X cmesh/internal/version.Date=$(DATE)
+LDFLAGS := -X cmesh/internal/version.Version=$(VERSION) -X cmesh/internal/version.Commit=$(COMMIT) -X cmesh/internal/version.Date=$(DATE)
 
 .PHONY: test precommit unit fmt fmt-check mod-check supply-chain dup vuln workflow-lint build-local build sbom release-notes sign deploy clean install-hooks
 
