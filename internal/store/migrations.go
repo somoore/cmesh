@@ -165,6 +165,17 @@ var migrations = []migration{
 			`ALTER TABLE tasks ADD COLUMN handoff_from TEXT NOT NULL DEFAULT ''`,
 		},
 	},
+	{
+		version: 6,
+		statements: []string{
+			// The worker task whose token delegated this one. It is the ownership
+			// key for task-token reads: a shared origin session (every host-token
+			// delegation without origin_session_id lands in gateway-default) is
+			// not a per-delegation boundary. Empty for host-token delegations and
+			// for rows that predate it; those stay reachable only by the host token.
+			`ALTER TABLE peer_tasks ADD COLUMN owner_task_id TEXT NOT NULL DEFAULT ''`,
+		},
+	},
 }
 
 func (s *Store) Migrate(ctx context.Context) error {

@@ -287,10 +287,10 @@ func (g *Gateway) handleRPC(ctx context.Context, req rpcRequest) (rpcResponse, b
 func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessage) (ToolResponse, error) {
 	switch name {
 	case "doctor":
-		status := onboard.Detect(ctx, config.DefaultPath(), false)
+		status := onboard.Detect(ctx, g.configPath(), false)
 		return ToolResponse{OK: status.ConfigOK && status.Machine.TailscaleOK, Result: status}, nil
 	case "init_status":
-		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}, nil
+		return ToolResponse{OK: true, Result: onboard.Detect(ctx, g.configPath(), true)}, nil
 	case "detect_runners":
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
 	case "task_catalog":
@@ -383,7 +383,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		return ToolResponse{OK: true, Result: map[string]string{"toml": body, "path": config.DefaultPath()}}, nil
+		return ToolResponse{OK: true, Result: map[string]string{"toml": body, "path": g.configPath()}}, nil
 	case "validate_config":
 		var req struct {
 			Path string `json:"path,omitempty"`
@@ -408,7 +408,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			defer os.Remove(path)
 		}
 		if path == "" {
-			path = config.DefaultPath()
+			path = g.configPath()
 		}
 		if err := onboard.ValidateConfig(path); err != nil {
 			return ToolResponse{OK: false, Error: &ToolError{Code: task.ErrorWorkerFailed, Detail: err.Error()}}, nil
@@ -1109,11 +1109,19 @@ func (g *Gateway) profileConfigureCall(req ProfileConfigureRequest) (ToolRespons
 		payload["preview_toml"] = result.PreviewTOML
 	}
 	if req.Confirmed {
-		if err := g.reloadConfig(); err != nil {
+		// Peers and policy reload live; a new or changed profile or runner does
+		// not, because the runner registry is built at startup.
+		held, err := g.reloadConfig()
+		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		payload["status"] = "configured"
-		payload["active_immediately"] = true
+		payload["active_immediately"] = len(held) == 0
+		payload["requires_daemon_restart"] = len(held) > 0
+		if len(held) > 0 {
+			payload["restart_required_for"] = held
+			payload["next_step"] = restartRequiredNote(held)
+		}
 	}
 	return ToolResponse{OK: true, Result: payload}, nil
 }
@@ -1197,6 +1205,11 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
+		// A follow-up resumes the earlier task's runner session and reads its
+		// result, so a task token may only follow up a task it owns.
+		if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+			return toolFailure(task.ErrorPeerUnauthorized, err.Error())
+		}
 		followupPeerTask = peerTask
 		if req.Peer != "" {
 			if !g.peerMatchesNode(req.Peer, peerTask.PeerNodeID) {
@@ -1251,13 +1264,23 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	// body-supplied provenance when a token is present; this applies the same
 	// rule to the session. Host-token callers have no provenance and keep using
 	// the request value.
+	//
+	// The session is not the ownership key, though: host-token delegations that
+	// omit origin_session_id all share gateway-default, so many unrelated worker
+	// tasks can hold the same session. A task-token delegation is owned by the
+	// worker task its token was minted for, and that is what task-token reads
+	// are authorized against.
 	sessionID := strings.TrimSpace(prov.OriginSessionID)
+	ownerTaskID := ""
 	if _, scoped := taskTokenSession(ctx); scoped {
 		// A token whose stored context carries no session cannot be scoped, and
-		// must not fall through to the shared default session — that would put
-		// its children where any other unscoped token could read them.
+		// must not fall through to the shared default session.
 		if sessionID == "" {
 			return toolFailure(task.ErrorPeerUnauthorized, "task token context has no origin session")
+		}
+		ownerTaskID = strings.TrimSpace(prov.TaskID)
+		if ownerTaskID == "" {
+			return toolFailure(task.ErrorPeerUnauthorized, "task token context does not name a task")
 		}
 	} else {
 		// A named workstream selects the session that groups this task with its
@@ -1274,6 +1297,12 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if idempotencyKey == "" {
 		queryJSON, _ := json.Marshal(req.Query)
 		idempotencyKey = strings.Join([]string{req.FollowupTaskID, req.Peer, req.CWD, req.Runner, req.Profile, req.ProfileSource, req.ProfileContextID, req.TaskKind, string(queryJSON), strconv.Itoa(req.TimeoutSeconds), strconv.FormatBool(req.AllowDirty), task.PromptHash(req.Prompt)}, "\x00")
+	}
+	// Two worker tasks sharing a session that send the same request must not
+	// collapse onto one task: the second would be handed the first one's replay.
+	// Mixing in the owner keeps each delegating task's children its own.
+	if ownerTaskID != "" {
+		idempotencyKey = ownerTaskID + "\x00" + idempotencyKey
 	}
 	taskID := task.DeterministicID(g.Config.Node.ID, sessionID, idempotencyKey)
 	hopCount := prov.HopCount
@@ -1366,6 +1395,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		PeerNodeID:       firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
 		RemoteTaskID:     remoteTaskID,
 		OriginSessionID:  sessionID,
+		OwnerTaskID:      ownerTaskID,
 		State:            resp.State,
 		ProfileEffective: decision.EffectiveProfile,
 	})
@@ -1413,11 +1443,10 @@ const gatewaySmokeExpectedResponse = "cmesh smoke ok"
 // config fresh from disk — that file is the thing being repaired — rather than using
 // the daemon's in-memory g.Config.
 //
-// IMPORTANT: the gateway runs INSIDE the daemon, which loaded its policy once at
-// startup and has no config-reload path. So a confirmed repair rewrites the file but
-// does NOT change what this live daemon enforces until it is restarted. The
-// next_step says so in plain terms; we never report success as if the running mesh
-// were already fixed.
+// Diagnosis, the rewrite and the reload that follows all use g.configPath(), the
+// file this daemon was started with. Mixing that with config.DefaultPath() would
+// let a daemon started with --config repair one file and reload another, then
+// report the untouched config as active.
 func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (ToolResponse, error) {
 	var req struct {
 		Confirmed bool `json:"confirmed,omitempty"`
@@ -1427,7 +1456,8 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 	}
-	cfg, err := config.Load(config.DefaultPath())
+	configPath := g.configPath()
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, "load config: "+err.Error())
 	}
@@ -1458,7 +1488,7 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 		}}, nil
 	}
 
-	fixedNames, err := onboard.ApplyPeerRepairs(config.DefaultPath(), repairs)
+	fixedNames, err := onboard.ApplyPeerRepairs(configPath, repairs)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
@@ -1471,16 +1501,24 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 	// server enforces the corrected peer trust immediately. Report the reload
 	// outcome honestly: claiming the mesh is fixed while the daemon still holds
 	// the old policy is exactly the false success this tool must avoid.
-	if err := g.reloadConfig(); err != nil {
+	held, err := g.reloadConfig()
+	if err != nil {
 		payload["active_immediately"] = false
 		payload["requires_daemon_restart"] = true
 		payload["reload_error"] = err.Error()
 		payload["next_step"] = "The repaired config could not be reloaded into the running daemon. Restart it (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm."
 		return ToolResponse{OK: true, Result: payload}, nil
 	}
+	// The peer repair itself is live. Anything else that changed in the file is
+	// not, and a restart is needed for it; say so rather than letting a peer fix
+	// look like it applied unrelated edits.
 	payload["active_immediately"] = true
-	payload["requires_daemon_restart"] = false
+	payload["requires_daemon_restart"] = len(held) > 0
 	payload["next_step"] = "The running daemon now enforces the repaired peer trust. Run a bidirectional smoke to confirm."
+	if len(held) > 0 {
+		payload["restart_required_for"] = held
+		payload["next_step"] = "The running daemon now enforces the repaired peer trust. " + restartRequiredNote(held) + " Run a bidirectional smoke to confirm."
+	}
 	return ToolResponse{OK: true, Result: payload}, nil
 }
 
@@ -1628,23 +1666,29 @@ func helloSupportsProfile(hello schema.HelloResponse, profile string) bool {
 //
 // A task-token caller is a *worker's* runner reaching back in during
 // subdelegation. Its output is untrusted by design, so it must not be able to
-// enumerate or act on tasks outside its own delegation. Both the task context
-// file backing the token and peer_tasks carry origin_session_id, so the token's
-// session is the ownership key: it covers the token's own task and anything that
-// task delegated onward (children inherit the session), and nothing else.
+// enumerate or act on tasks outside its own delegation. The ownership key is
+// the worker task the token was minted for, recorded on each peer task that
+// token delegated. The origin session is not enough: every host-token
+// delegation that omits origin_session_id shares gateway-default, so a session
+// match would let one task's runner reach another unrelated task's children.
 //
-// Tasks predating this scoping have an empty mirrored session; those stay
-// readable only by a host-token caller, never by a task token.
+// Tasks with no recorded owner -- host-token delegations and rows predating
+// ownership -- stay readable only by a host-token caller, never by a task token.
 func (g *Gateway) authorizeTaskAccess(ctx context.Context, peerTask store.PeerTask) error {
 	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
 	if !ok {
 		return nil
 	}
-	session := strings.TrimSpace(prov.OriginSessionID)
-	if session != "" && session == strings.TrimSpace(peerTask.OriginSessionID) {
+	if taskTokenOwns(prov, peerTask) {
 		return nil
 	}
 	return errors.New("task token is not authorized for this task")
+}
+
+// taskTokenOwns reports whether the task token behind prov delegated peerTask.
+func taskTokenOwns(prov gatewayProvenance, peerTask store.PeerTask) bool {
+	owner := strings.TrimSpace(prov.TaskID)
+	return owner != "" && owner == strings.TrimSpace(peerTask.OwnerTaskID)
 }
 
 // taskTokenSession returns the origin session of a task-token caller, and false
@@ -1670,11 +1714,12 @@ func (g *Gateway) listTasksCall(ctx context.Context, limit int, workstream strin
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	// A task-token caller may only see its own delegation, so filter the mirror
-	// to its session and withhold this node's local task list entirely.
-	if session, scoped := taskTokenSession(ctx); scoped {
+	// to the tasks its token delegated and withhold this node's local task list
+	// entirely.
+	if prov, scoped := ctx.Value(provenanceContextKey{}).(gatewayProvenance); scoped {
 		filtered := peerTasks[:0]
 		for _, peerTask := range peerTasks {
-			if session != "" && strings.TrimSpace(peerTask.OriginSessionID) == session {
+			if taskTokenOwns(prov, peerTask) {
 				filtered = append(filtered, peerTask)
 			}
 		}
@@ -1702,7 +1747,7 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	if err != nil {
 		return ToolResponse{OK: true, Result: mirroredStatus(peerTask, err)}, nil
 	}
-	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, OriginSessionID: peerTask.OriginSessionID, State: resp.State})
+	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, OriginSessionID: peerTask.OriginSessionID, OwnerTaskID: peerTask.OwnerTaskID, State: resp.State})
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
@@ -2014,26 +2059,40 @@ func (g *Gateway) configPath() string {
 	return firstNonEmpty(g.ConfigPath, config.DefaultPath())
 }
 
-// reloadConfig re-reads config from disk and applies it to this gateway and to
-// the policy engine.
+// reloadConfig re-reads config from disk and applies its peers and policy to
+// this gateway and to the policy engine. Profiles, runners, ceilings and node
+// settings keep their startup values until the daemon restarts (see
+// config.Reloadable): the runner registry is built once at startup, so
+// reloading them would let policy and the executing runner disagree about what
+// a profile grants. It returns the sections that changed on disk but were held
+// back, so callers can say a restart is needed.
 //
 // The engine is reloaded in place rather than replaced: the daemon builds one
 // engine and shares it with the mesh RPC server, which is what enforces inbound
 // peer policy. Assigning a fresh engine to g.Policy would leave the mesh server
 // evaluating the old config, so a peer repair would report success while the
 // daemon kept rejecting the peer.
-func (g *Gateway) reloadConfig() error {
-	cfg, err := config.Load(g.configPath())
+func (g *Gateway) reloadConfig() ([]string, error) {
+	next, err := config.Load(g.configPath())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	g.Config = cfg
+	merged, held := g.Config.Reloadable(next)
+	if err := merged.Validate(); err != nil {
+		return nil, fmt.Errorf("reloaded peers and policy do not validate against the running profiles: %w", err)
+	}
+	g.Config = merged
 	if g.Policy != nil {
-		g.Policy.Reload(cfg)
+		g.Policy.Reload(merged)
 	} else {
-		g.Policy = policy.New(cfg)
+		g.Policy = policy.New(merged)
 	}
-	return nil
+	return held, nil
+}
+
+// restartRequiredNote explains which held-back config sections need a restart.
+func restartRequiredNote(held []string) string {
+	return "Changes to " + strings.Join(held, ", ") + " were written but are not active: profile, runner and node changes require a daemon restart (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`)."
 }
 
 func (g *Gateway) readProfileContext() (profileContextFile, error) {

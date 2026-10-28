@@ -143,7 +143,6 @@ func RunProgram(ctx context.Context, p Program) (CompletedProcess, error) {
 	}
 
 	result := processResult(p, started, stdout, stderr, combined, stdoutPath, stderrPath, exitCode(waitErr))
-	result.Truncated = stdout.truncated || stderr.truncated || combined.truncated
 	// A run that both overflowed the output limit and exited non-zero is a
 	// failure first: reporting result_too_large would mask worker_failed and
 	// send the caller looking for a too-large transcript instead of a failing
@@ -157,6 +156,8 @@ func RunProgram(ctx context.Context, p Program) (CompletedProcess, error) {
 	return result, nil
 }
 
+// processResult builds the result for every exit path, including timeout and
+// cancellation, so Truncated is set wherever captured output hit the limit.
 func processResult(p Program, started time.Time, stdout, stderr, combined limitedBuffer, stdoutPath, stderrPath string, code int) CompletedProcess {
 	ref := ""
 	if stdoutPath != "" || stderrPath != "" {
@@ -172,6 +173,7 @@ func processResult(p Program, started time.Time, stdout, stderr, combined limite
 		TranscriptRef: ref,
 		StdoutPath:    stdoutPath,
 		StderrPath:    stderrPath,
+		Truncated:     stdout.truncated || stderr.truncated || combined.truncated,
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -264,18 +265,10 @@ func (c *Config) ApplyDefaults(configDir string) error {
 			prof.Claims = append([]string(nil), prof.Capabilities...)
 		}
 		if prof.Writes == "" {
-			if containsString(prof.Capabilities, profiledefs.CapEditRepo) || containsString(prof.Capabilities, profiledefs.CapExecuteInRepo) {
-				prof.Writes = profiledefs.WritesRepoOnly
-			} else {
-				prof.Writes = profiledefs.WritesDeny
-			}
+			prof.Writes = defaultWrites(prof.Capabilities)
 		}
 		if prof.Shell == "" {
-			if containsString(prof.Capabilities, profiledefs.CapExecuteInRepo) || containsString(prof.Capabilities, profiledefs.CapExecuteRepoCommands) {
-				prof.Shell = profiledefs.ShellAllow
-			} else {
-				prof.Shell = profiledefs.ShellDeny
-			}
+			prof.Shell = defaultShell(prof.Capabilities)
 		}
 		if prof.AuditLevel == "" {
 			prof.AuditLevel = "normal"
@@ -313,6 +306,50 @@ func pickDefaultProfile(profiles map[string]ProfileConfig) string {
 		}
 	}
 	return first
+}
+
+// Reloadable returns a copy of c that takes from next only what a running
+// daemon may apply without a restart: the [peers.*] entries and the [policy]
+// table, except policy.profile_ceilings. Everything else -- profiles, runners,
+// ceilings, node, tailnet, store, audit and gateway settings -- stays as c has
+// it, and held lists each of those sections that differs in next.
+//
+// Profiles, ceilings and runners stay put because the runner registry is built
+// once at startup from them. Reloading them would let policy accept a task
+// under one profile definition while the runner executes it with another, and
+// a peer repair would silently pick up unrelated profile edits from disk.
+func (c *Config) Reloadable(next *Config) (merged *Config, held []string) {
+	out := *c
+	out.Peers = next.Peers
+	out.Policy = next.Policy
+	out.Policy.ProfileCeilings = c.Policy.ProfileCeilings
+	for _, section := range []struct {
+		name          string
+		current, next any
+	}{
+		{"profiles", c.Profiles, next.Profiles},
+		{"runners", c.Runners, next.Runners},
+		{"policy.profile_ceilings", c.Policy.ProfileCeilings, next.Policy.ProfileCeilings},
+		{"node", c.Node, next.Node},
+		{"tailscale", c.Tailnet, next.Tailnet},
+		{"store", c.Store, next.Store},
+		{"audit", c.Audit, next.Audit},
+		{"gateway", c.Gateway, next.Gateway},
+	} {
+		if !reloadEqual(section.current, section.next) {
+			held = append(held, section.name)
+		}
+	}
+	return &out, held
+}
+
+// reloadEqual compares two config sections, treating nil and empty maps alike.
+func reloadEqual(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() == reflect.Map && vb.Kind() == reflect.Map && va.Len() == 0 && vb.Len() == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 func (c *Config) Validate() error {
@@ -427,16 +464,12 @@ func (c *Config) Validate() error {
 // authority instead of capping it.
 //
 // A ceiling remaps a requested profile down to a weaker one at policy time. The
-// remap is unconditional, so a mapping pointing at a *stronger* profile silently
-// escalates every request naming the keyed profile — the opposite of what the
-// field is for. Both endpoints must exist, and the ceiling's risk rank must not
-// exceed the requested profile's.
-//
-// The comparison is rank <=, not <, so an equal-risk remap stays legal: the
-// documented example (system-change -> repo-dev) is high -> high, and capping
-// within a risk tier is a legitimate narrowing of capabilities. Risk comes from
-// RiskForConfig rather than RiskForProfile because the latter returns "" for
-// any custom profile name, which would make an unknown name compare as weakest.
+// remap is unconditional, so a mapping pointing at a profile with *more* or
+// *different* authority silently grants it to every request naming the keyed
+// profile — the opposite of what the field is for. Both endpoints must exist,
+// and the ceiling must be a narrowing of the requested profile on every axis
+// (see profiledefs.CeilingExcess). Comparing only the risk rank is not enough:
+// two medium-risk profiles can grant disjoint powers.
 func (c *Config) validateProfileCeilings() error {
 	names := make([]string, 0, len(c.Policy.ProfileCeilings))
 	for requested := range c.Policy.ProfileCeilings {
@@ -456,23 +489,60 @@ func (c *Config) validateProfileCeilings() error {
 		if _, ok := c.Runners[ceilingProfile.Runner]; !ok {
 			return fmt.Errorf("policy.profile_ceilings[%q] ceiling profile %q references unknown runner %q", requested, ceiling, ceilingProfile.Runner)
 		}
-		if profiledefs.RiskRank(profileRisk(ceiling, ceilingProfile)) > profiledefs.RiskRank(profileRisk(requested, requestedProfile)) {
+		if excess := profiledefs.CeilingExcess(ceilingProfile.Authority(ceiling), requestedProfile.Authority(requested)); excess != "" {
 			return fmt.Errorf(
-				"policy.profile_ceilings[%q] raises authority: ceiling %q is risk=%s but %q is risk=%s; a ceiling must not exceed the profile it caps",
-				requested, ceiling, profileRisk(ceiling, ceilingProfile), requested, profileRisk(requested, requestedProfile),
+				"policy.profile_ceilings[%q] raises authority: ceiling %q %s of %q; a ceiling must not exceed the profile it caps",
+				requested, ceiling, excess, requested,
 			)
 		}
 	}
 	return nil
 }
 
-// profileRisk returns a profile's effective risk, preferring the explicit risk
-// field and falling back to the capability-derived value.
-func profileRisk(name string, prof ProfileConfig) string {
-	if prof.Risk != "" {
-		return prof.Risk
+// Authority returns the authority this profile grants, for ceiling comparison.
+// Unset writes and shell take the same defaults Load applies, so a profile
+// built in-process compares the same way as one read from disk. Risk prefers
+// the explicit field and falls back to the capability-derived value; it uses
+// RiskForConfig rather than RiskForProfile because the latter returns "" for
+// any custom profile name.
+func (prof ProfileConfig) Authority(name string) profiledefs.Authority {
+	capabilities := profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims)
+	writes := prof.Writes
+	if writes == "" {
+		writes = defaultWrites(capabilities)
 	}
-	return profiledefs.RiskForConfig(name, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
+	shell := prof.Shell
+	if shell == "" {
+		shell = defaultShell(capabilities)
+	}
+	risk := prof.Risk
+	if risk == "" {
+		risk = profiledefs.RiskForConfig(name, capabilities, writes, shell, prof.Network)
+	}
+	return profiledefs.Authority{
+		Capabilities: capabilities,
+		Writes:       writes,
+		Shell:        shell,
+		Network:      prof.Network,
+		GitPush:      prof.GitPush,
+		Risk:         risk,
+	}
+}
+
+// defaultWrites is the writes level for a profile that does not set one.
+func defaultWrites(capabilities []string) string {
+	if containsString(capabilities, profiledefs.CapEditRepo) || containsString(capabilities, profiledefs.CapExecuteInRepo) {
+		return profiledefs.WritesRepoOnly
+	}
+	return profiledefs.WritesDeny
+}
+
+// defaultShell is the shell level for a profile that does not set one.
+func defaultShell(capabilities []string) string {
+	if containsString(capabilities, profiledefs.CapExecuteInRepo) || containsString(capabilities, profiledefs.CapExecuteRepoCommands) {
+		return profiledefs.ShellAllow
+	}
+	return profiledefs.ShellDeny
 }
 
 func containsString(values []string, needle string) bool {

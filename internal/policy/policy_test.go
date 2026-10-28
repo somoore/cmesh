@@ -538,9 +538,9 @@ func TestCeilingCannotRaiseAuthority(t *testing.T) {
 	}
 }
 
-// Capping to an equal-risk profile is legitimate narrowing (the documented
-// example maps system-change to repo-dev, both high risk), so rank equality
-// must stay allowed.
+// Capping to an equal-risk profile is legitimate when it narrows (the
+// documented example maps system-change to repo-dev, both high risk). The
+// ceiling's edit_repo is covered by the requested profile's writes=allow.
 func TestCeilingAllowsEqualRiskCap(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -582,9 +582,11 @@ func TestCeilingReportsEffectiveRunner(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	cfg.Runners["probe"] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: "capped"}
+	// The ceiling must be a genuine narrowing, so the requested profile also
+	// holds the probe capability the ceiling keeps.
 	cfg.Profiles["asked"] = config.ProfileConfig{
 		Runner:       "claude-code",
-		Capabilities: []string{profile.CapReadFiles},
+		Capabilities: []string{profile.CapReadFiles, profile.CapDiskInfo},
 		Writes:       profile.WritesDeny,
 		Shell:        profile.ShellDeny,
 		Risk:         profile.RiskMedium,
@@ -730,5 +732,112 @@ func testConfig(root string) *config.Config {
 		Runners: map[string]config.RunnerConfig{
 			"claude-code": {Command: []string{"claude", "-p"}, DefaultProfile: "dev"},
 		},
+	}
+}
+
+// One decision must be evaluated against one config. CheckInbound and
+// CheckOutbound take a snapshot for the peer, hop and cwd checks; checkProfile
+// must use that same snapshot rather than re-reading the engine, or a Reload
+// in between splits the decision across two configs.
+func TestCheckProfileUsesCallerSnapshot(t *testing.T) {
+	root := t.TempDir()
+	snapshot := testConfig(root)
+	engine := New(snapshot)
+
+	// The engine has since moved on to a config without the profile.
+	reloaded := testConfig(root)
+	reloaded.Profiles = map[string]config.ProfileConfig{}
+	engine.Reload(reloaded)
+
+	intent := TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "dev", Runner: "claude-code"}
+	if decision := engine.checkProfile(snapshot, intent, false); !decision.Allowed {
+		t.Fatalf("checkProfile must evaluate the caller's snapshot, got %+v", decision)
+	}
+	if decision := engine.checkProfile(reloaded, intent, false); decision.Allowed || decision.Code != "profile_unavailable" {
+		t.Fatalf("checkProfile against the reloaded snapshot should be profile_unavailable, got %+v", decision)
+	}
+}
+
+// readOnlyProfile is a medium-risk claude-code profile with writes denied, for
+// ceiling tests that vary only capabilities and shell.
+func readOnlyProfile(shell string, capabilities ...string) config.ProfileConfig {
+	return config.ProfileConfig{Runner: "claude-code", Capabilities: capabilities, Writes: profile.WritesDeny, Shell: shell, Risk: profile.RiskMedium}
+}
+
+// withCeiling maps requested to ceiling on a fresh test config.
+func withCeiling(root string, requested, ceiling config.ProfileConfig) *config.Config {
+	cfg := testConfig(root)
+	cfg.Profiles["asked"] = requested
+	cfg.Profiles["capped"] = ceiling
+	cfg.Policy.ProfileCeilings = map[string]string{"asked": "capped"}
+	return cfg
+}
+
+// Outbound denials name profiles, but the profile that runs is the ceiling. A
+// request naming an allowed profile must not reach a denied one through a
+// ceiling remap.
+func TestOutboundDenialAppliesToCeiling(t *testing.T) {
+	root := t.TempDir()
+	cfg := withCeiling(root,
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles, profile.CapDiskInfo),
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles))
+	cfg.Policy.Outbound.DeniedProfiles = []string{"capped"}
+
+	decision := New(cfg).CheckOutbound(TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "asked"})
+	if decision.Allowed || decision.Code != "profile_denied" {
+		t.Fatalf("outbound denial of the ceiling must hold, got %+v", decision)
+	}
+}
+
+// Two profiles in the same risk tier can grant disjoint powers. A ceiling that
+// swaps one for the other is not a cap and must be refused at request time too.
+func TestCeilingRejectsEqualRiskDisjointProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := withCeiling(root,
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles),
+		readOnlyProfile(profile.ShellAllowlisted, profile.CapShellReadonly))
+
+	decision := New(cfg).CheckInbound(TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "asked"})
+	if decision.Allowed || decision.Code != "profile_denied" {
+		t.Fatalf("equal-risk disjoint ceiling must be refused, got %+v", decision)
+	}
+}
+
+// A reload applies peers and policy only. A profile changed on disk keeps its
+// startup definition in policy until restart, because the runners that execute
+// it were built from that definition; letting policy see the new one would let
+// the two disagree about what the profile grants.
+func TestReloadDoesNotChangeProfiles(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["reader"] = readOnlyProfile(profile.ShellDeny, profile.CapReadFiles)
+	engine := New(cfg)
+	intent := TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "reader", Capability: profile.CapReadFiles}
+	if decision := engine.CheckInbound(intent); !decision.Allowed {
+		t.Fatalf("baseline decision should allow: %+v", decision)
+	}
+
+	// On disk, the profile loses read_files, a ceiling appears, and a new peer
+	// is allowed.
+	next := testConfig(root)
+	next.Profiles["reader"] = readOnlyProfile(profile.ShellDeny, profile.CapDiskInfo)
+	next.Policy.ProfileCeilings = map[string]string{"reader": "dev"}
+	next.Policy.AllowedPeers = append(next.Policy.AllowedPeers, "new-peer")
+	held := engine.Reload(next)
+
+	if !contains(held, "profiles") || !contains(held, "policy.profile_ceilings") {
+		t.Fatalf("reload should report held-back profiles and ceilings, got %v", held)
+	}
+	if decision := engine.CheckInbound(intent); !decision.Allowed || decision.EffectiveProfile != "reader" {
+		t.Fatalf("policy's view of the profile must not change on reload: %+v", decision)
+	}
+	got := engine.Config().Profiles["reader"]
+	if !contains(got.Capabilities, profile.CapReadFiles) {
+		t.Fatalf("engine profile changed on reload: %+v", got)
+	}
+	// The policy table itself does reload.
+	newPeer := TaskIntent{PeerName: "new-peer", CWD: root, Profile: "reader", Capability: profile.CapReadFiles}
+	if decision := engine.CheckInbound(newPeer); !decision.Allowed {
+		t.Fatalf("a peer allowed by the reloaded policy should be accepted: %+v", decision)
 	}
 }

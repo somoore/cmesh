@@ -1585,3 +1585,77 @@ func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
 		t.Fatalf("bad cursor code = %d, want 400: %s", res.Code, res.Body.String())
 	}
 }
+
+// A peer repair reloads the policy engine the daemon shares with this server.
+// Peer lookups must follow that reload, not the startup Config, or the repair
+// reports the new trust as active while peer smoke keeps using the old data.
+// Profiles must not follow it: the runner registry is built from the startup
+// profiles, so a profile added or changed on disk stays inactive until restart.
+func TestServerFollowsReloadForPeersOnly(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	startup := server.Config
+
+	reloaded := *startup
+	reloaded.Peers = map[string]config.PeerConfig{
+		"mac-studio": {Name: "mac-studio", NodeID: "mac-studio", Address: "100.64.0.1"},
+	}
+	reloaded.Profiles = map[string]config.ProfileConfig{}
+	for name, prof := range startup.Profiles {
+		reloaded.Profiles[name] = prof
+	}
+	reloaded.Profiles["repo-dev"] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Writes:          profiledefs.WritesRepoOnly,
+		Shell:           profiledefs.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	held := server.Policy.Reload(&reloaded)
+	if len(held) != 1 || held[0] != "profiles" {
+		t.Fatalf("reload should report the held-back profiles section, got %v", held)
+	}
+
+	identity := tsid.Identity{NodeID: "mac-studio", NodeName: "mac-studio"}
+	if _, _, ok := peerForIdentity(server.liveConfig(), identity); !ok {
+		t.Fatal("peer lookup must see the peer added by the reload")
+	}
+
+	leaseBody := `{"profile":"repo-dev","cwd":` + strconv.Quote(root) + `,"ttl_s":1800}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/profile-leases", strings.NewReader(leaseBody))
+	req.RemoteAddr = "100.64.0.1:12345"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code == http.StatusCreated || !strings.Contains(res.Body.String(), "not configured") {
+		t.Fatalf("a profile added by reload must stay inactive until restart: status = %d, body = %s", res.Code, res.Body.String())
+	}
+}
+
+// The runner semaphore carries the count of running and queued tasks. A reload
+// that changes a runner's concurrency must not resize it: replacing the channel
+// dropped that accounting and let more tasks start than either limit allows.
+func TestRunnerConcurrencyIgnoresReload(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	server.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 1}
+
+	release, err := server.acquireRunner(context.Background(), "fake")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer release()
+
+	reloaded := *server.Config
+	reloaded.Runners = map[string]config.RunnerConfig{
+		"fake": {Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 2},
+	}
+	server.Policy.Reload(&reloaded)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if second, err := server.acquireRunner(ctx, "fake"); err == nil {
+		second()
+		t.Fatal("a second task started while the first held the only slot")
+	}
+}

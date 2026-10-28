@@ -190,12 +190,19 @@ func TestDelegatedTaskLookupSurvivesOriginRestart(t *testing.T) {
 // subdelegation. Its output is untrusted by design, so it must not be able to
 // read or cancel tasks outside its own delegation — only the host token, which
 // belongs to this machine's own agent, may reach every delegated task.
-func TestTaskTokenCannotReachAnotherSessionsTask(t *testing.T) {
+//
+// Ownership is the delegating task, not the session: every host-token
+// delegation that omits origin_session_id shares gateway-default, so tokens for
+// unrelated tasks routinely carry the same session.
+func TestTaskTokenReachesOnlyTasksItDelegated(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
+	const shared = "gateway-default"
 	for _, seed := range []store.PeerTask{
-		{TaskID: "mine", PeerNodeID: "missing-peer", RemoteTaskID: "remote-mine", OriginSessionID: "session-a", State: task.StateRunning},
-		{TaskID: "theirs", PeerNodeID: "missing-peer", RemoteTaskID: "remote-theirs", OriginSessionID: "session-b", State: task.StateRunning},
+		{TaskID: "mine", PeerNodeID: "missing-peer", RemoteTaskID: "remote-mine", OriginSessionID: shared, OwnerTaskID: "tsk_a", State: task.StateRunning},
+		{TaskID: "sibling", PeerNodeID: "missing-peer", RemoteTaskID: "remote-sibling", OriginSessionID: shared, OwnerTaskID: "tsk_b", State: task.StateRunning},
+		{TaskID: "host", PeerNodeID: "missing-peer", RemoteTaskID: "remote-host", OriginSessionID: shared, State: task.StateRunning},
+		{TaskID: "theirs", PeerNodeID: "missing-peer", RemoteTaskID: "remote-theirs", OriginSessionID: "session-b", OwnerTaskID: "tsk_c", State: task.StateRunning},
 		{TaskID: "legacy", PeerNodeID: "missing-peer", RemoteTaskID: "remote-legacy", State: task.StateRunning},
 	} {
 		if err := g.Store.UpsertPeerTask(ctx, seed); err != nil {
@@ -203,51 +210,47 @@ func TestTaskTokenCannotReachAnotherSessionsTask(t *testing.T) {
 		}
 	}
 
-	// A task token minted for session-a.
+	// A task token minted for worker task tsk_a, in the shared default session.
 	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{
+		TaskID:          "tsk_a",
 		OriginNodeID:    "worker-node",
-		OriginSessionID: "session-a",
+		OriginSessionID: shared,
 	})
 
 	cases := []struct {
-		name   string
-		call   func(context.Context, string) (ToolResponse, error)
-		denied bool
+		name string
+		call func(context.Context, string) (ToolResponse, error)
 	}{
-		{"result", func(c context.Context, id string) (ToolResponse, error) { return g.resultCall(c, id) }, true},
-		{"transcript", func(c context.Context, id string) (ToolResponse, error) { return g.transcriptCall(c, id) }, true},
-		{"artifact", func(c context.Context, id string) (ToolResponse, error) { return g.artifactCall(c, id, "git-bundle") }, true},
-		{"cancel", func(c context.Context, id string) (ToolResponse, error) { return g.cancelCall(c, id, "stop") }, true},
-		{"status", func(c context.Context, id string) (ToolResponse, error) { return g.statusCall(c, id, false, 0) }, true},
-		{"events", func(c context.Context, id string) (ToolResponse, error) { return g.eventsCall(c, id, 0, 0, false, 0) }, true},
+		{"result", func(c context.Context, id string) (ToolResponse, error) { return g.resultCall(c, id) }},
+		{"transcript", func(c context.Context, id string) (ToolResponse, error) { return g.transcriptCall(c, id) }},
+		{"artifact", func(c context.Context, id string) (ToolResponse, error) { return g.artifactCall(c, id, "git-bundle") }},
+		{"cancel", func(c context.Context, id string) (ToolResponse, error) { return g.cancelCall(c, id, "stop") }},
+		{"status", func(c context.Context, id string) (ToolResponse, error) { return g.statusCall(c, id, false, 0) }},
+		{"events", func(c context.Context, id string) (ToolResponse, error) { return g.eventsCall(c, id, 0, 0, false, 0) }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Another session's task is refused outright. toolFailure returns the
-			// denial as both a response and an error, so only the response is
-			// asserted here.
-			resp, _ := tc.call(scoped, "theirs")
-			if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
-				t.Fatalf("cross-session %s should be peer_unauthorized, got %+v", tc.name, resp)
+			// A sibling task's child in the same session, a host-token task in the
+			// same session, another session's task, and a task predating
+			// ownership are all refused. toolFailure returns the denial as both a
+			// response and an error, so only the response is asserted here.
+			for _, id := range []string{"sibling", "host", "theirs", "legacy"} {
+				resp, _ := tc.call(scoped, id)
+				if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
+					t.Fatalf("%s on %q should be peer_unauthorized, got %+v", tc.name, id, resp)
+				}
 			}
 
-			// A task predating session scoping has no mirrored session and must
-			// not be reachable by a task token either.
-			resp, _ = tc.call(scoped, "legacy")
-			if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
-				t.Fatalf("unscoped-legacy %s should be peer_unauthorized, got %+v", tc.name, resp)
-			}
-
-			// Its own session gets past authorization; the peer is unreachable in
-			// this fixture, so anything other than peer_unauthorized proves the
-			// authorization gate allowed it through.
-			resp, _ = tc.call(scoped, "mine")
+			// A task this token delegated gets past authorization; the peer is
+			// unreachable in this fixture, so anything other than
+			// peer_unauthorized proves the gate allowed it through.
+			resp, _ := tc.call(scoped, "mine")
 			if resp.Error != nil && resp.Error.Code == task.ErrorPeerUnauthorized {
-				t.Fatalf("own-session %s must not be denied: %+v", tc.name, resp)
+				t.Fatalf("own %s must not be denied: %+v", tc.name, resp)
 			}
 
 			// A host-token caller (no provenance in context) reaches every task.
-			resp, _ = tc.call(ctx, "theirs")
+			resp, _ = tc.call(ctx, "sibling")
 			if resp.Error != nil && resp.Error.Code == task.ErrorPeerUnauthorized {
 				t.Fatalf("host-token %s must not be denied: %+v", tc.name, resp)
 			}
@@ -255,13 +258,38 @@ func TestTaskTokenCannotReachAnotherSessionsTask(t *testing.T) {
 	}
 }
 
-// list_tasks must not let a task token enumerate other sessions' delegations or
-// this node's own local task history.
+// A status refresh upserts the mirror without knowing the owner. It must not
+// strip ownership, or the delegating task would lose access to its own child.
+func TestPeerTaskOwnerSurvivesUpsertWithoutOwner(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	if err := g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: "child", PeerNodeID: "p", RemoteTaskID: "r", OriginSessionID: "s", OwnerTaskID: "tsk_a", State: task.StateRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: "child", PeerNodeID: "p", RemoteTaskID: "r", OriginSessionID: "s", State: task.StateDone}); err != nil {
+		t.Fatal(err)
+	}
+	// Nor may a later write move it to a different owner.
+	if err := g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: "child", PeerNodeID: "p", RemoteTaskID: "r", OriginSessionID: "s", OwnerTaskID: "tsk_b", State: task.StateDone}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.Store.GetPeerTask(ctx, "child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OwnerTaskID != "tsk_a" {
+		t.Fatalf("owner = %q, want tsk_a", got.OwnerTaskID)
+	}
+}
+
+// list_tasks must not let a task token enumerate other tasks' delegations --
+// including those in its own session -- or this node's own local task history.
 func TestListTasksScopedForTaskToken(t *testing.T) {
 	ctx := context.Background()
 	g := newTestGateway(t)
 	for _, seed := range []store.PeerTask{
-		{TaskID: "mine", PeerNodeID: "peer", RemoteTaskID: "remote-mine", OriginSessionID: "session-a", State: task.StateRunning},
+		{TaskID: "mine", PeerNodeID: "peer", RemoteTaskID: "remote-mine", OriginSessionID: "gateway-default", OwnerTaskID: "tsk_a", State: task.StateRunning},
+		{TaskID: "sibling", PeerNodeID: "peer", RemoteTaskID: "remote-sibling", OriginSessionID: "gateway-default", OwnerTaskID: "tsk_b", State: task.StateRunning},
 		{TaskID: "theirs", PeerNodeID: "peer", RemoteTaskID: "remote-theirs", OriginSessionID: "session-b", State: task.StateRunning},
 	} {
 		if err := g.Store.UpsertPeerTask(ctx, seed); err != nil {
@@ -269,7 +297,7 @@ func TestListTasksScopedForTaskToken(t *testing.T) {
 		}
 	}
 
-	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{OriginSessionID: "session-a"})
+	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{TaskID: "tsk_a", OriginSessionID: "gateway-default"})
 	resp, err := g.listTasksCall(scoped, 20, "")
 	if err != nil || !resp.OK {
 		t.Fatalf("listTasksCall resp=%+v err=%v", resp, err)
@@ -277,7 +305,7 @@ func TestListTasksScopedForTaskToken(t *testing.T) {
 	result := resp.Result.(map[string]any)
 	delegated := result["delegated"].([]store.PeerTask)
 	if len(delegated) != 1 || delegated[0].TaskID != "mine" {
-		t.Fatalf("task token should see only its own session, got %+v", delegated)
+		t.Fatalf("task token should see only tasks it delegated, got %+v", delegated)
 	}
 	if local := result["local"].([]task.Record); len(local) != 0 {
 		t.Fatalf("task token must not see local tasks, got %+v", local)
@@ -287,8 +315,23 @@ func TestListTasksScopedForTaskToken(t *testing.T) {
 	if err != nil || !hostResp.OK {
 		t.Fatalf("host listTasksCall resp=%+v err=%v", hostResp, err)
 	}
-	if got := len(hostResp.Result.(map[string]any)["delegated"].([]store.PeerTask)); got != 2 {
+	if got := len(hostResp.Result.(map[string]any)["delegated"].([]store.PeerTask)); got != 3 {
 		t.Fatalf("host token should see all delegated tasks, got %d", got)
+	}
+}
+
+// A follow-up resumes the earlier task's runner session and reads its result,
+// so a task token must not be able to follow up a task it did not delegate.
+func TestTaskTokenCannotFollowUpAnotherTasksChild(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	if err := g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: "sibling", PeerNodeID: "peer", RemoteTaskID: "remote-sibling", OriginSessionID: "gateway-default", OwnerTaskID: "tsk_b", State: task.StateDone}); err != nil {
+		t.Fatal(err)
+	}
+	scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{TaskID: "tsk_a", OriginSessionID: "gateway-default"})
+	resp, _ := g.delegateCall(scoped, DelegateRequest{Prompt: "continue", FollowupTaskID: "sibling"})
+	if resp.OK || resp.Error == nil || resp.Error.Code != task.ErrorPeerUnauthorized {
+		t.Fatalf("follow-up of another task's child should be peer_unauthorized, got %+v", resp)
 	}
 }
 
@@ -471,7 +514,7 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	}
 }
 
-func TestProfileConfigureAddsMissingProfileAndReloadsGateway(t *testing.T) {
+func TestProfileConfigureAddsProfileActiveAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.toml")
@@ -542,8 +585,30 @@ port = 1
 	if err != nil || !configured.OK {
 		t.Fatalf("profile_configure confirmed resp=%+v err=%v", configured, err)
 	}
+	// A new profile is written but not hot-loaded: the runner registry is built
+	// at startup, so profiles only change on restart, and the response says so.
+	configuredResult := configured.Result.(map[string]any)
+	if configuredResult["active_immediately"] != false || configuredResult["requires_daemon_restart"] != true {
+		t.Fatalf("profile_configure must report that a restart is required: %+v", configuredResult)
+	}
+	if held, _ := configuredResult["restart_required_for"].([]string); !containsString(held, "profiles") {
+		t.Fatalf("restart_required_for should name profiles, got %+v", configuredResult["restart_required_for"])
+	}
+	if _, ok := g.Config.Profiles["repo-dev"]; ok {
+		t.Fatal("a reload must not hot-load a new profile")
+	}
+	if stillUnavailable, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", TTL: "30m"}); stillUnavailable.OK {
+		t.Fatalf("profile_use before restart should still fail: %+v", stillUnavailable)
+	}
+
+	// After a restart the daemon loads the file afresh and the profile is usable.
+	restarted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload after restart: %v", err)
+	}
+	g = &Gateway{Config: restarted, ConfigPath: configPath, Store: st, Audit: g.Audit, Policy: policy.New(restarted)}
 	if _, ok := g.Config.Profiles["repo-dev"]; !ok {
-		t.Fatalf("gateway config did not reload repo-dev: %#v", g.Config.Profiles)
+		t.Fatalf("restarted gateway is missing repo-dev: %#v", g.Config.Profiles)
 	}
 	workerMux := http.NewServeMux()
 	workerMux.HandleFunc("POST /v1/profile-leases", func(w http.ResponseWriter, r *http.Request) {
@@ -1243,4 +1308,147 @@ func newTestGatewayWithStore(t *testing.T, storePath string) *Gateway {
 		Peers: map[string]config.PeerConfig{},
 	}
 	return &Gateway{Config: cfg, Store: st, Audit: audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), cfg.Node.ID), Policy: policy.New(cfg)}
+}
+
+// repair_peers must diagnose, rewrite and reload the same file: the one the
+// daemon was started with. Reading config.DefaultPath() while the reload reads
+// g.ConfigPath let a daemon started with --config repair one file and report
+// another, untouched one as active.
+func TestRepairPeersUsesDaemonConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	// The default location holds nothing; only the daemon's --config file exists.
+	t.Setenv("CMESH_CONFIG", filepath.Join(dir, "default-missing.toml"))
+	custom := filepath.Join(dir, "custom.toml")
+	body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+		"mesh_port = 7778\nmcp_port = 7777\n\n" +
+		"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+		"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
+		"writes = \"deny\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+		"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"look\"\n"
+	if err := os.WriteFile(custom, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t)
+	g.ConfigPath = custom
+
+	resp, err := g.repairPeersCall(context.Background(), nil)
+	if err != nil || !resp.OK {
+		t.Fatalf("repair_peers should load the daemon's config file, resp=%+v err=%v", resp, err)
+	}
+	result := resp.Result.(map[string]any)
+	if msg, _ := result["message"].(string); !strings.Contains(msg, "No [peers.*] entries") {
+		t.Fatalf("repair_peers diagnosed the wrong file: %+v", result)
+	}
+}
+
+// Two worker tasks that share a session and send the same delegation must get
+// separate child tasks, each owned by the task whose token sent it. If they
+// collapsed onto one deterministic id, the second would be handed the first
+// one's task and result.
+func TestTaskTokenDelegationsAreOwnedPerTask(t *testing.T) {
+	ctx := context.Background()
+	g := newTestGateway(t)
+	var created []schema.CreateTaskRequest
+	workerMux := http.NewServeMux()
+	workerMux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		var req schema.CreateTaskRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode task: %v", err)
+		}
+		created = append(created, req)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(schema.CreateTaskResponse{TaskID: req.TaskID, State: task.StateQueued})
+	})
+	worker := httptest.NewServer(workerMux)
+	defer worker.Close()
+	host, port := splitTestServerAddr(t, worker.URL)
+	g.Config.Peers = map[string]config.PeerConfig{"peer": {Name: "peer", NodeID: "peer", Address: host, Port: port}}
+
+	cwd := t.TempDir()
+	ids := map[string]string{}
+	for _, owner := range []string{"tsk_a", "tsk_b"} {
+		scoped := context.WithValue(ctx, provenanceContextKey{}, gatewayProvenance{
+			TaskID:          owner,
+			OriginNodeID:    "origin",
+			OriginSessionID: "gateway-default",
+		})
+		resp, err := g.delegateCall(scoped, DelegateRequest{Peer: "peer", Prompt: "same request", CWD: cwd, IdempotencyKey: "same-key"})
+		if err != nil || !resp.OK {
+			t.Fatalf("delegate as %s resp=%+v err=%v", owner, resp, err)
+		}
+		ids[owner] = resp.Result.(schema.CreateTaskResponse).TaskID
+	}
+	if ids["tsk_a"] == ids["tsk_b"] {
+		t.Fatalf("delegations from different tasks collapsed onto one id %q", ids["tsk_a"])
+	}
+	for owner, id := range ids {
+		mirrored, err := g.Store.GetPeerTask(ctx, id)
+		if err != nil {
+			t.Fatalf("GetPeerTask %s: %v", id, err)
+		}
+		if mirrored.OwnerTaskID != owner {
+			t.Fatalf("task %s owner = %q, want %q", id, mirrored.OwnerTaskID, owner)
+		}
+	}
+	if len(created) != 2 {
+		t.Fatalf("worker saw %d creates, want 2", len(created))
+	}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// A reload (repair_peers, profile_configure) applies peers and policy only. A
+// stray profile edit on disk must not ride along with a peer fix; it is
+// reported as needing a restart instead.
+func TestReloadConfigHoldsProfileChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	write := func(writes, peerAddr string) {
+		body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+			"mesh_port = 7778\nmcp_port = 7777\ndata_dir = \"" + filepath.ToSlash(filepath.Join(dir, "data")) + "\"\n\n" +
+			"[policy]\nallowed_peers = [\"worker\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+			"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
+			"writes = \"" + writes + "\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+			"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"look\"\n\n" +
+			"[peers.worker]\nname = \"worker\"\nnode_id = \"worker-node\"\naddress = \"" + peerAddr + "\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("deny", "100.64.0.1")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t)
+	g.Config, g.ConfigPath, g.Policy = cfg, path, policy.New(cfg)
+
+	// A peer fix lands on disk alongside an unrelated profile edit.
+	write("repo_only", "100.64.0.9")
+	held, err := g.reloadConfig()
+	if err != nil {
+		t.Fatalf("reloadConfig: %v", err)
+	}
+	if len(held) != 1 || held[0] != "profiles" {
+		t.Fatalf("held = %v, want [profiles]", held)
+	}
+	if got := g.Config.Peers["worker"].Address; got != "100.64.0.9" {
+		t.Fatalf("peer repair should be live, address = %q", got)
+	}
+	if got := g.Config.Profiles["look"].Writes; got != "deny" {
+		t.Fatalf("profile edit must wait for restart, writes = %q", got)
+	}
+	if got := g.Policy.Config().Profiles["look"].Writes; got != "deny" {
+		t.Fatalf("policy's view of the profile changed on reload, writes = %q", got)
+	}
+	if note := restartRequiredNote(held); !strings.Contains(note, "profiles") || !strings.Contains(note, "restart") {
+		t.Fatalf("restart note = %q", note)
+	}
 }

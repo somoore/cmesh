@@ -72,16 +72,32 @@ func NewWithLeaseValidator(cfg *config.Config, validator LeaseValidator) *Engine
 	return &Engine{cfg: cfg, leaseValidator: validator}
 }
 
-// Reload swaps the engine's config in place. Callers holding this *Engine —
-// including a mesh RPC server started before the reload — evaluate subsequent
-// requests against the new config.
-func (e *Engine) Reload(cfg *config.Config) {
+// Reload applies the reloadable parts of cfg -- peers and policy, see
+// config.Reloadable -- to the engine in place. Callers holding this *Engine,
+// including a mesh RPC server started before the reload, evaluate subsequent
+// requests against the result. Profiles, runners and ceilings keep their
+// startup values, so policy never disagrees with the startup-built runners
+// about what a profile grants. It returns the sections of cfg that differ but
+// were not applied.
+func (e *Engine) Reload(cfg *config.Config) []string {
 	if cfg == nil {
-		return
+		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.cfg = cfg
+	merged, held := e.cfg.Reloadable(cfg)
+	e.cfg = merged
+	return held
+}
+
+// Config returns the engine's current config snapshot. Surfaces sharing the
+// engine read peers, profiles and node settings through it so a Reload reaches
+// all of them at once instead of only the policy checks.
+func (e *Engine) Config() *config.Config {
+	if e == nil {
+		return nil
+	}
+	return e.config()
 }
 
 // config returns the current config under a read lock.
@@ -113,7 +129,7 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
 	intent.CWD = cwd
-	return e.checkProfile(intent, true)
+	return e.checkProfile(cfg, intent, true)
 }
 
 func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
@@ -134,11 +150,14 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 	if intent.HopCount > cfg.Policy.HopLimit {
 		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	return e.checkProfile(intent, false)
+	return e.checkProfile(cfg, intent, false)
 }
 
-func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
-	cfg := e.config()
+// checkProfile takes the config snapshot its caller already used for the peer,
+// hop and cwd checks. Fetching a fresh one here would let a concurrent Reload
+// split a single decision across two configs, allowing or denying a
+// combination that no loaded config represents.
+func (e *Engine) checkProfile(cfg *config.Config, intent TaskIntent, inbound bool) Decision {
 	requested := intent.Profile
 	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
@@ -178,11 +197,17 @@ func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
 		if !ok {
 			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is not configured", ceiling), requested, "")
 		}
-		// A ceiling may only cap authority, never raise it. config.Validate rejects
-		// an escalating mapping at load time; this is the request-time backstop for
+		// A ceiling may only cap authority, never raise or redirect it. config.Validate
+		// rejects such a mapping at load time; this is the request-time backstop for
 		// a config that changed underneath a running daemon or was built in-process.
-		if profiledefs.RiskRank(effectiveRisk(ceiling, ceilingProfile)) > profiledefs.RiskRank(effectiveRisk(requested, profile)) {
-			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q", ceiling, requested), requested, "")
+		if excess := profiledefs.CeilingExcess(ceilingProfile.Authority(ceiling), profile.Authority(requested)); excess != "" {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q: %s", ceiling, requested, excess), requested, "")
+		}
+		// Outbound denials name profiles; the profile that would actually run is
+		// the ceiling, so a denial of it must hold even when the caller asked for a
+		// different name.
+		if !inbound && contains(cfg.Policy.Outbound.DeniedProfiles, ceiling) {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is denied by outbound policy", ceiling), requested, "")
 		}
 		// The runner checks above ran against the requested profile. Re-run them for
 		// the ceiling so the profile that is actually enforced cannot name a runner
@@ -442,15 +467,6 @@ func identityCandidates(intent TaskIntent) []string {
 		}
 	}
 	return out
-}
-
-// effectiveRisk returns a profile's declared risk, falling back to the
-// capability-derived value when the config omits it.
-func effectiveRisk(name string, prof config.ProfileConfig) string {
-	if prof.Risk != "" {
-		return prof.Risk
-	}
-	return profiledefs.RiskForConfig(name, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
 }
 
 func matchesAny(values, patterns []string) bool {

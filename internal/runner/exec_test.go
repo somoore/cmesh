@@ -74,6 +74,43 @@ func TestRunProgramFailureOutranksTruncation(t *testing.T) {
 	}
 }
 
+// Timeout and cancellation return from a separate branch than a normal exit.
+// A run that overflowed the output limit before being stopped must still
+// report Truncated, or its partial evidence reads as complete.
+func TestRunProgramTimeoutAndCancelPreserveTruncation(t *testing.T) {
+	cases := []struct {
+		name     string
+		wantCode ErrorCode
+		ctx      func() (context.Context, context.CancelFunc)
+		timeout  time.Duration
+	}{
+		{"timeout", ErrTimeout, func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) }, 500 * time.Millisecond},
+		{"cancel", ErrCancelled, func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(500*time.Millisecond, cancel)
+			return ctx, cancel
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			proc, err := RunProgram(ctx, Program{
+				Argv:        []string{os.Args[0], "-test.run=TestHelperProcess", "--", "flood-sleep"},
+				Env:         map[string]string{"CMESH_HELPER_PROCESS": "1"},
+				OutputLimit: 128,
+				Timeout:     tc.timeout,
+			})
+			if CodeOf(err) != tc.wantCode {
+				t.Fatalf("error code = %q, want %q (err=%v)", CodeOf(err), tc.wantCode, err)
+			}
+			if !proc.Truncated {
+				t.Fatal("truncation must survive timeout and cancellation")
+			}
+		})
+	}
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("CMESH_HELPER_PROCESS") != "1" {
 		return
@@ -85,6 +122,11 @@ func TestHelperProcess(t *testing.T) {
 			case "exit-7":
 				os.Exit(7)
 			case "sleep":
+				time.Sleep(30 * time.Second)
+				os.Exit(0)
+			case "flood-sleep":
+				fmt.Print(strings.Repeat("x", 4096))
+				_ = os.Stdout.Sync()
 				time.Sleep(30 * time.Second)
 				os.Exit(0)
 			case "flood-ok":
