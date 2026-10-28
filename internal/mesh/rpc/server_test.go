@@ -1684,3 +1684,23 @@ func TestRunnerConcurrencyIgnoresReload(t *testing.T) {
 		t.Fatal("a second task started while the first held the only slot")
 	}
 }
+
+// The runner registry is built from the startup config, so a running agent
+// keeps the write authority its profile had then. A reload that drops edit_repo
+// must not switch off git isolation while that runner can still write.
+func TestGitIsolationCoversStartupRunnerAuthority(t *testing.T) {
+	profileWith := func(claims ...string) *config.Config {
+		return &config.Config{Profiles: map[string]config.ProfileConfig{"agent": {Claims: claims}}}
+	}
+	startup := profileWith("read_files", "edit_repo")
+	reloaded := profileWith("read_files")
+	if !contains(isolationClaims(startup, reloaded, "agent"), "edit_repo") {
+		t.Fatal("a reload that drops edit_repo must not disable isolation for the startup runner")
+	}
+	if !contains(isolationClaims(reloaded, startup, "agent"), "edit_repo") {
+		t.Fatal("a reload that adds edit_repo must still isolate")
+	}
+	if contains(isolationClaims(reloaded, reloaded, "agent"), "edit_repo") {
+		t.Fatal("a profile that never granted edit_repo must not be isolated")
+	}
+}
