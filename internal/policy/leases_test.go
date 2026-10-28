@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"cmesh/internal/mesh/schema"
 )
 
 func TestProfileLeaseStoreScopesListAndRevokeToOwningPeer(t *testing.T) {
@@ -137,6 +139,41 @@ func TestProfileLeaseCWDScopes(t *testing.T) {
 	if escapeLink != "" {
 		if _, err := store.ValidateProfileLease(LeaseValidation{LeaseID: recursive.LeaseID, PeerName: "peer-a", Profile: "repo-dev", CWD: escapeLink}); err == nil {
 			t.Fatal("recursive lease allowed symlink escape")
+		}
+	}
+}
+
+// A lease stops being usable at its first retirement event, so retention must
+// count from the earlier of expiry and revocation. Counting from the later one
+// kept a year-long lease revoked early in the file until a month after its
+// original expiry.
+func TestPruneLeasesCountsFromFirstRetirement(t *testing.T) {
+	now := time.Now().UTC()
+	issued := now.Add(-31 * 24 * time.Hour)
+	leases := []schema.ProfileLease{
+		// Year-long lease revoked right after issue: retired 31 days ago.
+		{LeaseID: "revoked-early", CreatedAt: issued, ExpiresAt: issued.Add(365 * 24 * time.Hour), RevokedAt: issued},
+		// Revoked with no expiry recorded: revocation alone retires it.
+		{LeaseID: "revoked-no-expiry", CreatedAt: issued, RevokedAt: issued},
+		// Expired 31 days ago, revoked later (inside retention): still the earlier event counts.
+		{LeaseID: "expired-then-revoked", CreatedAt: issued.Add(-time.Hour), ExpiresAt: issued, RevokedAt: now.Add(-time.Hour)},
+		// Revoked yesterday: inside retention.
+		{LeaseID: "revoked-recent", CreatedAt: now.Add(-48 * time.Hour), ExpiresAt: now.Add(300 * 24 * time.Hour), RevokedAt: now.Add(-24 * time.Hour)},
+		// Live.
+		{LeaseID: "live", CreatedAt: now, ExpiresAt: now.Add(time.Hour)},
+	}
+	kept := map[string]bool{}
+	for _, lease := range pruneLeases(leases, now) {
+		kept[lease.LeaseID] = true
+	}
+	for _, id := range []string{"revoked-early", "revoked-no-expiry", "expired-then-revoked"} {
+		if kept[id] {
+			t.Fatalf("%s retired beyond retention and should be pruned", id)
+		}
+	}
+	for _, id := range []string{"revoked-recent", "live"} {
+		if !kept[id] {
+			t.Fatalf("%s should be kept", id)
 		}
 	}
 }

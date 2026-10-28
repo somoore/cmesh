@@ -89,24 +89,35 @@ func (s *ProfileLeaseStore) Issue(req LeaseValidation, ttl time.Duration, now ti
 // the file is append-only and grows without bound.
 const leaseRetention = 30 * 24 * time.Hour
 
-// pruneLeases drops leases that expired — or were revoked — longer ago than
-// leaseRetention. A lease still within its retention window is kept so it
-// continues to appear in listings; ValidateProfileLease refuses it either way,
-// so pruning can never turn a denial into an acceptance.
+// pruneLeases drops leases that stopped being usable longer ago than
+// leaseRetention. A lease stops being usable at its first retirement event --
+// the earlier of expiry and revocation -- so retention counts from that point.
+// Counting from the later one would keep a long-lived lease that was revoked
+// early around until long after its original expiry. A lease still within its
+// retention window is kept so it continues to appear in listings;
+// ValidateProfileLease refuses it either way, so pruning can never turn a
+// denial into an acceptance.
 func pruneLeases(leases []schema.ProfileLease, now time.Time) []schema.ProfileLease {
 	cutoff := now.UTC().Add(-leaseRetention)
 	out := leases[:0]
 	for _, lease := range leases {
-		retired := lease.ExpiresAt
-		if !lease.RevokedAt.IsZero() && lease.RevokedAt.After(retired) {
-			retired = lease.RevokedAt
-		}
+		retired := leaseRetiredAt(lease)
 		if !retired.IsZero() && retired.Before(cutoff) {
 			continue
 		}
 		out = append(out, lease)
 	}
 	return out
+}
+
+// leaseRetiredAt returns the earliest non-zero of a lease's expiry and
+// revocation times, or the zero time when it has neither.
+func leaseRetiredAt(lease schema.ProfileLease) time.Time {
+	retired := lease.ExpiresAt
+	if !lease.RevokedAt.IsZero() && (retired.IsZero() || lease.RevokedAt.Before(retired)) {
+		retired = lease.RevokedAt
+	}
+	return retired
 }
 
 func (s *ProfileLeaseStore) ValidateProfileLease(req LeaseValidation) (LeaseValidation, error) {
