@@ -802,3 +802,42 @@ func TestCeilingRejectsEqualRiskDisjointProfile(t *testing.T) {
 		t.Fatalf("equal-risk disjoint ceiling must be refused, got %+v", decision)
 	}
 }
+
+// A reload applies peers and policy only. A profile changed on disk keeps its
+// startup definition in policy until restart, because the runners that execute
+// it were built from that definition; letting policy see the new one would let
+// the two disagree about what the profile grants.
+func TestReloadDoesNotChangeProfiles(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root)
+	cfg.Profiles["reader"] = readOnlyProfile(profile.ShellDeny, profile.CapReadFiles)
+	engine := New(cfg)
+	intent := TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "reader", Capability: profile.CapReadFiles}
+	if decision := engine.CheckInbound(intent); !decision.Allowed {
+		t.Fatalf("baseline decision should allow: %+v", decision)
+	}
+
+	// On disk, the profile loses read_files, a ceiling appears, and a new peer
+	// is allowed.
+	next := testConfig(root)
+	next.Profiles["reader"] = readOnlyProfile(profile.ShellDeny, profile.CapDiskInfo)
+	next.Policy.ProfileCeilings = map[string]string{"reader": "dev"}
+	next.Policy.AllowedPeers = append(next.Policy.AllowedPeers, "new-peer")
+	held := engine.Reload(next)
+
+	if !contains(held, "profiles") || !contains(held, "policy.profile_ceilings") {
+		t.Fatalf("reload should report held-back profiles and ceilings, got %v", held)
+	}
+	if decision := engine.CheckInbound(intent); !decision.Allowed || decision.EffectiveProfile != "reader" {
+		t.Fatalf("policy's view of the profile must not change on reload: %+v", decision)
+	}
+	got := engine.Config().Profiles["reader"]
+	if !contains(got.Capabilities, profile.CapReadFiles) {
+		t.Fatalf("engine profile changed on reload: %+v", got)
+	}
+	// The policy table itself does reload.
+	newPeer := TaskIntent{PeerName: "new-peer", CWD: root, Profile: "reader", Capability: profile.CapReadFiles}
+	if decision := engine.CheckInbound(newPeer); !decision.Allowed {
+		t.Fatalf("a peer allowed by the reloaded policy should be accepted: %+v", decision)
+	}
+}

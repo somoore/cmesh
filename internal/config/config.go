@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -305,6 +306,50 @@ func pickDefaultProfile(profiles map[string]ProfileConfig) string {
 		}
 	}
 	return first
+}
+
+// Reloadable returns a copy of c that takes from next only what a running
+// daemon may apply without a restart: the [peers.*] entries and the [policy]
+// table, except policy.profile_ceilings. Everything else -- profiles, runners,
+// ceilings, node, tailnet, store, audit and gateway settings -- stays as c has
+// it, and held lists each of those sections that differs in next.
+//
+// Profiles, ceilings and runners stay put because the runner registry is built
+// once at startup from them. Reloading them would let policy accept a task
+// under one profile definition while the runner executes it with another, and
+// a peer repair would silently pick up unrelated profile edits from disk.
+func (c *Config) Reloadable(next *Config) (merged *Config, held []string) {
+	out := *c
+	out.Peers = next.Peers
+	out.Policy = next.Policy
+	out.Policy.ProfileCeilings = c.Policy.ProfileCeilings
+	for _, section := range []struct {
+		name          string
+		current, next any
+	}{
+		{"profiles", c.Profiles, next.Profiles},
+		{"runners", c.Runners, next.Runners},
+		{"policy.profile_ceilings", c.Policy.ProfileCeilings, next.Policy.ProfileCeilings},
+		{"node", c.Node, next.Node},
+		{"tailscale", c.Tailnet, next.Tailnet},
+		{"store", c.Store, next.Store},
+		{"audit", c.Audit, next.Audit},
+		{"gateway", c.Gateway, next.Gateway},
+	} {
+		if !reloadEqual(section.current, section.next) {
+			held = append(held, section.name)
+		}
+	}
+	return &out, held
+}
+
+// reloadEqual compares two config sections, treating nil and empty maps alike.
+func reloadEqual(a, b any) bool {
+	va, vb := reflect.ValueOf(a), reflect.ValueOf(b)
+	if va.Kind() == reflect.Map && vb.Kind() == reflect.Map && va.Len() == 0 && vb.Len() == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 func (c *Config) Validate() error {

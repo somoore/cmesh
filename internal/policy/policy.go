@@ -72,16 +72,22 @@ func NewWithLeaseValidator(cfg *config.Config, validator LeaseValidator) *Engine
 	return &Engine{cfg: cfg, leaseValidator: validator}
 }
 
-// Reload swaps the engine's config in place. Callers holding this *Engine —
-// including a mesh RPC server started before the reload — evaluate subsequent
-// requests against the new config.
-func (e *Engine) Reload(cfg *config.Config) {
+// Reload applies the reloadable parts of cfg -- peers and policy, see
+// config.Reloadable -- to the engine in place. Callers holding this *Engine,
+// including a mesh RPC server started before the reload, evaluate subsequent
+// requests against the result. Profiles, runners and ceilings keep their
+// startup values, so policy never disagrees with the startup-built runners
+// about what a profile grants. It returns the sections of cfg that differ but
+// were not applied.
+func (e *Engine) Reload(cfg *config.Config) []string {
 	if cfg == nil {
-		return
+		return nil
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.cfg = cfg
+	merged, held := e.cfg.Reloadable(cfg)
+	e.cfg = merged
+	return held
 }
 
 // Config returns the engine's current config snapshot. Surfaces sharing the

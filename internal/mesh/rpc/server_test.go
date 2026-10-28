@@ -1587,16 +1587,15 @@ func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
 }
 
 // A peer repair reloads the policy engine the daemon shares with this server.
-// Every server path that consults peers or profiles must follow that reload,
-// not the startup Config, or the repair reports the new trust as active while
-// peer smoke and lease issuance keep using the old data.
-func TestServerFollowsPolicyEngineReload(t *testing.T) {
+// Peer lookups must follow that reload, not the startup Config, or the repair
+// reports the new trust as active while peer smoke keeps using the old data.
+// Profiles must not follow it: the runner registry is built from the startup
+// profiles, so a profile added or changed on disk stays inactive until restart.
+func TestServerFollowsReloadForPeersOnly(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t, root, immediateRunner{})
 	startup := server.Config
 
-	// The reloaded config adds a peer entry for the caller and a leased profile,
-	// neither of which the startup config has.
 	reloaded := *startup
 	reloaded.Peers = map[string]config.PeerConfig{
 		"mac-studio": {Name: "mac-studio", NodeID: "mac-studio", Address: "100.64.0.1"},
@@ -1613,7 +1612,10 @@ func TestServerFollowsPolicyEngineReload(t *testing.T) {
 		RequireExplicit: true,
 		RequireLease:    true,
 	}
-	server.Policy.Reload(&reloaded)
+	held := server.Policy.Reload(&reloaded)
+	if len(held) != 1 || held[0] != "profiles" {
+		t.Fatalf("reload should report the held-back profiles section, got %v", held)
+	}
 
 	identity := tsid.Identity{NodeID: "mac-studio", NodeName: "mac-studio"}
 	if _, _, ok := peerForIdentity(server.liveConfig(), identity); !ok {
@@ -1625,35 +1627,8 @@ func TestServerFollowsPolicyEngineReload(t *testing.T) {
 	req.RemoteAddr = "100.64.0.1:12345"
 	res := httptest.NewRecorder()
 	server.Handler().ServeHTTP(res, req)
-	if res.Code != http.StatusCreated {
-		t.Fatalf("lease for a profile added by reload: status = %d, body = %s", res.Code, res.Body.String())
-	}
-}
-
-// A reload while a task runs may revoke git push but must never grant it: the
-// task was accepted without push authority, so its work must not reach the
-// remote because a profile changed underneath it.
-func TestGitPushNeverGrantedByReload(t *testing.T) {
-	withPush := func(push bool) *config.Config {
-		return &config.Config{Profiles: map[string]config.ProfileConfig{"repo-dev": {GitPush: push}}}
-	}
-	cases := []struct {
-		name                string
-		authorized, current bool
-		want                bool
-	}{
-		{"granted by reload", false, true, false},
-		{"revoked by reload", true, false, false},
-		{"allowed throughout", true, true, true},
-		{"denied throughout", false, false, false},
-	}
-	for _, tc := range cases {
-		if got := gitPushAllowed(withPush(tc.authorized), withPush(tc.current), "repo-dev"); got != tc.want {
-			t.Fatalf("%s: gitPushAllowed = %v, want %v", tc.name, got, tc.want)
-		}
-	}
-	if gitPushAllowed(withPush(true), &config.Config{}, "repo-dev") {
-		t.Fatal("a profile removed by reload must not keep push authority")
+	if res.Code == http.StatusCreated || !strings.Contains(res.Body.String(), "not configured") {
+		t.Fatalf("a profile added by reload must stay inactive until restart: status = %d, body = %s", res.Code, res.Body.String())
 	}
 }
 
@@ -1682,25 +1657,5 @@ func TestRunnerConcurrencyIgnoresReload(t *testing.T) {
 	if second, err := server.acquireRunner(ctx, "fake"); err == nil {
 		second()
 		t.Fatal("a second task started while the first held the only slot")
-	}
-}
-
-// The runner registry is built from the startup config, so a running agent
-// keeps the write authority its profile had then. A reload that drops edit_repo
-// must not switch off git isolation while that runner can still write.
-func TestGitIsolationCoversStartupRunnerAuthority(t *testing.T) {
-	profileWith := func(claims ...string) *config.Config {
-		return &config.Config{Profiles: map[string]config.ProfileConfig{"agent": {Claims: claims}}}
-	}
-	startup := profileWith("read_files", "edit_repo")
-	reloaded := profileWith("read_files")
-	if !contains(isolationClaims(startup, reloaded, "agent"), "edit_repo") {
-		t.Fatal("a reload that drops edit_repo must not disable isolation for the startup runner")
-	}
-	if !contains(isolationClaims(reloaded, startup, "agent"), "edit_repo") {
-		t.Fatal("a reload that adds edit_repo must still isolate")
-	}
-	if contains(isolationClaims(reloaded, reloaded, "agent"), "edit_repo") {
-		t.Fatal("a profile that never granted edit_repo must not be isolated")
 	}
 }

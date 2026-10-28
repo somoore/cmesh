@@ -263,3 +263,41 @@ func TestValidateGenericRunnerRequiresManifest(t *testing.T) {
 		})
 	}
 }
+
+// Only peers and policy (minus ceilings) are taken from a reloaded file; every
+// other section keeps its current value and is reported when it differs.
+func TestReloadableTakesOnlyPeersAndPolicy(t *testing.T) {
+	current := &Config{
+		Node:     NodeConfig{ID: "a", Name: "a", MeshPort: 7778},
+		Policy:   PolicyConfig{AllowedPeers: []string{"old"}, ProfileCeilings: map[string]string{"x": "y"}},
+		Peers:    map[string]PeerConfig{"old": {Name: "old"}},
+		Profiles: map[string]ProfileConfig{"p": {Runner: "r", Writes: "deny"}},
+		Runners:  map[string]RunnerConfig{"r": {Command: []string{"r"}}},
+	}
+	next := &Config{
+		Node:     NodeConfig{ID: "a", Name: "a", MeshPort: 9999},
+		Policy:   PolicyConfig{AllowedPeers: []string{"new"}},
+		Peers:    map[string]PeerConfig{"new": {Name: "new"}},
+		Profiles: map[string]ProfileConfig{"p": {Runner: "r", Writes: "allow"}},
+		Runners:  map[string]RunnerConfig{"r": {Command: []string{"r"}}},
+	}
+	merged, held := current.Reloadable(next)
+	if _, ok := merged.Peers["new"]; !ok || merged.Policy.AllowedPeers[0] != "new" {
+		t.Fatalf("peers and policy should reload: %+v", merged)
+	}
+	if merged.Profiles["p"].Writes != "deny" || merged.Node.MeshPort != 7778 || merged.Policy.ProfileCeilings["x"] != "y" {
+		t.Fatalf("profiles, node and ceilings must keep their current values: %+v", merged)
+	}
+	want := map[string]bool{"profiles": true, "policy.profile_ceilings": true, "node": true}
+	if len(held) != len(want) {
+		t.Fatalf("held = %v, want %v", held, want)
+	}
+	for _, name := range held {
+		if !want[name] {
+			t.Fatalf("unexpected held section %q in %v", name, held)
+		}
+	}
+	if _, held := current.Reloadable(current); len(held) != 0 {
+		t.Fatalf("reloading an identical config should hold nothing, got %v", held)
+	}
+}

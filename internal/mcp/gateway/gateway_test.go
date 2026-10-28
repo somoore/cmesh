@@ -514,7 +514,7 @@ func TestProfileUseRequiresTTLForLeasedProfileAndDelegateInheritsContext(t *test
 	}
 }
 
-func TestProfileConfigureAddsMissingProfileAndReloadsGateway(t *testing.T) {
+func TestProfileConfigureAddsProfileActiveAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.toml")
@@ -585,8 +585,30 @@ port = 1
 	if err != nil || !configured.OK {
 		t.Fatalf("profile_configure confirmed resp=%+v err=%v", configured, err)
 	}
+	// A new profile is written but not hot-loaded: the runner registry is built
+	// at startup, so profiles only change on restart, and the response says so.
+	configuredResult := configured.Result.(map[string]any)
+	if configuredResult["active_immediately"] != false || configuredResult["requires_daemon_restart"] != true {
+		t.Fatalf("profile_configure must report that a restart is required: %+v", configuredResult)
+	}
+	if held, _ := configuredResult["restart_required_for"].([]string); !containsString(held, "profiles") {
+		t.Fatalf("restart_required_for should name profiles, got %+v", configuredResult["restart_required_for"])
+	}
+	if _, ok := g.Config.Profiles["repo-dev"]; ok {
+		t.Fatal("a reload must not hot-load a new profile")
+	}
+	if stillUnavailable, _ := g.profileUseCall(ctx, ProfileUseRequest{Peer: "worker", Profile: "repo-dev", TTL: "30m"}); stillUnavailable.OK {
+		t.Fatalf("profile_use before restart should still fail: %+v", stillUnavailable)
+	}
+
+	// After a restart the daemon loads the file afresh and the profile is usable.
+	restarted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload after restart: %v", err)
+	}
+	g = &Gateway{Config: restarted, ConfigPath: configPath, Store: st, Audit: g.Audit, Policy: policy.New(restarted)}
 	if _, ok := g.Config.Profiles["repo-dev"]; !ok {
-		t.Fatalf("gateway config did not reload repo-dev: %#v", g.Config.Profiles)
+		t.Fatalf("restarted gateway is missing repo-dev: %#v", g.Config.Profiles)
 	}
 	workerMux := http.NewServeMux()
 	workerMux.HandleFunc("POST /v1/profile-leases", func(w http.ResponseWriter, r *http.Request) {
@@ -1370,5 +1392,63 @@ func TestTaskTokenDelegationsAreOwnedPerTask(t *testing.T) {
 	}
 	if len(created) != 2 {
 		t.Fatalf("worker saw %d creates, want 2", len(created))
+	}
+}
+
+func containsString(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// A reload (repair_peers, profile_configure) applies peers and policy only. A
+// stray profile edit on disk must not ride along with a peer fix; it is
+// reported as needing a restart instead.
+func TestReloadConfigHoldsProfileChanges(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	write := func(writes, peerAddr string) {
+		body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+			"mesh_port = 7778\nmcp_port = 7777\ndata_dir = \"" + filepath.ToSlash(filepath.Join(dir, "data")) + "\"\n\n" +
+			"[policy]\nallowed_peers = [\"worker\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+			"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
+			"writes = \"" + writes + "\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+			"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"look\"\n\n" +
+			"[peers.worker]\nname = \"worker\"\nnode_id = \"worker-node\"\naddress = \"" + peerAddr + "\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("deny", "100.64.0.1")
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t)
+	g.Config, g.ConfigPath, g.Policy = cfg, path, policy.New(cfg)
+
+	// A peer fix lands on disk alongside an unrelated profile edit.
+	write("repo_only", "100.64.0.9")
+	held, err := g.reloadConfig()
+	if err != nil {
+		t.Fatalf("reloadConfig: %v", err)
+	}
+	if len(held) != 1 || held[0] != "profiles" {
+		t.Fatalf("held = %v, want [profiles]", held)
+	}
+	if got := g.Config.Peers["worker"].Address; got != "100.64.0.9" {
+		t.Fatalf("peer repair should be live, address = %q", got)
+	}
+	if got := g.Config.Profiles["look"].Writes; got != "deny" {
+		t.Fatalf("profile edit must wait for restart, writes = %q", got)
+	}
+	if got := g.Policy.Config().Profiles["look"].Writes; got != "deny" {
+		t.Fatalf("policy's view of the profile changed on reload, writes = %q", got)
+	}
+	if note := restartRequiredNote(held); !strings.Contains(note, "profiles") || !strings.Contains(note, "restart") {
+		t.Fatalf("restart note = %q", note)
 	}
 }

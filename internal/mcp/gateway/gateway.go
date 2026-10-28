@@ -1109,11 +1109,19 @@ func (g *Gateway) profileConfigureCall(req ProfileConfigureRequest) (ToolRespons
 		payload["preview_toml"] = result.PreviewTOML
 	}
 	if req.Confirmed {
-		if err := g.reloadConfig(); err != nil {
+		// Peers and policy reload live; a new or changed profile or runner does
+		// not, because the runner registry is built at startup.
+		held, err := g.reloadConfig()
+		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 		payload["status"] = "configured"
-		payload["active_immediately"] = true
+		payload["active_immediately"] = len(held) == 0
+		payload["requires_daemon_restart"] = len(held) > 0
+		if len(held) > 0 {
+			payload["restart_required_for"] = held
+			payload["next_step"] = restartRequiredNote(held)
+		}
 	}
 	return ToolResponse{OK: true, Result: payload}, nil
 }
@@ -1493,16 +1501,24 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 	// server enforces the corrected peer trust immediately. Report the reload
 	// outcome honestly: claiming the mesh is fixed while the daemon still holds
 	// the old policy is exactly the false success this tool must avoid.
-	if err := g.reloadConfig(); err != nil {
+	held, err := g.reloadConfig()
+	if err != nil {
 		payload["active_immediately"] = false
 		payload["requires_daemon_restart"] = true
 		payload["reload_error"] = err.Error()
 		payload["next_step"] = "The repaired config could not be reloaded into the running daemon. Restart it (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`), then run a bidirectional smoke to confirm."
 		return ToolResponse{OK: true, Result: payload}, nil
 	}
+	// The peer repair itself is live. Anything else that changed in the file is
+	// not, and a restart is needed for it; say so rather than letting a peer fix
+	// look like it applied unrelated edits.
 	payload["active_immediately"] = true
-	payload["requires_daemon_restart"] = false
+	payload["requires_daemon_restart"] = len(held) > 0
 	payload["next_step"] = "The running daemon now enforces the repaired peer trust. Run a bidirectional smoke to confirm."
+	if len(held) > 0 {
+		payload["restart_required_for"] = held
+		payload["next_step"] = "The running daemon now enforces the repaired peer trust. " + restartRequiredNote(held) + " Run a bidirectional smoke to confirm."
+	}
 	return ToolResponse{OK: true, Result: payload}, nil
 }
 
@@ -2043,26 +2059,40 @@ func (g *Gateway) configPath() string {
 	return firstNonEmpty(g.ConfigPath, config.DefaultPath())
 }
 
-// reloadConfig re-reads config from disk and applies it to this gateway and to
-// the policy engine.
+// reloadConfig re-reads config from disk and applies its peers and policy to
+// this gateway and to the policy engine. Profiles, runners, ceilings and node
+// settings keep their startup values until the daemon restarts (see
+// config.Reloadable): the runner registry is built once at startup, so
+// reloading them would let policy and the executing runner disagree about what
+// a profile grants. It returns the sections that changed on disk but were held
+// back, so callers can say a restart is needed.
 //
 // The engine is reloaded in place rather than replaced: the daemon builds one
 // engine and shares it with the mesh RPC server, which is what enforces inbound
 // peer policy. Assigning a fresh engine to g.Policy would leave the mesh server
 // evaluating the old config, so a peer repair would report success while the
 // daemon kept rejecting the peer.
-func (g *Gateway) reloadConfig() error {
-	cfg, err := config.Load(g.configPath())
+func (g *Gateway) reloadConfig() ([]string, error) {
+	next, err := config.Load(g.configPath())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	g.Config = cfg
+	merged, held := g.Config.Reloadable(next)
+	if err := merged.Validate(); err != nil {
+		return nil, fmt.Errorf("reloaded peers and policy do not validate against the running profiles: %w", err)
+	}
+	g.Config = merged
 	if g.Policy != nil {
-		g.Policy.Reload(cfg)
+		g.Policy.Reload(merged)
 	} else {
-		g.Policy = policy.New(cfg)
+		g.Policy = policy.New(merged)
 	}
-	return nil
+	return held, nil
+}
+
+// restartRequiredNote explains which held-back config sections need a restart.
+func restartRequiredNote(held []string) string {
+	return "Changes to " + strings.Join(held, ", ") + " were written but are not active: profile, runner and node changes require a daemon restart (e.g. `cmesh up service restart`, or stop and re-run `cmesh up`)."
 }
 
 func (g *Gateway) readProfileContext() (profileContextFile, error) {
