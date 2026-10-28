@@ -732,3 +732,26 @@ func testConfig(root string) *config.Config {
 		},
 	}
 }
+
+// One decision must be evaluated against one config. CheckInbound and
+// CheckOutbound take a snapshot for the peer, hop and cwd checks; checkProfile
+// must use that same snapshot rather than re-reading the engine, or a Reload
+// in between splits the decision across two configs.
+func TestCheckProfileUsesCallerSnapshot(t *testing.T) {
+	root := t.TempDir()
+	snapshot := testConfig(root)
+	engine := New(snapshot)
+
+	// The engine has since moved on to a config without the profile.
+	reloaded := testConfig(root)
+	reloaded.Profiles = map[string]config.ProfileConfig{}
+	engine.Reload(reloaded)
+
+	intent := TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "dev", Runner: "claude-code"}
+	if decision := engine.checkProfile(snapshot, intent, false); !decision.Allowed {
+		t.Fatalf("checkProfile must evaluate the caller's snapshot, got %+v", decision)
+	}
+	if decision := engine.checkProfile(reloaded, intent, false); decision.Allowed || decision.Code != "profile_unavailable" {
+		t.Fatalf("checkProfile against the reloaded snapshot should be profile_unavailable, got %+v", decision)
+	}
+}

@@ -113,7 +113,7 @@ func (e *Engine) CheckInbound(intent TaskIntent) Decision {
 		return denied("cwd_denied", fmt.Sprintf("cwd %q is outside allowed_cwds", cwd), intent.Profile, "")
 	}
 	intent.CWD = cwd
-	return e.checkProfile(intent, true)
+	return e.checkProfile(cfg, intent, true)
 }
 
 func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
@@ -134,11 +134,14 @@ func (e *Engine) CheckOutbound(intent TaskIntent) Decision {
 	if intent.HopCount > cfg.Policy.HopLimit {
 		return denied("profile_denied", fmt.Sprintf("hop count %d exceeds limit %d", intent.HopCount, cfg.Policy.HopLimit), intent.Profile, "")
 	}
-	return e.checkProfile(intent, false)
+	return e.checkProfile(cfg, intent, false)
 }
 
-func (e *Engine) checkProfile(intent TaskIntent, inbound bool) Decision {
-	cfg := e.config()
+// checkProfile takes the config snapshot its caller already used for the peer,
+// hop and cwd checks. Fetching a fresh one here would let a concurrent Reload
+// split a single decision across two configs, allowing or denying a
+// combination that no loaded config represents.
+func (e *Engine) checkProfile(cfg *config.Config, intent TaskIntent, inbound bool) Decision {
 	requested := intent.Profile
 	explicit := strings.TrimSpace(requested) != ""
 	if requested == "" {
