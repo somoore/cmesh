@@ -31,6 +31,16 @@ func TestCeilingExcessOnBuiltins(t *testing.T) {
 		{RepoDev, ReadonlyAgent, true},
 		{SystemChange, ReadonlyAgent, true},
 		{RepoDev, RepoDev, true},
+		// Capping an agent profile down to a probe or query-shell rung: its
+		// unrestricted shell already covers the read-only inspection commands.
+		{RepoDev, Query, true},
+		{SystemChange, Query, true},
+		{SystemChange, QueryShell, true},
+		{DesktopControl, Query, true},
+		{DesktopControl, QueryNetwork, true},
+		// A shell=deny agent cannot run those commands, so it cannot cap to them.
+		{ReadonlyAgent, Query, false},
+		{RepoDev, QueryNetwork, false},
 		// Same risk tier, disjoint powers: neither direction is a cap.
 		{ReadonlyAgent, QueryShell, false},
 		{QueryShell, ReadonlyAgent, false},

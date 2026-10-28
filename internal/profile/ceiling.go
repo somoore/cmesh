@@ -71,8 +71,10 @@ func CeilingExcess(ceiling, requested Authority) string {
 // the requested profile's authority axes. Runners enforce writes, shell and
 // network directly, so a profile with writes=allow can already edit a repo even
 // if it does not list edit_repo; a ceiling that names edit_repo is then not
-// adding anything. This keeps the documented system-change -> repo-dev cap
-// legal while still rejecting a ceiling that reaches for a disjoint power.
+// adding anything. Likewise unrestricted shell already covers the read-only
+// inspection capabilities. This keeps the documented system-change -> repo-dev
+// cap, and capping an agent profile down to query or query-shell, legal while
+// still rejecting a ceiling that reaches for a disjoint power.
 func capabilityImplied(capability string, requested Authority) bool {
 	switch capability {
 	case CapEditRepo:
@@ -88,7 +90,13 @@ func capabilityImplied(capability string, requested Authority) bool {
 	case CapGitPush:
 		return requested.GitPush
 	case CapLogTailBounded:
-		return contains(requested.Capabilities, CapLogTail)
+		return contains(requested.Capabilities, CapLogTail) || requested.Shell == ShellAllow
+	case CapDiskInfo, CapSystemInfo, CapMemoryInfo, CapUptime, CapRepoStatus, CapProcessList, CapServiceStatus, CapLogTail:
+		// Read-only inspection. A profile with unrestricted shell can already run
+		// these commands, so capping it to a probe or query-shell profile narrows
+		// it. A shell=deny agent such as readonly-agent cannot, and stays unable
+		// to cap to them.
+		return requested.Shell == ShellAllow
 	}
 	return false
 }
