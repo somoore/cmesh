@@ -42,9 +42,9 @@ const (
 
 type Server struct {
 	// Config is the startup config. Node and tailnet settings (ports, bind
-	// address, data dir) are fixed for the life of the process and come from
-	// here; peers, profiles, runners and policy come from liveConfig(), which
-	// follows the shared policy engine across a reload.
+	// address, data dir) and runner concurrency limits are fixed for the life of
+	// the process and come from here; peers, profiles, runners and policy come
+	// from liveConfig(), which follows the shared policy engine across a reload.
 	Config   *config.Config
 	Store    *store.Store
 	Audit    *audit.Writer
@@ -1564,9 +1564,13 @@ func gitPushAllowed(authorized, current *config.Config, profileName string) bool
 	return true
 }
 
+// acquireRunner bounds concurrent tasks per runner. The limit comes from the
+// startup config and is fixed for the life of the process: the semaphore holds
+// the count of running and queued tasks, and resizing it on a reload would drop
+// that accounting and let more tasks start than either limit allows.
 func (s *Server) acquireRunner(ctx context.Context, runnerName string) (func(), error) {
 	limit := 0
-	if cfg, ok := s.liveConfig().Runners[runnerName]; ok {
+	if cfg, ok := s.Config.Runners[runnerName]; ok {
 		limit = cfg.Concurrency
 	}
 	if limit <= 0 {

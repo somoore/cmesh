@@ -1656,3 +1656,31 @@ func TestGitPushNeverGrantedByReload(t *testing.T) {
 		t.Fatal("a profile removed by reload must not keep push authority")
 	}
 }
+
+// The runner semaphore carries the count of running and queued tasks. A reload
+// that changes a runner's concurrency must not resize it: replacing the channel
+// dropped that accounting and let more tasks start than either limit allows.
+func TestRunnerConcurrencyIgnoresReload(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	server.Config.Runners["fake"] = config.RunnerConfig{Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 1}
+
+	release, err := server.acquireRunner(context.Background(), "fake")
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	defer release()
+
+	reloaded := *server.Config
+	reloaded.Runners = map[string]config.RunnerConfig{
+		"fake": {Command: []string{"fake"}, DefaultProfile: "dev", Concurrency: 2},
+	}
+	server.Policy.Reload(&reloaded)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if second, err := server.acquireRunner(ctx, "fake"); err == nil {
+		second()
+		t.Fatal("a second task started while the first held the only slot")
+	}
+}
