@@ -1629,3 +1629,30 @@ func TestServerFollowsPolicyEngineReload(t *testing.T) {
 		t.Fatalf("lease for a profile added by reload: status = %d, body = %s", res.Code, res.Body.String())
 	}
 }
+
+// A reload while a task runs may revoke git push but must never grant it: the
+// task was accepted without push authority, so its work must not reach the
+// remote because a profile changed underneath it.
+func TestGitPushNeverGrantedByReload(t *testing.T) {
+	withPush := func(push bool) *config.Config {
+		return &config.Config{Profiles: map[string]config.ProfileConfig{"repo-dev": {GitPush: push}}}
+	}
+	cases := []struct {
+		name                string
+		authorized, current bool
+		want                bool
+	}{
+		{"granted by reload", false, true, false},
+		{"revoked by reload", true, false, false},
+		{"allowed throughout", true, true, true},
+		{"denied throughout", false, false, false},
+	}
+	for _, tc := range cases {
+		if got := gitPushAllowed(withPush(tc.authorized), withPush(tc.current), "repo-dev"); got != tc.want {
+			t.Fatalf("%s: gitPushAllowed = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	if gitPushAllowed(withPush(true), &config.Config{}, "repo-dev") {
+		t.Fatal("a profile removed by reload must not keep push authority")
+	}
+}

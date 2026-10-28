@@ -787,7 +787,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 				s.failTask(context.Background(), outcome.Task, task.ErrorWorkerFailed, fmt.Sprintf("task panicked: %v", rec))
 			}
 		}()
-		s.runTask(runCtx, outcome.Task, req)
+		s.runTask(runCtx, outcome.Task, req, cfg)
 	}()
 	if req.Wait {
 		s.waitForTask(w, r, outcome.Task.ID, time.Duration(req.TimeoutSeconds)*time.Second, req)
@@ -803,7 +803,10 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.CreateTaskRequest) {
+// runTask runs an accepted task. authorized is the config snapshot the task was
+// accepted under: a reload while the task runs may revoke authority it was
+// granted, but must never add authority it was not.
+func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.CreateTaskRequest, authorized *config.Config) {
 	timeout := s.effectiveRuntimeLimit(rec.ProfileEffective, req.TimeoutSeconds)
 	if err := ctx.Err(); err != nil {
 		s.cancelTaskFromWorker(context.Background(), rec, runner.Result{}, err.Error())
@@ -919,10 +922,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		err = runner.E(runner.ErrCancelled, "run command", ctx.Err())
 	}
 	if gitPrep.Available && runner.CodeOf(err) != runner.ErrCancelled {
-		gitPush := false
-		if profile, ok := s.liveConfig().Profiles[rec.ProfileEffective]; ok {
-			gitPush = profile.GitPush
-		}
+		gitPush := gitPushAllowed(authorized, s.liveConfig(), rec.ProfileEffective)
 		head, diffstat, files, bundlePath, pushed, commitErr := commitGit(ctx, rec, gitPrep, s.Config.Node.Name, s.Config.Node.DataDir, gitPush)
 		if commitErr != nil && err == nil {
 			err = commitErr
@@ -1546,6 +1546,22 @@ func (s *Server) cancelRunningTask(taskID string) context.CancelFunc {
 	s.runningMu.Lock()
 	defer s.runningMu.Unlock()
 	return s.running[taskID]
+}
+
+// gitPushAllowed reports whether a task may push its branch: only when the
+// profile allowed it both when the task was accepted and now. A reload can take
+// push authority away from a running task but never hand it one.
+func gitPushAllowed(authorized, current *config.Config, profileName string) bool {
+	for _, cfg := range []*config.Config{authorized, current} {
+		if cfg == nil {
+			return false
+		}
+		profile, ok := cfg.Profiles[profileName]
+		if !ok || !profile.GitPush {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) acquireRunner(ctx context.Context, runnerName string) (func(), error) {
