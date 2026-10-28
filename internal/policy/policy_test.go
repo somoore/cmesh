@@ -538,9 +538,9 @@ func TestCeilingCannotRaiseAuthority(t *testing.T) {
 	}
 }
 
-// Capping to an equal-risk profile is legitimate narrowing (the documented
-// example maps system-change to repo-dev, both high risk), so rank equality
-// must stay allowed.
+// Capping to an equal-risk profile is legitimate when it narrows (the
+// documented example maps system-change to repo-dev, both high risk). The
+// ceiling's edit_repo is covered by the requested profile's writes=allow.
 func TestCeilingAllowsEqualRiskCap(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
@@ -582,9 +582,11 @@ func TestCeilingReportsEffectiveRunner(t *testing.T) {
 	root := t.TempDir()
 	cfg := testConfig(root)
 	cfg.Runners["probe"] = config.RunnerConfig{Command: []string{"builtin"}, DefaultProfile: "capped"}
+	// The ceiling must be a genuine narrowing, so the requested profile also
+	// holds the probe capability the ceiling keeps.
 	cfg.Profiles["asked"] = config.ProfileConfig{
 		Runner:       "claude-code",
-		Capabilities: []string{profile.CapReadFiles},
+		Capabilities: []string{profile.CapReadFiles, profile.CapDiskInfo},
 		Writes:       profile.WritesDeny,
 		Shell:        profile.ShellDeny,
 		Risk:         profile.RiskMedium,
@@ -753,5 +755,50 @@ func TestCheckProfileUsesCallerSnapshot(t *testing.T) {
 	}
 	if decision := engine.checkProfile(reloaded, intent, false); decision.Allowed || decision.Code != "profile_unavailable" {
 		t.Fatalf("checkProfile against the reloaded snapshot should be profile_unavailable, got %+v", decision)
+	}
+}
+
+// readOnlyProfile is a medium-risk claude-code profile with writes denied, for
+// ceiling tests that vary only capabilities and shell.
+func readOnlyProfile(shell string, capabilities ...string) config.ProfileConfig {
+	return config.ProfileConfig{Runner: "claude-code", Capabilities: capabilities, Writes: profile.WritesDeny, Shell: shell, Risk: profile.RiskMedium}
+}
+
+// withCeiling maps requested to ceiling on a fresh test config.
+func withCeiling(root string, requested, ceiling config.ProfileConfig) *config.Config {
+	cfg := testConfig(root)
+	cfg.Profiles["asked"] = requested
+	cfg.Profiles["capped"] = ceiling
+	cfg.Policy.ProfileCeilings = map[string]string{"asked": "capped"}
+	return cfg
+}
+
+// Outbound denials name profiles, but the profile that runs is the ceiling. A
+// request naming an allowed profile must not reach a denied one through a
+// ceiling remap.
+func TestOutboundDenialAppliesToCeiling(t *testing.T) {
+	root := t.TempDir()
+	cfg := withCeiling(root,
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles, profile.CapDiskInfo),
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles))
+	cfg.Policy.Outbound.DeniedProfiles = []string{"capped"}
+
+	decision := New(cfg).CheckOutbound(TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "asked"})
+	if decision.Allowed || decision.Code != "profile_denied" {
+		t.Fatalf("outbound denial of the ceiling must hold, got %+v", decision)
+	}
+}
+
+// Two profiles in the same risk tier can grant disjoint powers. A ceiling that
+// swaps one for the other is not a cap and must be refused at request time too.
+func TestCeilingRejectsEqualRiskDisjointProfile(t *testing.T) {
+	root := t.TempDir()
+	cfg := withCeiling(root,
+		readOnlyProfile(profile.ShellDeny, profile.CapReadFiles),
+		readOnlyProfile(profile.ShellAllowlisted, profile.CapShellReadonly))
+
+	decision := New(cfg).CheckInbound(TaskIntent{PeerName: "mac-studio", CWD: root, Profile: "asked"})
+	if decision.Allowed || decision.Code != "profile_denied" {
+		t.Fatalf("equal-risk disjoint ceiling must be refused, got %+v", decision)
 	}
 }

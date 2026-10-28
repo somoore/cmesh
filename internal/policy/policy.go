@@ -191,11 +191,17 @@ func (e *Engine) checkProfile(cfg *config.Config, intent TaskIntent, inbound boo
 		if !ok {
 			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is not configured", ceiling), requested, "")
 		}
-		// A ceiling may only cap authority, never raise it. config.Validate rejects
-		// an escalating mapping at load time; this is the request-time backstop for
+		// A ceiling may only cap authority, never raise or redirect it. config.Validate
+		// rejects such a mapping at load time; this is the request-time backstop for
 		// a config that changed underneath a running daemon or was built in-process.
-		if profiledefs.RiskRank(effectiveRisk(ceiling, ceilingProfile)) > profiledefs.RiskRank(effectiveRisk(requested, profile)) {
-			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q", ceiling, requested), requested, "")
+		if excess := profiledefs.CeilingExcess(ceilingProfile.Authority(ceiling), profile.Authority(requested)); excess != "" {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q raises authority above requested profile %q: %s", ceiling, requested, excess), requested, "")
+		}
+		// Outbound denials name profiles; the profile that would actually run is
+		// the ceiling, so a denial of it must hold even when the caller asked for a
+		// different name.
+		if !inbound && contains(cfg.Policy.Outbound.DeniedProfiles, ceiling) {
+			return denied("profile_denied", fmt.Sprintf("profile ceiling %q is denied by outbound policy", ceiling), requested, "")
 		}
 		// The runner checks above ran against the requested profile. Re-run them for
 		// the ceiling so the profile that is actually enforced cannot name a runner
@@ -455,15 +461,6 @@ func identityCandidates(intent TaskIntent) []string {
 		}
 	}
 	return out
-}
-
-// effectiveRisk returns a profile's declared risk, falling back to the
-// capability-derived value when the config omits it.
-func effectiveRisk(name string, prof config.ProfileConfig) string {
-	if prof.Risk != "" {
-		return prof.Risk
-	}
-	return profiledefs.RiskForConfig(name, profiledefs.NormalizeCapabilities(prof.Capabilities, prof.Claims), prof.Writes, prof.Shell, prof.Network)
 }
 
 func matchesAny(values, patterns []string) bool {

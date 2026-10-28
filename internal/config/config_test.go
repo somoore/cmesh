@@ -121,6 +121,10 @@ func TestValidateRejectsEscalatingProfileCeiling(t *testing.T) {
 		{"cap high to medium", "power", "look", false},
 		{"cap to equal risk", "power", "power-two", false},
 		{"raise medium to high", "look", "power", true},
+		// Same risk tier is not enough: a ceiling granting a power the requested
+		// profile lacks is not a cap, in either direction.
+		{"equal risk, disjoint powers", "look", "shell-look", true},
+		{"equal risk, disjoint powers reversed", "shell-look", "look", true},
 		{"undefined ceiling", "power", "missing", true},
 	}
 	for _, tc := range cases {
@@ -131,6 +135,8 @@ func TestValidateRejectsEscalatingProfileCeiling(t *testing.T) {
 				"profile_ceilings = { " + tc.requested + " = \"" + tc.ceiling + "\" }\n\n" +
 				"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
 				"writes = \"deny\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+				"[profiles.shell-look]\nrunner = \"claude-code\"\ncapabilities = [\"shell_readonly\"]\n" +
+				"writes = \"deny\"\nshell = \"allowlisted\"\nrisk = \"medium\"\n\n" +
 				"[profiles.power]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\", \"edit_repo\"]\n" +
 				"writes = \"repo_only\"\nshell = \"allow\"\nrisk = \"high\"\n" +
 				"require_explicit = true\nrequire_lease = true\n\n" +
