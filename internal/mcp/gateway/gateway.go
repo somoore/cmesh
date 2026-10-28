@@ -1197,6 +1197,11 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
+		// A follow-up resumes the earlier task's runner session and reads its
+		// result, so a task token may only follow up a task it owns.
+		if err := g.authorizeTaskAccess(ctx, peerTask); err != nil {
+			return toolFailure(task.ErrorPeerUnauthorized, err.Error())
+		}
 		followupPeerTask = peerTask
 		if req.Peer != "" {
 			if !g.peerMatchesNode(req.Peer, peerTask.PeerNodeID) {
@@ -1251,13 +1256,23 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	// body-supplied provenance when a token is present; this applies the same
 	// rule to the session. Host-token callers have no provenance and keep using
 	// the request value.
+	//
+	// The session is not the ownership key, though: host-token delegations that
+	// omit origin_session_id all share gateway-default, so many unrelated worker
+	// tasks can hold the same session. A task-token delegation is owned by the
+	// worker task its token was minted for, and that is what task-token reads
+	// are authorized against.
 	sessionID := strings.TrimSpace(prov.OriginSessionID)
+	ownerTaskID := ""
 	if _, scoped := taskTokenSession(ctx); scoped {
 		// A token whose stored context carries no session cannot be scoped, and
-		// must not fall through to the shared default session — that would put
-		// its children where any other unscoped token could read them.
+		// must not fall through to the shared default session.
 		if sessionID == "" {
 			return toolFailure(task.ErrorPeerUnauthorized, "task token context has no origin session")
+		}
+		ownerTaskID = strings.TrimSpace(prov.TaskID)
+		if ownerTaskID == "" {
+			return toolFailure(task.ErrorPeerUnauthorized, "task token context does not name a task")
 		}
 	} else {
 		// A named workstream selects the session that groups this task with its
@@ -1274,6 +1289,12 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 	if idempotencyKey == "" {
 		queryJSON, _ := json.Marshal(req.Query)
 		idempotencyKey = strings.Join([]string{req.FollowupTaskID, req.Peer, req.CWD, req.Runner, req.Profile, req.ProfileSource, req.ProfileContextID, req.TaskKind, string(queryJSON), strconv.Itoa(req.TimeoutSeconds), strconv.FormatBool(req.AllowDirty), task.PromptHash(req.Prompt)}, "\x00")
+	}
+	// Two worker tasks sharing a session that send the same request must not
+	// collapse onto one task: the second would be handed the first one's replay.
+	// Mixing in the owner keeps each delegating task's children its own.
+	if ownerTaskID != "" {
+		idempotencyKey = ownerTaskID + "\x00" + idempotencyKey
 	}
 	taskID := task.DeterministicID(g.Config.Node.ID, sessionID, idempotencyKey)
 	hopCount := prov.HopCount
@@ -1366,6 +1387,7 @@ func (g *Gateway) delegateCall(ctx context.Context, req DelegateRequest) (ToolRe
 		PeerNodeID:       firstNonEmpty(peer.NodeID, peer.Name, req.Peer),
 		RemoteTaskID:     remoteTaskID,
 		OriginSessionID:  sessionID,
+		OwnerTaskID:      ownerTaskID,
 		State:            resp.State,
 		ProfileEffective: decision.EffectiveProfile,
 	})
@@ -1628,23 +1650,29 @@ func helloSupportsProfile(hello schema.HelloResponse, profile string) bool {
 //
 // A task-token caller is a *worker's* runner reaching back in during
 // subdelegation. Its output is untrusted by design, so it must not be able to
-// enumerate or act on tasks outside its own delegation. Both the task context
-// file backing the token and peer_tasks carry origin_session_id, so the token's
-// session is the ownership key: it covers the token's own task and anything that
-// task delegated onward (children inherit the session), and nothing else.
+// enumerate or act on tasks outside its own delegation. The ownership key is
+// the worker task the token was minted for, recorded on each peer task that
+// token delegated. The origin session is not enough: every host-token
+// delegation that omits origin_session_id shares gateway-default, so a session
+// match would let one task's runner reach another unrelated task's children.
 //
-// Tasks predating this scoping have an empty mirrored session; those stay
-// readable only by a host-token caller, never by a task token.
+// Tasks with no recorded owner -- host-token delegations and rows predating
+// ownership -- stay readable only by a host-token caller, never by a task token.
 func (g *Gateway) authorizeTaskAccess(ctx context.Context, peerTask store.PeerTask) error {
 	prov, ok := ctx.Value(provenanceContextKey{}).(gatewayProvenance)
 	if !ok {
 		return nil
 	}
-	session := strings.TrimSpace(prov.OriginSessionID)
-	if session != "" && session == strings.TrimSpace(peerTask.OriginSessionID) {
+	if taskTokenOwns(prov, peerTask) {
 		return nil
 	}
 	return errors.New("task token is not authorized for this task")
+}
+
+// taskTokenOwns reports whether the task token behind prov delegated peerTask.
+func taskTokenOwns(prov gatewayProvenance, peerTask store.PeerTask) bool {
+	owner := strings.TrimSpace(prov.TaskID)
+	return owner != "" && owner == strings.TrimSpace(peerTask.OwnerTaskID)
 }
 
 // taskTokenSession returns the origin session of a task-token caller, and false
@@ -1670,11 +1698,12 @@ func (g *Gateway) listTasksCall(ctx context.Context, limit int, workstream strin
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
 	// A task-token caller may only see its own delegation, so filter the mirror
-	// to its session and withhold this node's local task list entirely.
-	if session, scoped := taskTokenSession(ctx); scoped {
+	// to the tasks its token delegated and withhold this node's local task list
+	// entirely.
+	if prov, scoped := ctx.Value(provenanceContextKey{}).(gatewayProvenance); scoped {
 		filtered := peerTasks[:0]
 		for _, peerTask := range peerTasks {
-			if session != "" && strings.TrimSpace(peerTask.OriginSessionID) == session {
+			if taskTokenOwns(prov, peerTask) {
 				filtered = append(filtered, peerTask)
 			}
 		}
@@ -1702,7 +1731,7 @@ func (g *Gateway) statusCall(ctx context.Context, taskID string, wait bool, time
 	if err != nil {
 		return ToolResponse{OK: true, Result: mirroredStatus(peerTask, err)}, nil
 	}
-	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, OriginSessionID: peerTask.OriginSessionID, State: resp.State})
+	_ = g.Store.UpsertPeerTask(ctx, store.PeerTask{TaskID: taskID, PeerNodeID: peerTask.PeerNodeID, RemoteTaskID: peerTask.RemoteTaskID, OriginSessionID: peerTask.OriginSessionID, OwnerTaskID: peerTask.OwnerTaskID, State: resp.State})
 	return ToolResponse{OK: true, Result: resp}, nil
 }
 
