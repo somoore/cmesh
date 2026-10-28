@@ -1244,3 +1244,34 @@ func newTestGatewayWithStore(t *testing.T, storePath string) *Gateway {
 	}
 	return &Gateway{Config: cfg, Store: st, Audit: audit.NewWriter(filepath.Join(t.TempDir(), "audit.jsonl"), cfg.Node.ID), Policy: policy.New(cfg)}
 }
+
+// repair_peers must diagnose, rewrite and reload the same file: the one the
+// daemon was started with. Reading config.DefaultPath() while the reload reads
+// g.ConfigPath let a daemon started with --config repair one file and report
+// another, untouched one as active.
+func TestRepairPeersUsesDaemonConfigPath(t *testing.T) {
+	dir := t.TempDir()
+	// The default location holds nothing; only the daemon's --config file exists.
+	t.Setenv("CMESH_CONFIG", filepath.Join(dir, "default-missing.toml"))
+	custom := filepath.Join(dir, "custom.toml")
+	body := "[node]\nid = \"node-a\"\nname = \"node-a\"\n" +
+		"mesh_port = 7778\nmcp_port = 7777\n\n" +
+		"[policy]\nallowed_peers = [\"node-a\"]\nallowed_cwds = [\"~/code/**\"]\nhop_limit = 2\n\n" +
+		"[profiles.look]\nrunner = \"claude-code\"\ncapabilities = [\"read_files\"]\n" +
+		"writes = \"deny\"\nshell = \"deny\"\nrisk = \"medium\"\n\n" +
+		"[runners.claude-code]\ncommand = [\"/usr/local/bin/claude\", \"-p\"]\ndefault_profile = \"look\"\n"
+	if err := os.WriteFile(custom, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := newTestGateway(t)
+	g.ConfigPath = custom
+
+	resp, err := g.repairPeersCall(context.Background(), nil)
+	if err != nil || !resp.OK {
+		t.Fatalf("repair_peers should load the daemon's config file, resp=%+v err=%v", resp, err)
+	}
+	result := resp.Result.(map[string]any)
+	if msg, _ := result["message"].(string); !strings.Contains(msg, "No [peers.*] entries") {
+		t.Fatalf("repair_peers diagnosed the wrong file: %+v", result)
+	}
+}

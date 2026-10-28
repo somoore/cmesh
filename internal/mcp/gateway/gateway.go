@@ -287,10 +287,10 @@ func (g *Gateway) handleRPC(ctx context.Context, req rpcRequest) (rpcResponse, b
 func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessage) (ToolResponse, error) {
 	switch name {
 	case "doctor":
-		status := onboard.Detect(ctx, config.DefaultPath(), false)
+		status := onboard.Detect(ctx, g.configPath(), false)
 		return ToolResponse{OK: status.ConfigOK && status.Machine.TailscaleOK, Result: status}, nil
 	case "init_status":
-		return ToolResponse{OK: true, Result: onboard.Detect(ctx, config.DefaultPath(), true)}, nil
+		return ToolResponse{OK: true, Result: onboard.Detect(ctx, g.configPath(), true)}, nil
 	case "detect_runners":
 		return ToolResponse{OK: true, Result: onboard.DetectRunners(ctx)}, nil
 	case "task_catalog":
@@ -383,7 +383,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 		if err != nil {
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
-		return ToolResponse{OK: true, Result: map[string]string{"toml": body, "path": config.DefaultPath()}}, nil
+		return ToolResponse{OK: true, Result: map[string]string{"toml": body, "path": g.configPath()}}, nil
 	case "validate_config":
 		var req struct {
 			Path string `json:"path,omitempty"`
@@ -408,7 +408,7 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 			defer os.Remove(path)
 		}
 		if path == "" {
-			path = config.DefaultPath()
+			path = g.configPath()
 		}
 		if err := onboard.ValidateConfig(path); err != nil {
 			return ToolResponse{OK: false, Error: &ToolError{Code: task.ErrorWorkerFailed, Detail: err.Error()}}, nil
@@ -1413,11 +1413,10 @@ const gatewaySmokeExpectedResponse = "cmesh smoke ok"
 // config fresh from disk — that file is the thing being repaired — rather than using
 // the daemon's in-memory g.Config.
 //
-// IMPORTANT: the gateway runs INSIDE the daemon, which loaded its policy once at
-// startup and has no config-reload path. So a confirmed repair rewrites the file but
-// does NOT change what this live daemon enforces until it is restarted. The
-// next_step says so in plain terms; we never report success as if the running mesh
-// were already fixed.
+// Diagnosis, the rewrite and the reload that follows all use g.configPath(), the
+// file this daemon was started with. Mixing that with config.DefaultPath() would
+// let a daemon started with --config repair one file and reload another, then
+// report the untouched config as active.
 func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (ToolResponse, error) {
 	var req struct {
 		Confirmed bool `json:"confirmed,omitempty"`
@@ -1427,7 +1426,8 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 			return toolFailure(task.ErrorWorkerFailed, err.Error())
 		}
 	}
-	cfg, err := config.Load(config.DefaultPath())
+	configPath := g.configPath()
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, "load config: "+err.Error())
 	}
@@ -1458,7 +1458,7 @@ func (g *Gateway) repairPeersCall(ctx context.Context, args json.RawMessage) (To
 		}}, nil
 	}
 
-	fixedNames, err := onboard.ApplyPeerRepairs(config.DefaultPath(), repairs)
+	fixedNames, err := onboard.ApplyPeerRepairs(configPath, repairs)
 	if err != nil {
 		return toolFailure(task.ErrorWorkerFailed, err.Error())
 	}
