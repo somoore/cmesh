@@ -41,6 +41,10 @@ const (
 )
 
 type Server struct {
+	// Config is the startup config. Node and tailnet settings (ports, bind
+	// address, data dir) are fixed for the life of the process and come from
+	// here; peers, profiles, runners and policy come from liveConfig(), which
+	// follows the shared policy engine across a reload.
 	Config   *config.Config
 	Store    *store.Store
 	Audit    *audit.Writer
@@ -53,6 +57,18 @@ type Server struct {
 	running   map[string]context.CancelFunc
 	limitsMu  sync.Mutex
 	limits    map[string]chan struct{}
+}
+
+// liveConfig returns the config snapshot this server should act on. The daemon
+// shares one policy engine between this server and the local gateway, and a
+// peer repair reloads that engine; reading the startup Config instead would
+// keep peerForIdentity and lease validation on stale peers while the repair
+// reports the new trust as active.
+func (s *Server) liveConfig() *config.Config {
+	if cfg := s.Policy.Config(); cfg != nil {
+		return cfg
+	}
+	return s.Config
 }
 
 func (s *Server) Handler() http.Handler {
@@ -263,7 +279,8 @@ func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, re
 	if profileName == "" {
 		return schema.ProfileLease{}, errors.New("profile is required")
 	}
-	prof, ok := s.Config.Profiles[profileName]
+	cfg := s.liveConfig()
+	prof, ok := cfg.Profiles[profileName]
 	if !ok {
 		return schema.ProfileLease{}, fmt.Errorf("profile %q is not configured", profileName)
 	}
@@ -292,7 +309,7 @@ func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, re
 		}
 		normalizedCWD = normalized
 	}
-	if err := s.validateLeaseRequest(identity, profileName, normalizedCWD); err != nil {
+	if err := s.validateLeaseRequest(cfg, identity, profileName, normalizedCWD); err != nil {
 		return schema.ProfileLease{}, err
 	}
 	lease, err := s.Leases.Issue(policy.LeaseValidation{
@@ -319,10 +336,10 @@ func (s *Server) issueProfileLease(_ context.Context, identity tsid.Identity, re
 	return lease, nil
 }
 
-func (s *Server) validateLeaseRequest(identity tsid.Identity, profileName, cwd string) error {
-	cfgCopy := *s.Config
-	cfgCopy.Profiles = make(map[string]config.ProfileConfig, len(s.Config.Profiles))
-	for name, prof := range s.Config.Profiles {
+func (s *Server) validateLeaseRequest(cfg *config.Config, identity tsid.Identity, profileName, cwd string) error {
+	cfgCopy := *cfg
+	cfgCopy.Profiles = make(map[string]config.ProfileConfig, len(cfg.Profiles))
+	for name, prof := range cfg.Profiles {
 		cfgCopy.Profiles[name] = prof
 	}
 	prof := cfgCopy.Profiles[profileName]
@@ -390,7 +407,8 @@ func (s *Server) handlePeerSmoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identity, req schema.PeerSmokeRequest) (schema.PeerSmokeResponse, error) {
-	peerName, peer, ok := s.peerForIdentity(identity)
+	cfg := s.liveConfig()
+	peerName, peer, ok := peerForIdentity(cfg, identity)
 	if !ok {
 		err := fmt.Errorf("authenticated caller is not a configured peer")
 		return schema.PeerSmokeResponse{Error: &schema.Error{Code: task.ErrorPeerUnauthorized, Detail: err.Error()}}, err
@@ -427,14 +445,14 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 	resp.NodeID = firstNonEmpty(hello.NodeID, resp.NodeID)
 	resp.NodeName = firstNonEmpty(hello.NodeName, resp.NodeName)
 	checks["peer_reachable"] = true
-	chain := []string{s.Config.Node.ID}
+	chain := []string{cfg.Node.ID}
 	decision := s.Policy.CheckOutbound(policy.TaskIntent{
 		PeerName:     firstNonEmpty(peer.Name, peerName),
 		PeerNodeID:   peer.NodeID,
 		CWD:          cwd,
 		Profile:      profile,
 		Chain:        chain,
-		OriginNodeID: s.Config.Node.ID,
+		OriginNodeID: cfg.Node.ID,
 		TaskKind:     taskKindForSmoke(profile),
 		Capability:   capabilityForSmoke(profile),
 	})
@@ -444,7 +462,7 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 		resp.Error = &schema.Error{Code: task.ErrorCode(decision.Code), Detail: decision.Detail}
 		return resp, err
 	}
-	taskReq := smokeCreateTaskRequest(s.Config, cwd, decision.EffectiveProfile, timeoutSeconds)
+	taskReq := smokeCreateTaskRequest(cfg, cwd, decision.EffectiveProfile, timeoutSeconds)
 	started := time.Now()
 	created, err := client.CreateTask(ctx, taskReq)
 	if err != nil {
@@ -483,8 +501,8 @@ func (s *Server) runPeerSmokeToCaller(ctx context.Context, identity tsid.Identit
 	return resp, nil
 }
 
-func (s *Server) peerForIdentity(identity tsid.Identity) (string, config.PeerConfig, bool) {
-	for name, peer := range s.Config.Peers {
+func peerForIdentity(cfg *config.Config, identity tsid.Identity) (string, config.PeerConfig, bool) {
+	for name, peer := range cfg.Peers {
 		if peer.NodeID != "" && matchesIdentityClaim(peer.NodeID, identity) {
 			return name, peer, true
 		}
@@ -650,8 +668,9 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	// one this worker's policy accepts. The delegator often cannot know a cwd
 	// that exists on this worker (especially cross-OS), so the worker — the node
 	// that runs the task and enforces allowed_cwds — picks it.
-	if strings.TrimSpace(req.CWD) == "" && shouldSelfSelectCWD(s.Config, req) {
-		if cwd := policy.SmokeCWD(s.Config); cwd != "" {
+	cfg := s.liveConfig()
+	if strings.TrimSpace(req.CWD) == "" && shouldSelfSelectCWD(cfg, req) {
+		if cwd := policy.SmokeCWD(cfg); cwd != "" {
 			req.CWD = cwd
 		}
 	}
@@ -684,7 +703,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		// Prefer the runner of the profile policy actually granted. A profile
 		// ceiling can remap the effective profile, so resolving from req.Profile
 		// would run a runner that belongs to a profile the worker did not enforce.
-		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(s.Config, req.Profile)),
+		Runner:           firstNonEmpty(req.Runner, decision.EffectiveRunner, runnerFromProfile(cfg, req.Profile)),
 		ProfileRequested: firstNonEmpty(req.Profile, defaultRequestedProfile()),
 		ProfileEffective: decision.EffectiveProfile,
 		PromptHash:       req.Provenance.PromptHash,
@@ -808,7 +827,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 		s.failTask(ctx, rec, task.ErrorWorkerFailed, err.Error())
 		return
 	}
-	gitPrep, err := prepareGit(ctx, rec, s.Config.Node.Name, s.Config.Node.DataDir, decisionClaims(s.Config, rec.ProfileEffective), gitPreparationOptions{
+	gitPrep, err := prepareGit(ctx, rec, s.Config.Node.Name, s.Config.Node.DataDir, decisionClaims(s.liveConfig(), rec.ProfileEffective), gitPreparationOptions{
 		BaseCommit:      req.FollowupBaseCommit,
 		WorkDirOverride: workDirOverride,
 		Handoff:         req.Handoff,
@@ -901,7 +920,7 @@ func (s *Server) runTask(ctx context.Context, rec task.Record, req schema.Create
 	}
 	if gitPrep.Available && runner.CodeOf(err) != runner.ErrCancelled {
 		gitPush := false
-		if profile, ok := s.Config.Profiles[rec.ProfileEffective]; ok {
+		if profile, ok := s.liveConfig().Profiles[rec.ProfileEffective]; ok {
 			gitPush = profile.GitPush
 		}
 		head, diffstat, files, bundlePath, pushed, commitErr := commitGit(ctx, rec, gitPrep, s.Config.Node.Name, s.Config.Node.DataDir, gitPush)
@@ -1482,7 +1501,7 @@ func (s *Server) effectiveRuntimeLimit(profileName string, requestedSeconds int)
 			limit = requested
 		}
 	}
-	if profile, ok := s.Config.Profiles[profileName]; ok && profile.MaxRuntime.Duration > 0 {
+	if profile, ok := s.liveConfig().Profiles[profileName]; ok && profile.MaxRuntime.Duration > 0 {
 		maxRuntime := profile.MaxRuntime.Duration
 		if limit == 0 || maxRuntime < limit {
 			limit = maxRuntime
@@ -1531,7 +1550,7 @@ func (s *Server) cancelRunningTask(taskID string) context.CancelFunc {
 
 func (s *Server) acquireRunner(ctx context.Context, runnerName string) (func(), error) {
 	limit := 0
-	if cfg, ok := s.Config.Runners[runnerName]; ok {
+	if cfg, ok := s.liveConfig().Runners[runnerName]; ok {
 		limit = cfg.Concurrency
 	}
 	if limit <= 0 {

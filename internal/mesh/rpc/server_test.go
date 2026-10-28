@@ -1585,3 +1585,47 @@ func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
 		t.Fatalf("bad cursor code = %d, want 400: %s", res.Code, res.Body.String())
 	}
 }
+
+// A peer repair reloads the policy engine the daemon shares with this server.
+// Every server path that consults peers or profiles must follow that reload,
+// not the startup Config, or the repair reports the new trust as active while
+// peer smoke and lease issuance keep using the old data.
+func TestServerFollowsPolicyEngineReload(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	startup := server.Config
+
+	// The reloaded config adds a peer entry for the caller and a leased profile,
+	// neither of which the startup config has.
+	reloaded := *startup
+	reloaded.Peers = map[string]config.PeerConfig{
+		"mac-studio": {Name: "mac-studio", NodeID: "mac-studio", Address: "100.64.0.1"},
+	}
+	reloaded.Profiles = map[string]config.ProfileConfig{}
+	for name, prof := range startup.Profiles {
+		reloaded.Profiles[name] = prof
+	}
+	reloaded.Profiles["repo-dev"] = config.ProfileConfig{
+		Runner:          "fake",
+		Capabilities:    []string{profiledefs.CapReadFiles, profiledefs.CapEditRepo, profiledefs.CapExecuteInRepo},
+		Writes:          profiledefs.WritesRepoOnly,
+		Shell:           profiledefs.ShellAllow,
+		RequireExplicit: true,
+		RequireLease:    true,
+	}
+	server.Policy.Reload(&reloaded)
+
+	identity := tsid.Identity{NodeID: "mac-studio", NodeName: "mac-studio"}
+	if _, _, ok := peerForIdentity(server.liveConfig(), identity); !ok {
+		t.Fatal("peer lookup must see the peer added by the reload")
+	}
+
+	leaseBody := `{"profile":"repo-dev","cwd":` + strconv.Quote(root) + `,"ttl_s":1800}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/profile-leases", strings.NewReader(leaseBody))
+	req.RemoteAddr = "100.64.0.1:12345"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("lease for a profile added by reload: status = %d, body = %s", res.Code, res.Body.String())
+	}
+}

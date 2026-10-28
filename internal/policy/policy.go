@@ -84,6 +84,16 @@ func (e *Engine) Reload(cfg *config.Config) {
 	e.cfg = cfg
 }
 
+// Config returns the engine's current config snapshot. Surfaces sharing the
+// engine read peers, profiles and node settings through it so a Reload reaches
+// all of them at once instead of only the policy checks.
+func (e *Engine) Config() *config.Config {
+	if e == nil {
+		return nil
+	}
+	return e.config()
+}
+
 // config returns the current config under a read lock.
 func (e *Engine) config() *config.Config {
 	e.mu.RLock()
