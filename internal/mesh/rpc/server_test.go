@@ -867,7 +867,10 @@ func TestTaskAccessRequiresOriginOrDirectRequester(t *testing.T) {
 
 func waitForTerminalTask(t *testing.T, server *Server, taskID string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	// Windows CI runners routinely need more than a second to schedule the
+	// dispatch goroutine; the assertion is that the task *reaches* terminal,
+	// not that it does so within an arbitrary second.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		rec, err := server.Store.GetTask(context.Background(), taskID)
 		if err == nil && rec.State.Terminal() {
