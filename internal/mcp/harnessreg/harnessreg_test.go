@@ -3,6 +3,7 @@ package harnessreg
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -79,8 +80,12 @@ func TestWriteCodexGatewayConfigReplacesOnlyItsOwnTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("config permissions = %o, want 600 (file holds the host token)", perm)
+	// Windows has no POSIX permission bits (os.Chmod only toggles read-only), so
+	// the 0600 guarantee is asserted where it is meaningful.
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("config permissions = %o, want 600 (file holds the host token)", perm)
+		}
 	}
 }
 
@@ -105,5 +110,89 @@ func TestGatewayURLDefaultsToConfiguredPort(t *testing.T) {
 	}
 	if got := GatewayURL(0); got != "http://127.0.0.1:7777/mcp" {
 		t.Fatalf("GatewayURL(0) = %q, want the default MCP port", got)
+	}
+}
+
+// Codex creates ~/.codex/config.toml itself, so a pre-existing 0644 file must be
+// tightened when the host token is written into it.
+func TestWriteCodexGatewayConfigTightensExistingMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[mcp_servers.other]\ncommand = \"other\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteCodexGatewayConfig(path, "http://127.0.0.1:7777/mcp", "host-token"); err != nil {
+		t.Fatalf("WriteCodexGatewayConfig: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o, want 600", got)
+	}
+}
+
+// Registering Claude must not put the host token in a child's argument list: a
+// local user can read ps//proc/<pid>/cmdline. The token belongs only in the
+// 0600 user config the CLI would have written.
+func TestRegisterClaudeKeepsTokenOutOfArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell command uses POSIX sh")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	existing := `{"numStartups": 1, "mcpServers": {"other": {"type": "stdio", "command": "other"}}}`
+	configPath := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(configPath, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(home, "claude-args.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> '" + logPath + "'\n" +
+		"if [ \"$1\" = \"mcp\" ] && [ \"$2\" = \"get\" ]; then\n" +
+		"  printf '%s\\n' 'cmesh:' '  Scope: User' '  Type: http' '  URL: http://127.0.0.1:7777/mcp'\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	const secret = "super-secret-host-token"
+	out := Register(Request{Harness: "claude-code", Confirmed: true}, "http://127.0.0.1:7777/mcp", secret)
+	if out.Status != "registered" {
+		t.Fatalf("status = %q fields = %+v", out.Status, out.Fields)
+	}
+	if logged, err := os.ReadFile(logPath); err == nil && strings.Contains(string(logged), secret) {
+		t.Fatalf("host token reached the child argv:\n%s", logged)
+	}
+	body, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(body)
+	if !strings.Contains(got, secret) || !strings.Contains(got, "X-Cmesh-Host-Token") {
+		t.Fatalf("token/header missing from user config:\n%s", got)
+	}
+	if !strings.Contains(got, "\"other\"") || !strings.Contains(got, "numStartups") {
+		t.Fatalf("unrelated Claude config was dropped:\n%s", got)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("config mode = %o, want 600", perm)
 	}
 }

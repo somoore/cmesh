@@ -89,8 +89,26 @@ func registerClaude(req Request, gatewayURL, hostToken string) Response {
 			"preview":             preview,
 			"claude_code_command": preview,
 			"claude_code_headers": strings.TrimSpace(hostToken) != "",
+			"config_path":         setupinstall.ClaudeConfigPath(),
 			"gateway_url":         gatewayURL,
 		}}
+	}
+	// Preferred path: write the user-scope entry directly at 0600. The CLI
+	// alternative (`claude mcp add --header`) puts the long-lived host token in
+	// argv, where other local users can read it from ps//proc. Only fall back to
+	// the CLI when the direct write is not reflected by the installed Claude,
+	// because a config location mismatch would otherwise silently disable cmesh.
+	configPath := setupinstall.ClaudeConfigPath()
+	if err := setupinstall.WriteClaudeHTTPConfig(configPath, setupinstall.ServerName, gatewayURL, hostToken); err == nil {
+		if claude, lookErr := exec.LookPath("claude"); lookErr != nil || claudeResolvesToGateway(claude, gatewayURL) {
+			return Response{Status: "registered", Fields: map[string]any{
+				"harness":     "claude-code",
+				"config_path": configPath,
+				"gateway_url": gatewayURL,
+				"url":         gatewayURL,
+				"next_step":   "Restart your agent session once to load the cmesh HTTP gateway MCP.",
+			}}
+		}
 	}
 	claude, err := exec.LookPath("claude")
 	if err != nil {
@@ -125,6 +143,17 @@ func registerClaude(req Request, gatewayURL, hostToken string) Response {
 		"url":         gatewayURL,
 		"next_step":   "Restart your agent session once to load the cmesh HTTP gateway MCP.",
 	}}
+}
+
+// claudeResolvesToGateway verifies that the installed Claude CLI sees the
+// directly-written HTTP entry. A missing CLI is not a failure: the config file
+// is still what Claude reads on next start.
+func claudeResolvesToGateway(claude, gatewayURL string) bool {
+	out, err := exec.Command(claude, "mcp", "get", setupinstall.ServerName).CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), strings.ToLower(gatewayURL))
 }
 
 func registerCodex(req Request, gatewayURL, hostToken string) Response {
@@ -193,7 +222,13 @@ func WriteCodexGatewayConfig(path, gatewayURL, hostToken string) error {
 		body += "http_headers = { \"X-Cmesh-Host-Token\" = " + tomlString(strings.TrimSpace(hostToken)) + " }\n"
 	}
 	body += "startup_timeout_sec = 120\n"
-	return os.WriteFile(path, []byte(body), 0o600)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return err
+	}
+	// os.WriteFile applies perm only when it creates the file. A pre-existing
+	// ~/.codex/config.toml (Codex creates it) can be 0644, which would leave the
+	// long-lived host token world-readable.
+	return os.Chmod(path, 0o600)
 }
 
 // stripCodexTable removes a top-level TOML table (and its subtables) from body.

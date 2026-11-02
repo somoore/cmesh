@@ -144,6 +144,15 @@ func (s *Server) BindAddress(ctx context.Context) (string, error) {
 }
 
 func (s *Server) handleHello(w http.ResponseWriter, r *http.Request) {
+	// /v1/hello is unauthenticated so onboarding can discover a peer before
+	// trust is established, but it must not answer off-tailnet callers: an
+	// explicit non-tailnet `tailscale.bind` would otherwise expose node
+	// identity, runner names, and profile names to the LAN. Authenticated
+	// handlers get this check in authenticate().
+	if !tsid.IsTailnetIP(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "mesh endpoints accept tailnet sources only")
+		return
+	}
 	var runners []schema.Runner
 	for _, manifest := range s.Runners.Manifests() {
 		profiles := make([]string, 0, len(manifest.Profiles))
@@ -648,6 +657,31 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Provenance.WorkerNodeID = s.Config.Node.ID
 	req.Provenance.PromptHash = task.PromptHash(req.Prompt)
+	if strings.TrimSpace(req.ResumeSessionID) != "" && !validResumeSessionID(req.ResumeSessionID) {
+		writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "malformed resume_session_id")
+		return
+	}
+	// A follow-up runs inside the referenced task's worktree and resumes its
+	// agent session. The gateway checks ownership before delegating; the direct
+	// mesh path must too, or any peer that learned a task id can read another
+	// peer's uncommitted work and commit into its worktree.
+	if err := s.checkFollowupAccess(r.Context(), req, identity); err != nil {
+		s.record(r.Context(), audit.Event{
+			Type:           "task.dispatch.denied",
+			TaskID:         req.TaskID,
+			PeerIdentity:   firstNonEmpty(identity.NodeName, identity.NodeID, identity.StableID),
+			OriginSession:  firstNonEmpty(req.Provenance.OriginSessionID, req.OriginSessionID),
+			Chain:          append([]string(nil), req.Provenance.DelegationChain...),
+			Runner:         req.Runner,
+			Profile:        req.Profile,
+			PolicyDecision: "followup_denied",
+			Source:         "mesh_rpc",
+			ErrorCode:      string(task.ErrorPeerUnauthorized),
+			ErrorDetail:    err.Error(),
+		})
+		writeError(w, http.StatusForbidden, task.ErrorPeerUnauthorized, err.Error())
+		return
+	}
 	if req.TaskKind == "query" {
 		if req.Query == nil || strings.TrimSpace(req.Query.Kind) == "" {
 			writeError(w, http.StatusBadRequest, task.ErrorWorkerFailed, "query.kind is required")
@@ -1522,10 +1556,86 @@ func (s *Server) followupWorkDir(ctx context.Context, followupTaskID string) (st
 	if prior.Result == nil {
 		return "", fmt.Errorf("followup task %s has no result envelope", followupTaskID)
 	}
+	root := filepath.Join(s.Config.Node.DataDir, "worktrees")
 	if workDir := stringValue(prior.Result.RunnerExtra, "worktree_path"); workDir != "" {
-		return filepath.FromSlash(workDir), nil
+		path := filepath.FromSlash(workDir)
+		if !pathWithin(root, path) {
+			return "", fmt.Errorf("followup task %s reports a worktree outside %s", followupTaskID, root)
+		}
+		return path, nil
 	}
-	return filepath.Join(s.Config.Node.DataDir, "worktrees", followupTaskID), nil
+	return filepath.Join(root, followupTaskID), nil
+}
+
+// pathWithin reports whether path is root itself or a descendant of root. Both
+// are cleaned first so ".." cannot escape a prefix comparison.
+func pathWithin(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if path == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// checkFollowupAccess requires a caller to be able to access the task it is
+// following up (origin or direct requester, via taskAccessibleTo) and, when a
+// resume_session_id is supplied, that it names the session stored on that same
+// task. Without this, a peer can follow up a stranger's task id, run inside its
+// worktree, and capture uncommitted files in the returned diff/bundle.
+func (s *Server) checkFollowupAccess(ctx context.Context, req schema.CreateTaskRequest, identity tsid.Identity) error {
+	followupTaskID := strings.TrimSpace(req.FollowupTaskID)
+	resumeSessionID := strings.TrimSpace(req.ResumeSessionID)
+	if followupTaskID == "" {
+		if resumeSessionID != "" {
+			return fmt.Errorf("resume_session_id requires a followup_task_id this peer may access")
+		}
+		return nil
+	}
+	prior, err := s.Store.GetTask(ctx, followupTaskID)
+	if err != nil {
+		// Do not distinguish "does not exist" from "not yours": either answer is
+		// a task-existence oracle for an allowed peer.
+		return fmt.Errorf("followup task is not accessible to this peer")
+	}
+	if !taskAccessibleTo(prior, identity) {
+		return fmt.Errorf("authenticated peer does not own followup task %s", followupTaskID)
+	}
+	if resumeSessionID != "" {
+		expected := ""
+		if prior.Result != nil {
+			expected = strings.TrimSpace(stringValue(prior.Result.RunnerExtra, "session_id"))
+		}
+		if expected == "" || expected != resumeSessionID {
+			return fmt.Errorf("resume_session_id does not belong to followup task %s", followupTaskID)
+		}
+	}
+	return nil
+}
+
+// validResumeSessionID bounds a caller-supplied session id to a shape that can
+// never be read as another flag by the runner CLI it is passed to.
+func validResumeSessionID(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for i, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-' || r == '_':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) registerRunningTask(taskID string, cancel context.CancelFunc) {
@@ -1891,6 +2001,12 @@ func validateDelegationChain(chain []string) error {
 }
 
 func (s *Server) authorizeTaskAccess(w http.ResponseWriter, r *http.Request, identity tsid.Identity, taskID string) (task.Record, bool) {
+	// The id reaches store and filepath lookups downstream; refuse anything that
+	// is not a system-minted id even though the store lookup would also miss.
+	if !task.ValidID(taskID) {
+		writeError(w, http.StatusForbidden, task.ErrorPeerUnauthorized, "malformed task id")
+		return task.Record{}, false
+	}
 	rec, err := s.Store.GetTask(r.Context(), taskID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, task.ErrorWorkerFailed, err.Error())

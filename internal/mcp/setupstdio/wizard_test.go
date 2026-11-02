@@ -357,3 +357,28 @@ func writeValidConfig(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 }
+
+// configure_node reuses an existing gateway host token. The preview is
+// model-visible, so it must never echo that long-lived credential.
+func TestConfigureNodePreviewRedactsExistingHostToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	t.Setenv("CMESH_CONFIG", path)
+	const secret = "existing-host-token-do-not-echo"
+	existing := "[node]\nid = \"origin\"\nname = \"origin\"\nmesh_port = 7778\nmcp_port = 7777\ndata_dir = \"" +
+		filepath.ToSlash(filepath.Join(dir, "data")) + "\"\n\n[gateway]\nhost_token = \"" + secret + "\"\n"
+	if err := os.WriteFile(path, []byte(existing), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resp := configureNode(context.Background(), []byte(`{"role":"worker","confirmed":false}`))
+	if !resp.OK {
+		t.Fatalf("configure_node preview failed: %+v", resp)
+	}
+	encoded, _ := json.Marshal(resp.Result)
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("preview leaked the existing host token: %s", encoded)
+	}
+	if !strings.Contains(string(encoded), "redacted") {
+		t.Fatalf("preview should explain the token is preserved but redacted: %s", encoded)
+	}
+}

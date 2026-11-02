@@ -148,7 +148,7 @@ func configureNode(ctx context.Context, args json.RawMessage) ToolResponse {
 		if genErr != nil {
 			result["preview_error"] = genErr.Error()
 		} else {
-			result["preview_toml"] = body
+			result["preview_toml"] = redactHostTokenTOML(body, opts.HostToken)
 		}
 		return ToolResponse{OK: true, Result: result}
 	}
@@ -171,11 +171,31 @@ func configureNode(ctx context.Context, args json.RawMessage) ToolResponse {
 	}}
 }
 
-type startServiceRequest struct {
-	Confirmed bool `json:"confirmed,omitempty"`
+// redactHostTokenTOML keeps the long-lived gateway host token out of a tool
+// result. configure_node preserves an existing token on re-run, but the preview
+// is model-visible: a prompt-injected onboarding agent must not be able to read
+// the credential out of preview_toml. The written file still receives the real
+// value.
+func redactHostTokenTOML(body, token string) string {
+	label := "<redacted; generated on write>"
+	if strings.TrimSpace(token) != "" {
+		label = "<redacted; preserved from existing config>"
+	}
+	var out []string
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if eq := strings.Index(trimmed, "="); eq > 0 && strings.TrimSpace(trimmed[:eq]) == "host_token" {
+			out = append(out, "host_token = \""+label+"\"")
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
-// startService installs and starts the OS service, then polls the gateway for
+type startServiceRequest struct {
+	Confirmed bool `json:"confirmed,omitempty"`
+} // startService installs and starts the OS service, then polls the gateway for
 // health. Per constraint C1 it must emit NOTHING to the real os.Stdout (the MCP
 // JSON-RPC channel): internal/service writes to os.Stdout, so we redirect
 // os.Stdout to os.DevNull for the duration and restore it after.

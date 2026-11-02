@@ -163,3 +163,23 @@ func containsTestString(values []string, needle string) bool {
 	}
 	return false
 }
+
+// A profile name is rendered into a TOML table header, so a crafted name must be
+// rejected before it can append an unrelated table such as [peers.evil].
+func TestConfigureProfileRejectsTOMLInjectionInName(t *testing.T) {
+	configPath := writeProfileConfigFixture(t, validQueryConfig(t))
+	_, err := ConfigureProfile(configPath, ProfileConfigureOptions{
+		Template: "query-shell",
+		Name:     "x]\n[peers.evil]\nname=\"evil\"\naddress=\"100.64.0.9\"\nport=7778\n[profiles.zzz",
+	}, true)
+	if err == nil {
+		t.Fatal("ConfigureProfile accepted an injected profile name")
+	}
+	cfg, loadErr := config.Load(configPath)
+	if loadErr != nil {
+		t.Fatalf("config became invalid: %v", loadErr)
+	}
+	if _, ok := cfg.Peers["evil"]; ok {
+		t.Fatal("injected [peers.evil] table was written")
+	}
+}

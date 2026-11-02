@@ -1436,7 +1436,23 @@ func cmdConnect(args []string) error {
 	fmt.Printf("Local cmesh gateway: http://127.0.0.1:%d\n", cfg.Node.MCPPort)
 	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", cfg.Node.MCPPort)
 	claudeArgs := setupinstall.ClaudeHTTPAddArgs(setupinstall.ServerName, gatewayURL, cfg.Gateway.HostToken)
-	if claude, err := exec.LookPath("claude"); err == nil {
+	// Write the user-scope entry directly rather than passing the host token as a
+	// `claude mcp add --header` argument, which is visible to local users in
+	// ps//proc. Fall back to the CLI only if the direct write is not reflected by
+	// the installed Claude.
+	claudeConfigPath := setupinstall.ClaudeConfigPath()
+	registered := false
+	if err := setupinstall.WriteClaudeHTTPConfig(claudeConfigPath, setupinstall.ServerName, gatewayURL, cfg.Gateway.HostToken); err == nil {
+		if claude, err := exec.LookPath("claude"); err != nil {
+			registered = true
+		} else if out, err := exec.Command(claude, "mcp", "get", setupinstall.ServerName).CombinedOutput(); err == nil &&
+			strings.Contains(strings.ToLower(string(out)), strings.ToLower(gatewayURL)) {
+			registered = true
+		}
+	}
+	if registered {
+		fmt.Printf("Claude Code MCP registration updated in %s.\n", claudeConfigPath)
+	} else if claude, err := exec.LookPath("claude"); err == nil {
 		cmd := exec.Command(claude, claudeArgs...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -2733,6 +2749,9 @@ func appendProfileToConfig(path string, tmpl profiledefs.Template, snippet strin
 		return fmt.Errorf("generated config would not validate: %w", err)
 	}
 	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		return err
 	}
 	cleanup = false

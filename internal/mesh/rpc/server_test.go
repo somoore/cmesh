@@ -39,6 +39,7 @@ func TestHelloIncludesCmeshBuildIdentity(t *testing.T) {
 
 	server := newTestServer(t, t.TempDir(), &blockingRunner{})
 	req := httptest.NewRequest(http.MethodGet, "/v1/hello", nil)
+	req.RemoteAddr = "100.64.0.1:12345"
 	res := httptest.NewRecorder()
 	server.Handler().ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
@@ -1657,5 +1658,146 @@ func TestRunnerConcurrencyIgnoresReload(t *testing.T) {
 	if second, err := server.acquireRunner(ctx, "fake"); err == nil {
 		second()
 		t.Fatal("a second task started while the first held the only slot")
+	}
+}
+
+// /v1/hello stays unauthenticated for onboarding, but must not answer a
+// non-tailnet source: an explicit LAN bind would otherwise advertise node,
+// runner, and profile names.
+func TestHelloRequiresTailnetSource(t *testing.T) {
+	server := newTestServer(t, t.TempDir(), &blockingRunner{})
+	for _, tc := range []struct {
+		addr string
+		code int
+	}{
+		{"192.0.2.10:5555", http.StatusForbidden},
+		{"127.0.0.1:5555", http.StatusForbidden},
+		{"100.64.0.7:5555", http.StatusOK},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/hello", nil)
+		req.RemoteAddr = tc.addr
+		res := httptest.NewRecorder()
+		server.Handler().ServeHTTP(res, req)
+		if res.Code != tc.code {
+			t.Errorf("hello from %s = %d, want %d (%s)", tc.addr, res.Code, tc.code, res.Body.String())
+		}
+	}
+}
+
+// A follow-up reuses the referenced task's worktree and session. A peer that is
+// refused a read of that task must be refused the follow-up too, or it can read
+// another peer's uncommitted work through the returned diff/bundle.
+func TestFollowupRejectsTaskOwnedByAnotherPeer(t *testing.T) {
+	root := t.TempDir()
+	run := &countingRunner{}
+	server := newTestServer(t, root, run)
+
+	createBody := `{
+		"task_id":"tsk_victim",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	createReq.RemoteAddr = "100.64.0.1:12345"
+	createRes := httptest.NewRecorder()
+	server.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", createRes.Code, createRes.Body.String())
+	}
+	waitForTerminalTask(t, server, "tsk_victim")
+	before := run.calls
+
+	server.Identity = fakeIdentity{nodeID: "node-win", nodeName: "windows-vm"}
+	server.Config.Policy.AllowedPeers = append(server.Config.Policy.AllowedPeers, "windows-vm")
+	server.Policy = policy.New(server.Config)
+
+	followupBody := `{
+		"task_id":"tsk_attacker",
+		"origin_node_id":"windows-vm",
+		"origin_session_id":"session-attacker",
+		"prompt":"continue",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"followup_task_id":"tsk_victim",
+		"provenance":{"origin_node_id":"windows-vm","origin_session_id":"session-attacker"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(followupBody))
+	req.RemoteAddr = "100.64.0.3:12345"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("cross-peer followup = %d, want 403 (%s)", res.Code, res.Body.String())
+	}
+	time.Sleep(50 * time.Millisecond)
+	if run.calls != before {
+		t.Fatalf("runner ran for a denied follow-up (%d -> %d)", before, run.calls)
+	}
+
+	// A resume id that is not bound to an accessible follow-up is refused too.
+	resumeBody := `{
+		"task_id":"tsk_attacker2",
+		"origin_node_id":"windows-vm",
+		"origin_session_id":"session-attacker",
+		"prompt":"continue",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"resume_session_id":"11111111-2222-3333-4444-555555555555",
+		"provenance":{"origin_node_id":"windows-vm","origin_session_id":"session-attacker"}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(resumeBody))
+	req.RemoteAddr = "100.64.0.3:12345"
+	res = httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("unowned resume_session_id = %d, want 403 (%s)", res.Code, res.Body.String())
+	}
+}
+
+func TestFollowupAllowsOriginOwner(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t, root, immediateRunner{})
+	createBody := `{
+		"task_id":"tsk_victim",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"hello",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(createBody))
+	req.RemoteAddr = "100.64.0.1:12345"
+	res := httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, body = %s", res.Code, res.Body.String())
+	}
+	waitForTerminalTask(t, server, "tsk_victim")
+
+	followupBody := `{
+		"task_id":"tsk_followup",
+		"origin_node_id":"mac-studio",
+		"origin_session_id":"session-1",
+		"prompt":"continue",
+		"cwd":` + strconv.Quote(root) + `,
+		"runner":"fake",
+		"profile":"dev",
+		"followup_task_id":"tsk_victim",
+		"provenance":{"origin_node_id":"mac-studio","origin_session_id":"session-1"}
+	}`
+	req = httptest.NewRequest(http.MethodPost, "/v1/tasks", strings.NewReader(followupBody))
+	req.RemoteAddr = "100.64.0.1:12345"
+	res = httptest.NewRecorder()
+	server.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusAccepted {
+		t.Fatalf("owner followup = %d, want 202 (%s)", res.Code, res.Body.String())
 	}
 }

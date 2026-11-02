@@ -2,6 +2,7 @@ package profile
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -22,10 +23,16 @@ func Generate(name string, opts GenerateOptions) (Template, error) {
 	if strings.TrimSpace(opts.Name) != "" {
 		tmpl.Name = strings.TrimSpace(opts.Name)
 	}
+	if err := ValidateTOMLKeyName("profile", tmpl.Name); err != nil {
+		return Template{}, err
+	}
 	if strings.TrimSpace(opts.Runner) != "" {
 		tmpl.Runner = strings.TrimSpace(opts.Runner)
 	} else if tmpl.Runner == "" {
 		tmpl.Runner = "claude-code"
+	}
+	if err := ValidateTOMLKeyName("runner", tmpl.Runner); err != nil {
+		return Template{}, err
 	}
 	if len(opts.Capabilities) > 0 {
 		tmpl.Capabilities = NormalizeCapabilities(opts.Capabilities, nil)
@@ -49,6 +56,22 @@ func RenderTOML(tmpl Template) string {
 	b.WriteString("\n")
 	b.WriteString(RenderRunnerTOML(tmpl))
 	return b.String()
+}
+
+// tomlKeyName is the bare-key grammar a generated profile or runner name must
+// satisfy. Names are interpolated verbatim into TOML table headers
+// (`[profiles.<name>]`), so a name containing whitespace, quotes, brackets, a
+// newline or a dot can append or replace arbitrary tables in the operator's
+// config. Reject rather than escape: TOML has no quoted v1 table headers.
+var tomlKeyName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+
+// ValidateTOMLKeyName reports whether name is safe to render as a TOML bare key
+// in a profile/runner table header.
+func ValidateTOMLKeyName(kind, name string) error {
+	if !tomlKeyName.MatchString(name) {
+		return fmt.Errorf("invalid %s name %q: use 1-64 letters, digits, '-' or '_' (no '.', spaces, quotes, brackets or newlines)", kind, name)
+	}
+	return nil
 }
 
 func RenderProfileTOML(tmpl Template) string {

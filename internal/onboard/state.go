@@ -488,6 +488,11 @@ func AddPeerLink(configPath string, peer PeerCandidate, stableID string, grantIn
 	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
 		return "", err
 	}
+	// Config may carry the gateway host token and os.WriteFile will not tighten a
+	// pre-existing 0644 file.
+	if err := os.Chmod(configPath, 0o600); err != nil {
+		return "", err
+	}
 	return name, nil
 }
 

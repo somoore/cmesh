@@ -94,7 +94,10 @@ func (r *Runner) Run(req runner.RunRequest) (runner.Result, error) {
 	if err := validatePolicy(prof.ShellPolicy, argv); err != nil {
 		return shellResult(kind, argv, time.Time{}, err), err
 	}
-	execArgv := shellExecArgv(argv)
+	execArgv, err := shellExecArgv(argv)
+	if err != nil {
+		return shellResult(kind, argv, time.Time{}, err), err
+	}
 	limit := req.OutputLimit
 	if prof.MaxOutputBytes > 0 && (limit <= 0 || prof.MaxOutputBytes < limit) {
 		limit = prof.MaxOutputBytes
@@ -227,22 +230,74 @@ func validateCommandArgs(goos string, argv []string) error {
 	}
 }
 
+// validateWindowsToken rejects a token that PowerShell would interpret as more
+// than one argument once the argv is rejoined into `-Command` script text.
+//
+// shellExecArgv hands the whole argv to `powershell -Command`, so every token —
+// flag or value — becomes script source. A newline, `&`, `;`, `|`, `$`,
+// backtick, quote, bracket or redirect in a value starts a new statement or
+// breaks out of the argument position. Spaces, wildcards, dots and hyphens stay
+// legal: `-Name "Print Spooler"` and `-Name SQL*` are legitimate diagnostics.
+func validateWindowsToken(token string) error {
+	for _, r := range token {
+		switch r {
+		case '&', '|', ';', '$', '`', '\n', '\r', '"', '\'', '(', ')', '{', '}', '<', '>', 0:
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("windows argument %q contains a shell metacharacter or control character", token))
+		}
+	}
+	if strings.TrimSpace(token) == "" && token != "" {
+		return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("windows argument is whitespace only"))
+	}
+	return nil
+}
+
 func validateWindowsArgs(cmd string, args []string) error {
-	switch cmd {
-	case "get-service":
-		return allowArgs(cmd, args, []string{"-name", "-displayname", "-dependentservices", "-requiredservices"})
-	case "get-process":
-		return allowArgs(cmd, args, []string{"-name", "-id"})
-	case "get-psdrive":
-		return allowArgs(cmd, args, []string{"-name", "-psprovider"})
-	case "get-eventlog":
-		if err := allowArgs(cmd, args, []string{"-logname", "-newest", "-source", "-entrytype"}); err != nil {
+	// Validate every token, not only the ones that look like flags: `allowArgs`
+	// historically skipped positional values, which is exactly how a value such
+	// as "x\nStart-Process calc" reached the -Command builder.
+	for _, arg := range args {
+		if err := validateWindowsToken(arg); err != nil {
 			return err
 		}
-		return requireBoundedNewest(cmd, args, "-newest", 200)
+	}
+	var err error
+	switch cmd {
+	case "get-service":
+		err = allowArgs(cmd, args, []string{"-name", "-displayname", "-dependentservices", "-requiredservices"})
+	case "get-process":
+		err = allowArgs(cmd, args, []string{"-name", "-id"})
+	case "get-psdrive":
+		err = allowArgs(cmd, args, []string{"-name", "-psprovider"})
+	case "get-eventlog":
+		if err = allowArgs(cmd, args, []string{"-logname", "-newest", "-source", "-entrytype"}); err == nil {
+			err = requireBoundedNewest(cmd, args, "-newest", 200)
+		}
 	default:
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	return validateWindowsPositions(cmd, args)
+}
+
+// validateWindowsPositions enforces the shape `[-Flag [value]]...` for the
+// allowlisted cmdlets. A bare second positional token is how an attacker smuggles
+// a cmdlet name after a legitimate value; requiring every value to belong to a
+// flag keeps that out without a per-cmdlet grammar table.
+func validateWindowsPositions(cmd string, args []string) error {
+	expectValue := false
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			expectValue = !strings.Contains(arg, "=")
+			continue
+		}
+		if !expectValue {
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s argument %q is not a value for a flag", cmd, arg))
+		}
+		expectValue = false
+	}
+	return nil
 }
 
 func validateLinuxArgs(cmd string, args []string) error {
@@ -293,6 +348,9 @@ func allowArgs(cmd string, args, allowedFlags []string) error {
 	for _, flag := range allowedFlags {
 		allowed[strings.ToLower(flag)] = struct{}{}
 	}
+	// A repeated flag lets a later value override a bound the earlier one
+	// established (`-Newest 1 -Newest 1000000`), so reject duplicates outright.
+	seen := map[string]struct{}{}
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "-") {
 			continue
@@ -304,6 +362,10 @@ func allowArgs(cmd string, args, allowedFlags []string) error {
 		if _, ok := allowed[name]; !ok {
 			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s argument %q is not allowed", cmd, arg))
 		}
+		if _, dup := seen[name]; dup {
+			return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s argument %q is repeated", cmd, name))
+		}
+		seen[name] = struct{}{}
 	}
 	return nil
 }
@@ -349,13 +411,22 @@ func requireBoundedNewest(cmd string, args []string, flag string, max int) error
 	return runner.E(runner.ErrProfileDenied, "shell policy", fmt.Errorf("%s requires bounded %s 1-%d", cmd, flag, max))
 }
 
-func shellExecArgv(argv []string) []string {
+// shellExecArgv builds the process argv. On Windows the allowlisted cmdlets are
+// run through `powershell -Command`, which re-joins every element into one
+// script string; re-check the tokens here as well as in validatePolicy so no
+// future caller can hand unvalidated data to the -Command builder.
+func shellExecArgv(argv []string) ([]string, error) {
 	if runtime.GOOS == "windows" && len(argv) > 0 && strings.HasPrefix(strings.ToLower(argv[0]), "get-") {
+		for _, arg := range argv {
+			if err := validateWindowsToken(arg); err != nil {
+				return nil, err
+			}
+		}
 		out := []string{"powershell", "-NoProfile", "-Command"}
 		out = append(out, argv...)
-		return out
+		return out, nil
 	}
-	return argv
+	return argv, nil
 }
 
 func allowedCommandsForOS(policy ShellPolicy, goos string) []string {

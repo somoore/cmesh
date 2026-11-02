@@ -1,6 +1,7 @@
 package setupinstall
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,6 +52,100 @@ func ClaudeHTTPAddArgs(serverName, gatewayURL, hostToken string) []string {
 		args = append(args, "--header", "X-Cmesh-Host-Token: "+strings.TrimSpace(hostToken))
 	}
 	return args
+}
+
+// ClaudeConfigPath is Claude Code's user-scope config file. User-scope MCP
+// servers live under its top-level mcpServers object.
+func ClaudeConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".claude.json"
+	}
+	return filepath.Join(home, ".claude.json")
+}
+
+// WriteClaudeHTTPConfig registers the cmesh HTTP MCP server in Claude Code's
+// user-scope config without ever putting the host token in a process argument
+// list. `claude mcp add --header "...token..."` exposed the long-lived token to
+// `ps`/`/proc/<pid>/cmdline`; this writes the same entry the CLI would persist,
+// at 0600, and leaves every other key and server untouched.
+func WriteClaudeHTTPConfig(path, serverName, gatewayURL, hostToken string) error {
+	if path == "" {
+		path = ClaudeConfigPath()
+	}
+	if serverName == "" {
+		serverName = ServerName
+	}
+	root := map[string]json.RawMessage{}
+	if existing, err := os.ReadFile(path); err == nil {
+		if strings.TrimSpace(string(existing)) != "" {
+			if err := json.Unmarshal(existing, &root); err != nil {
+				return fmt.Errorf("%s is not a JSON object: %w", path, err)
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	servers := map[string]json.RawMessage{}
+	if raw, ok := root["mcpServers"]; ok && len(raw) > 0 {
+		if err := json.Unmarshal(raw, &servers); err != nil {
+			return fmt.Errorf("%s: mcpServers is not an object: %w", path, err)
+		}
+	}
+	entry := map[string]any{"type": "http", "url": gatewayURL}
+	if token := strings.TrimSpace(hostToken); token != "" {
+		entry["headers"] = map[string]string{"X-Cmesh-Host-Token": token}
+	}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	servers[serverName] = encoded
+	serversJSON, err := json.Marshal(servers)
+	if err != nil {
+		return err
+	}
+	root["mcpServers"] = serversJSON
+	body, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeJSON0600(path, append(body, '\n'))
+}
+
+// writeJSON0600 replaces path atomically with a private file, so a crash cannot
+// leave a truncated harness config and a pre-existing mode cannot leak it.
+func writeJSON0600(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".cmesh-claude-*.json")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
 }
 
 func RedactClaudeHTTPAddArgs(args []string) []string {

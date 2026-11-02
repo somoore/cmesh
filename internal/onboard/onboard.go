@@ -365,7 +365,12 @@ func WriteConfig(path, body string, overwrite bool) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(body), 0o600)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return err
+	}
+	// The config holds the gateway host token; os.WriteFile only applies 0600 on
+	// create, so tighten a pre-existing file too.
+	return os.Chmod(path, 0o600)
 }
 
 func ValidateConfig(path string) error {

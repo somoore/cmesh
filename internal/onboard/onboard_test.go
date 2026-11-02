@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -566,5 +567,30 @@ func TestDetectRunnerResolvesCommandBinary(t *testing.T) {
 	}
 	if !filepath.IsAbs(status.Command[0]) {
 		t.Fatalf("command[0] = %q, want absolute path", status.Command[0])
+	}
+}
+
+// The generated config carries the gateway host token; WriteConfig must tighten
+// a pre-existing permissive file rather than trusting os.WriteFile's perm.
+func TestWriteConfigTightensExistingMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[node]\nid = \"n\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteConfig(path, "[node]\nid = \"n\"\nname = \"n\"\n", true); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o, want 600", got)
 	}
 }

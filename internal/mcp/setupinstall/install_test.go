@@ -1,6 +1,7 @@
 package setupinstall
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -378,5 +379,63 @@ value = 42`
 	}
 	if !strings.Contains(got, "[some_other_section]") || !strings.Contains(got, "value = 42") {
 		t.Fatalf("[some_other_section] was destroyed:\n%s", got)
+	}
+}
+
+// The user-scope Claude config is a whole-file JSON document. Registering cmesh
+// must preserve unrelated keys and servers, and the mode must be 0600 because the
+// entry carries the gateway host token.
+func TestWriteClaudeHTTPConfigPreservesOtherKeysAndTightensMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude.json")
+	existing := `{
+  "numStartups": 3,
+  "mcpServers": {
+    "other": {"type": "stdio", "command": "other"}
+  }
+}`
+	if err := os.WriteFile(path, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteClaudeHTTPConfig(path, ServerName, "http://127.0.0.1:7777/mcp", "host-token"); err != nil {
+		t.Fatalf("WriteClaudeHTTPConfig: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		NumStartups int `json:"numStartups"`
+		MCPServers  map[string]struct {
+			Type    string            `json:"type"`
+			URL     string            `json:"url"`
+			Headers map[string]string `json:"headers"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(body, &root); err != nil {
+		t.Fatalf("written config is not valid JSON: %v\n%s", err, body)
+	}
+	if root.NumStartups != 3 {
+		t.Fatalf("unrelated key lost: %+v", root)
+	}
+	if _, ok := root.MCPServers["other"]; !ok {
+		t.Fatalf("unrelated MCP server lost: %+v", root.MCPServers)
+	}
+	cmesh, ok := root.MCPServers[ServerName]
+	if !ok || cmesh.Type != "http" || cmesh.URL != "http://127.0.0.1:7777/mcp" || cmesh.Headers["X-Cmesh-Host-Token"] != "host-token" {
+		t.Fatalf("cmesh entry = %+v", cmesh)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o, want 600", got)
 	}
 }

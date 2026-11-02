@@ -141,3 +141,27 @@ jobs:
       - name: Skip markdown-only change
         if: steps.changes.outputs.markdown_only == 'true'
         run: echo "Skipping Go tests after supply-chain policy passed for markdown-only change"
+
+  # The Windows half of the shell runner (powershell -Command re-joining the
+  # allowlisted cmdlet argv) and every _windows.go path only execute here. Before
+  # this job existed, the suite skipped exactly those tests on Linux and macOS.
+  test-windows:
+    name: test (windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1

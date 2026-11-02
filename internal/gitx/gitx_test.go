@@ -144,3 +144,33 @@ func TestCommitRecordsHandoffTrailer(t *testing.T) {
 		}
 	}
 }
+
+// branch is concatenated into a refspec, so an option-shaped value such as
+// "--upload-pack=sh -c '...'" must be refused before git can parse it as an
+// option. The bundle-remote path ignores --upload-pack on current git, but the
+// primitive becomes RCE the day a caller passes a local-repository remote.
+func TestFetchBundleRejectsOptionShapedRefs(t *testing.T) {
+	repo, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := []struct{ branch, localRef string }{
+		{"--upload-pack=sh -c 'id' #", "refs/cmesh/handoff/tsk_x"},
+		{"-x", "refs/cmesh/handoff/tsk_x"},
+		{"a..b", "refs/cmesh/handoff/tsk_x"},
+		{"a b", "refs/cmesh/handoff/tsk_x"},
+		{"cmesh/tsk_abc/fix", "--output=/tmp/pwn"},
+		{"cmesh/tsk_abc/fix", "/refs/x"},
+		{"cmesh/tsk_abc/fix.lock", "refs/cmesh/handoff/tsk_x"},
+	}
+	for _, tc := range bad {
+		if err := repo.FetchBundle(context.Background(), "seed.bundle", tc.branch, tc.localRef); err == nil {
+			t.Errorf("FetchBundle(%q, %q) accepted an unsafe ref", tc.branch, tc.localRef)
+		}
+	}
+	for _, branch := range []string{"cmesh/tsk_abc/fix", "fix/one-2", "refs/heads/x"} {
+		if !validFetchRef(branch) {
+			t.Errorf("validFetchRef(%q) = false", branch)
+		}
+	}
+}

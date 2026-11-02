@@ -169,6 +169,41 @@ function Get-LatestVersion {
     return $null
 }
 
+# Verifies a downloaded archive against the release's published checksums.txt.
+# Fails closed on a mismatch; only warns when the release does not publish the
+# file, so older releases and mirrors keep installing.
+function Test-ReleaseChecksum {
+    param(
+        [Parameter(Mandatory)][string]$ArchivePath,
+        [Parameter(Mandatory)][string]$Asset,
+        [Parameter(Mandatory)][string]$BaseUrl
+    )
+    $sums = Join-Path (Split-Path -Parent $ArchivePath) 'checksums.txt'
+    try {
+        Invoke-WebRequest -Uri "$BaseUrl/checksums.txt" -OutFile $sums -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Info "warning: release has no checksums.txt; skipping integrity verification"
+        return
+    }
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $sums) {
+        $fields = $line -split '\s+'
+        if ($fields.Count -ge 2) {
+            $name = $fields[1] -replace '^\./', ''
+            if ($name -eq $Asset) { $expected = $fields[0].ToLowerInvariant(); break }
+        }
+    }
+    if (-not $expected) {
+        Info "warning: checksums.txt has no entry for $Asset; skipping integrity verification"
+        return
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArchivePath).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        Die "checksum mismatch for $Asset (expected $expected, got $actual); refusing to install"
+    }
+    Info "verified SHA-256 checksum for $Asset"
+}
+
 # Downloads a prebuilt cmesh from a GitHub release. Release asset naming matches
 # install.sh: cmesh_windows_<arch>.tar.gz.
 function Install-FromRelease {
@@ -193,6 +228,7 @@ function Install-FromRelease {
         } catch {
             Die "download failed: $url"
         }
+        Test-ReleaseChecksum -ArchivePath $archivePath -Asset $asset -BaseUrl "https://github.com/$($env:CMESH_REPO)/releases/download/$version"
         & tar -xzf $archivePath -C $tmpdir
         if ($LASTEXITCODE -ne 0) { Die "failed to extract $asset" }
         $bin = Join-Path $tmpdir 'cmesh.exe'

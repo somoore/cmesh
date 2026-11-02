@@ -107,6 +107,65 @@ download() {
   fi
 }
 
+# fetch is download without the fatal error: callers that can continue without
+# the artefact (checksums.txt) use it to distinguish "missing" from "network
+# broke", and never turn an older release into a failed install.
+fetch() {
+  url=$1
+  out=$2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$out"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$out" "$url"
+  else
+    return 1
+  fi
+}
+
+sha256_of() {
+  file=$1
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | awk '{print $NF}'
+  else
+    return 1
+  fi
+}
+
+# verify_release_checksum compares the downloaded archive against the release's
+# published checksums.txt. It fails closed on a mismatch (the one case where
+# installing would run attacker-influenced bytes) and only warns when the release
+# does not publish the file, so older releases and mirrors keep working.
+verify_release_checksum() {
+  archive=$1
+  asset=$2
+  base=$3
+  sums="$tmpdir/checksums.txt"
+  if ! fetch "$base/checksums.txt" "$sums" 2>/dev/null; then
+    info "warning: release has no checksums.txt; skipping integrity verification"
+    return 0
+  fi
+  expected=$(awk -v name="$asset" '
+    {
+      candidate = $2
+      sub(/^\.\//, "", candidate)
+      if (candidate == name) { print $1; exit }
+    }
+  ' "$sums")
+  if [ -z "$expected" ]; then
+    info "warning: checksums.txt has no entry for $asset; skipping integrity verification"
+    return 0
+  fi
+  actual=$(sha256_of "$archive") || die "no SHA-256 tool available to verify $asset"
+  if [ "$actual" != "$expected" ]; then
+    die "checksum mismatch for $asset (expected $expected, got $actual); refusing to install"
+  fi
+  info "verified SHA-256 checksum for $asset"
+}
+
 # latest_version prints the newest release tag for $repo, or returns non-zero on
 # failure. It must NOT call die: it runs in a $(...) subshell, so die would only
 # exit the subshell and leave an EMPTY version that builds a broken
@@ -166,6 +225,7 @@ install_from_release() {
   trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
   info "downloading $url"
   download "$url" "$tmpdir/$asset" || die "download failed: $url"
+  verify_release_checksum "$tmpdir/$asset" "$asset" "https://github.com/$CMESH_REPO/releases/download/$version"
   tar -xzf "$tmpdir/$asset" -C "$tmpdir"
   bin="$tmpdir/cmesh"
   if [ "$os" = "windows" ]; then

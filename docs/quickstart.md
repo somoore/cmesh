@@ -41,6 +41,8 @@ The installer detects your OS and architecture, then downloads the matching GitH
 curl -fsSL https://raw.githubusercontent.com/somoore/cmesh/main/scripts/install.sh | sh
 ```
 
+The release installer downloads the published `checksums.txt` and verifies the archive's SHA-256 before extracting it; a mismatch aborts without installing. A release or mirror without `checksums.txt` warns and continues, so older releases still install.
+
 The installer puts `cmesh` on your PATH, then shows a short picker of the AI coding agents it detects (Claude Code, Codex). Choose where to register cmesh, confirm with **Y**, and it upserts a stdio MCP entry that launches `cmesh mcp --stdio`. That setup MCP works before any daemon or config exists.
 
 To install a specific release instead of the newest published release:

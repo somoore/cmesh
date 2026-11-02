@@ -262,7 +262,7 @@ func (g *Gateway) handleRPC(ctx context.Context, req rpcRequest) (rpcResponse, b
 			"serverInfo": map[string]any{"name": "cmesh", "version": "0.1.0"},
 		}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": mcpTools()}
+		resp.Result = map[string]any{"tools": g.toolsForCaller(ctx)}
 	case "tools/call":
 		var params struct {
 			Name      string          `json:"name"`
@@ -284,7 +284,38 @@ func (g *Gateway) handleRPC(ctx context.Context, req rpcRequest) (rpcResponse, b
 	return resp, true
 }
 
+// taskTokenAllowedTools is the deny-by-default set of gateway tools a caller
+// holding a per-task token may invoke. A task token is the credential cmesh
+// injects into an untrusted worker runner, so it must not reach host state:
+// config/peer/lease mutation, harness registration, or arbitrary-path probing.
+// What remains is the task channel, owned-task reads, and the deliberate
+// subdelegation surface (delegate/query_peer/inspect_peer stay gated by outbound
+// policy and allow_subdelegation).
+var taskTokenAllowedTools = map[string]struct{}{
+	"task_post":       {},
+	"task_ask":        {},
+	"task_status":     {},
+	"task_result":     {},
+	"task_transcript": {},
+	"task_events":     {},
+	"task_artifact":   {},
+	"cancel":          {},
+	"list_tasks":      {},
+	"delegate":        {},
+	"query_peer":      {},
+	"inspect_peer":    {},
+}
+
+// taskTokenToolAllowed reports whether a per-task token may call name.
+func taskTokenToolAllowed(name string) bool {
+	_, ok := taskTokenAllowedTools[name]
+	return ok
+}
+
 func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessage) (ToolResponse, error) {
+	if _, scoped := taskTokenSession(ctx); scoped && !taskTokenToolAllowed(name) {
+		return toolFailure(task.ErrorPeerUnauthorized, "tool "+name+" requires the gateway host token; a worker task token may only use the task channel, owned-task reads, and subdelegation")
+	}
 	switch name {
 	case "doctor":
 		status := onboard.Detect(ctx, g.configPath(), false)
@@ -637,6 +668,23 @@ func (g *Gateway) callTool(ctx context.Context, name string, args json.RawMessag
 	default:
 		return toolFailure(task.ErrorWorkerFailed, "unknown tool "+name)
 	}
+}
+
+// toolsForCaller lists only the tools the caller's credential may invoke, so a
+// task token does not see host-mutating tools it would be refused at call time.
+func (g *Gateway) toolsForCaller(ctx context.Context) []map[string]any {
+	tools := mcpTools()
+	if _, scoped := taskTokenSession(ctx); !scoped {
+		return tools
+	}
+	filtered := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if taskTokenToolAllowed(name) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
 }
 
 func (g *Gateway) ListenAndServe(ctx context.Context) error {

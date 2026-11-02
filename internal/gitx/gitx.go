@@ -260,7 +260,35 @@ func (r *Repository) FetchBundle(ctx context.Context, bundlePath, branch, localR
 	if strings.TrimSpace(localRef) == "" {
 		return errors.New("empty local ref")
 	}
+	// branch is concatenated into a refspec. A leading '-' makes git parse it as
+	// an option (--upload-pack=...), so validate both refs before git sees them.
+	if !validFetchRef(branch) {
+		return fmt.Errorf("invalid branch %q", branch)
+	}
+	if !validFetchRef(localRef) {
+		return fmt.Errorf("invalid local ref %q", localRef)
+	}
 	return r.run(ctx, "fetch", bundlePath, branch+":"+localRef)
+}
+
+// validFetchRef accepts a conservative git ref-name shape: letters, digits,
+// '.', '_', '-', '/', no leading '-', no '..', no leading/trailing slash and no
+// '.lock' suffix. This is intentionally narrower than git's own grammar.
+func validFetchRef(value string) bool {
+	if value == "" || len(value) > 200 || strings.HasPrefix(value, "-") ||
+		strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
+		strings.Contains(value, "..") || strings.HasSuffix(value, ".lock") {
+		return false
+	}
+	for _, r := range value {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '-' || r == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (r *Repository) Head(ctx context.Context) (string, error) {
