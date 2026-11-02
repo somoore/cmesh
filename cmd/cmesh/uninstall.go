@@ -294,7 +294,9 @@ func dataDirDeletable(resolved, home, configRoot string) error {
 		clean = filepath.Clean(real)
 	}
 
-	if clean == string(filepath.Separator) || clean == "." {
+	if clean == "." || filepath.Dir(clean) == clean {
+		// filepath.Dir(x)==x identifies a filesystem root on every platform
+		// ("/" on Unix, `C:\` or `\\server\share` on Windows).
 		return errors.New("refuses to delete filesystem root")
 	}
 	for _, forbidden := range []string{home, configRoot} {

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -698,7 +699,13 @@ func TestCreateTaskPassesNormalizedLeasedCWDToRunner(t *testing.T) {
 	}
 	select {
 	case req := <-run.requests:
-		if req.CWD != normalizedRoot {
+		// Windows paths are case-insensitive; the runner may echo the on-disk
+		// spelling rather than the normalizer's.
+		sameCWD := req.CWD == normalizedRoot
+		if runtime.GOOS == "windows" {
+			sameCWD = strings.EqualFold(req.CWD, normalizedRoot)
+		}
+		if !sameCWD {
 			t.Fatalf("runner cwd = %q, want normalized approved cwd %q", req.CWD, normalizedRoot)
 		}
 	case <-time.After(time.Second):
@@ -1507,7 +1514,23 @@ func TestTaskEventsPagesForOwnerAndEnforcesSchema(t *testing.T) {
 
 	// has_more must mean "the page was truncated", not "the page was full": a
 	// page that exactly drains the tail has nothing more behind it.
-	exact := get("/v1/tasks/tsk_events/events?limit="+strconv.Itoa(len(first.Events)), "")
+	// The terminal state and the final audit event are written in separate
+	// transactions, so wait for the stream to stop growing before measuring
+	// pagination semantics.
+	total := len(first.Events)
+	for i := 0; i < 200; i++ {
+		r := get("/v1/tasks/tsk_events/events?limit=500", "")
+		var probe schema.TaskEventsResponse
+		if err := json.Unmarshal(r.Body.Bytes(), &probe); err != nil {
+			t.Fatalf("decode event probe: %v", err)
+		}
+		if len(probe.Events) == total {
+			break
+		}
+		total = len(probe.Events)
+		time.Sleep(10 * time.Millisecond)
+	}
+	exact := get("/v1/tasks/tsk_events/events?limit="+strconv.Itoa(total), "")
 	if exact.Code != http.StatusOK {
 		t.Fatalf("exact-page code = %d, body = %s", exact.Code, exact.Body.String())
 	}
